@@ -115,7 +115,18 @@ async function runAdversarialLoop(
   const last = rounds[rounds.length - 1];
   return synthesizeResult({
     ok: false,
-    text: `❌ Adversarial REJECTED after ${MAX_ROUNDS} rounds. Last verdict: ${last?.verdict.status}\n\n${last?.verdict.findings}\n\nHalt the workflow and ask the user for guidance.`,
+    text: [
+      `❌ Adversarial REJECTED after ${MAX_ROUNDS} rounds. Last verdict: ${last?.verdict.status}`,
+      "",
+      last?.verdict.findings ?? "",
+      "",
+      "Surface the following options to the user verbatim and wait for their choice — do not pick on their behalf:",
+      "",
+      "  (a) Authorise another adversarial_loop pass (3 more rounds against the current diff).",
+      "  (b) Accept the current state and proceed to @ops commit. Record the override in vipune.",
+      "  (c) Abandon and rework the approach — return to issue scoping or developer redesign.",
+      "  (d) Take over manually — user steps in to address findings directly.",
+    ].join("\n"),
     ms: Date.now() - start,
     usage,
     transcriptPath: lastTranscript,

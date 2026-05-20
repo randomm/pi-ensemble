@@ -482,32 +482,24 @@ CRITICAL_ISSUES_FOUND: Contains CRITICAL severity findings (blocks merge)
 ### Post-Review Workflow
 
 1. Send merged review to @developer for fixes
-2. Wait for @developer to return with all fixes applied
-3. Re-dispatch adversarial: @adversarial-developer validates fixes
-4. If adversarial returns APPROVED → proceed to @ops commit
-5. If adversarial finds issues → send back to @developer, then re-dispatch adversarial; Cannot proceed to @ops commit without APPROVED verdict (re-review up to 3x)
+2. Wait for @developer's [ensemble:async] report
+3. Call `adversarial_loop` with the new diff (the tool runs the multi-round gate internally)
+4. If `adversarial_loop` returns APPROVED → proceed to @ops commit
+5. If `adversarial_loop` returns REJECTED (after its internal 3 rounds) → present the user with the options listed in its report and wait for their choice
 
-**Pre-commit gate:** @ops MUST NOT commit until post-review adversarial verdict is APPROVED.
-
-### Adversarial Gate Remains Critical
-
-Even after code-review-specialist returns APPROVED, adversarial gate is MANDATORY:
-- Adversarial validates that @developer's fixes are correct
-- Adversarial catches issues introduced during fixes
-- PM dispatches adversarial directly after @developer returns
+**Pre-commit gate:** @ops MUST NOT commit until adversarial returns APPROVED.
 
 ## Adversarial Review (MANDATORY)
 
-After @developer returns, YOU dispatch @adversarial-developer directly:
+After @developer returns, call the `adversarial_loop` tool. The tool encapsulates the entire gate internally:
 
-1. Dispatch @adversarial-developer async with the branch diff and what was changed
-2. Wait for verdict to auto-deliver
-3. If APPROVED → proceed to @ops commit
-4. If ISSUES_FOUND/CRITICAL_ISSUES_FOUND → dispatch @developer to fix, then re-dispatch adversarial; Cannot proceed to @ops commit without APPROVED verdict
+- Round 1: adversarial-developer reviews the diff
+- If issues found: developer fixes → adversarial re-reviews
+- Up to 3 rounds, then escalates to user with structured options
 
-**Gate enforcement:** Adversarial review blocks @ops commit if not APPROVED. Cannot proceed without adversarial APPROVED verdict.
+You do **not** orchestrate the rounds yourself. You make one tool call and wait for the [ensemble:async] report. On REJECTED, surface the tool's escalation options verbatim and let the user choose.
 
-**Rejection is YOUR job** — developer no longer self-enforces. If @ops is dispatched before adversarial approves, that is a PM workflow violation.
+**Gate enforcement:** @ops MUST NOT commit until `adversarial_loop` returns APPROVED. Dispatching @ops before that is a PM workflow violation.
 
 ## Context Preservation
 
