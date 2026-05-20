@@ -243,29 +243,29 @@ Your context window is precious. Subagent context is cheap. See `modules/core/to
 ### Concurrent Task Limit
 Maximum **10 concurrent tasks** per session.
 
-### Sync vs Async Task Mode
+### Async Dispatch Protocol (How Every Dispatch Works)
 
-**ALWAYS use async. Sync is a last resort.**
+**Every dispatch tool is fire-and-forget.** `dispatch_specialist`, `dispatch_parallel`, `adversarial_loop`, and `dispatch_lens_review` return a `{ jobId }` handle immediately and do NOT block. The subagent's final report arrives later as a **user message starting with `[ensemble:async]`**.
 
-Every `sync: true` call does two things: it blocks your context until completion AND it prevents you from responding to the user. While you are blocked in sync, the user sees nothing — no updates, no progress, no ability to course-correct. This kills the interactive flow.
+**Mandatory pattern:**
 
-Default async lets you launch up to 10 concurrent tasks, continue orchestrating, and keep the user informed while work happens in the background.
+1. Call the dispatch tool. It returns a job handle in < 100ms.
+2. If you have other parallel work (additional dispatches, vipune searches, gh queries you can do yourself), do it now.
+3. Otherwise, **end your turn with a one-line summary** ("Dispatched developer for task X; awaiting report."). The user can `/steer`, ask questions, or redirect while children run.
+4. When the `[ensemble:async]` message arrives, react to it: synthesize, dispatch the next step, or surface the result.
 
-| Mode | When to Use | Example |
-|------|-------------|---------|
-| **Async** (default, always) | Everything — research, implementation, exploration, ops | "Dispatched 3 tasks, results incoming" |
-| **Sync** (`sync: true`) | Only when the very next line of code literally cannot be written without the result | Fetching a value needed to construct the next task's prompt |
+**Crucially: the report text IS the subagent's final assistant text — the same bytes a sync call would have returned. You never need to (and MUST NEVER) read the transcript file on disk.** Transcripts under `~/.pi/agent/ensemble-runs/` are for the user's `/runs` picker only.
 
-**The only legitimate sync use case:** You need the output of task A to construct the prompt for task B, and you cannot approximate or defer task B. This is rare.
+**Status & cancellation:**
+- `dispatch_status` — list in-flight jobs (jobId, role, elapsed). Always call before declaring a workflow done.
+- `dispatch_kill <jobId>` — abort a running subagent or batch. Use sparingly; let children finish unless they're genuinely obsolete.
 
-**Everything else is async:**
-- Research and exploration → async
-- Implementation → async
-- Code review → async
-- Multiple independent tasks → async (launch in parallel)
-- "I need to verify this worked" → async, then summarize when it arrives
+**Batched dispatches stay batched.** `dispatch_parallel` and `dispatch_lens_review` fire N children but emit **one** consolidated `[ensemble:async]` report when all N finish — not N out-of-order arrivals.
 
-**Rule**: If you catch yourself writing `sync: true`, ask: "Can I tell the user I've dispatched this and update them when it's done?" If yes — use async.
+**Anti-patterns:**
+- ❌ Calling `read_file` on a transcript path — context bloat, invariant violation.
+- ❌ Spinning in a "still waiting?" loop — end your turn, Pi will wake you on report arrival.
+- ❌ Declaring "all done" with open jobs in `dispatch_status`.
 
 ### Dispatch Patterns
 
@@ -282,7 +282,7 @@ Default async lets you launch up to 10 concurrent tasks, continue orchestrating,
 ### Aggressive Cancellation
 
 When new info makes a task obsolete:
-1. `cancel_task` immediately — don't wait
+1. `dispatch_kill <jobId>` immediately — don't wait for the doomed report
 2. Re-dispatch with updated context
 3. Tell user what changed
 

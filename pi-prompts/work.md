@@ -18,6 +18,10 @@ If no issue number provided, ask.
 - **Developer never commits.** Returns with uncommitted changes in the worktree. `ops` commits.
 - **Adversarial gate is mandatory.** Use the `adversarial_loop` tool after developer returns; `ops` does not commit until APPROVED.
 
+## How dispatch works (read once)
+
+All dispatch tools are async: they return a `{ jobId }` handle in < 100ms. The subagent's final report arrives later as a user message starting with `[ensemble:async]`. After dispatching, **end your turn with a one-line summary** unless you have other parallel work — the user can interact freely while children run. React to the `[ensemble:async]` report when it arrives. Never read transcript files under `~/.pi/agent/ensemble-runs/` — those are user-only. Before declaring the workflow done at the end, call `dispatch_status` to confirm no children are still running.
+
 ---
 
 ## Step 1 — Read the issue and project context (parallel)
