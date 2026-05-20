@@ -251,7 +251,7 @@ Maximum **10 concurrent tasks** per session.
 
 1. Call the dispatch tool. It returns a job handle in < 100ms.
 2. If you have other parallel work (additional dispatches, vipune searches, gh queries you can do yourself), do it now.
-3. Otherwise, **end your turn with a one-line summary** ("Dispatched developer for task X; awaiting report."). The user can `/steer`, ask questions, or redirect while children run.
+3. Otherwise, **end your turn with a one-line summary** ("Dispatched developer for task X; awaiting report."). The user is then free to type — questions, redirects, anything — while children run.
 4. When the `[ensemble:async]` message arrives, react to it: synthesize, dispatch the next step, or surface the result.
 
 **Crucially: the report text IS the subagent's final assistant text — the same bytes a sync call would have returned. You never need to (and MUST NEVER) read the transcript file on disk.** Transcripts under `~/.pi/agent/ensemble-runs/` are for the user's `/runs` picker only.

@@ -13,7 +13,7 @@ import type { DispatchResult } from "./types.ts";
  *
  * Why this matters: a synchronous tool call locks the user out of the parent
  * for the full duration of the dispatch (often minutes). Async means the user
- * can `/steer`, ask questions, or redirect while children run.
+ * can interact with the parent at any time while children run in the background.
  *
  * Invariants enforced here (see issue #19):
  *   1. The parent agent ONLY ever sees the child's final assistant text in the
