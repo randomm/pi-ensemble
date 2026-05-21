@@ -96,6 +96,8 @@ interface PiMessage {
   toolResults?: unknown[];
   usage?: PiUsage;
   model?: string;
+  provider?: string;
+  api?: string;
   stopReason?: string;
 }
 interface PiJsonEvent {
@@ -304,11 +306,15 @@ function collapseEvents(
   let turns = 0;
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
   let model: string | undefined;
+  let provider: string | undefined;
+  let api: string | undefined;
 
   for (const msg of messages) {
     if (msg.role !== "assistant") continue;
     turns++;
     if (msg.model && !model) model = msg.model;
+    if (msg.provider && !provider) provider = msg.provider;
+    if (msg.api && !api) api = msg.api;
     if (msg.usage) {
       usage.input += msg.usage.input ?? 0;
       usage.output += msg.usage.output ?? 0;
@@ -335,5 +341,7 @@ function collapseEvents(
     exitCode,
     usage: { ...usage, turns },
     model,
+    provider,
+    api,
   };
 }

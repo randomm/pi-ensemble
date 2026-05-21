@@ -72,9 +72,33 @@ function fmtElapsed(ms: number): string {
   return `${m}m${s.toString().padStart(2, "0")}s`;
 }
 
-function fmtCost(cost: number | undefined): string {
-  if (cost == null || cost === 0) return "";
-  return ` · $${cost.toFixed(4)}`;
+/** "12.3k" / "1.2M" / "456" — bounded to 4-5 chars regardless of input size. */
+function fmtTokens(n: number | undefined): string {
+  if (!n || n <= 0) return "0";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
+/**
+ * "12.3k tokens · cerebras/zai-glm-4.7" — the in-context observables we
+ * actually care about: how much context this run consumed and which model
+ * produced it. Cost is omitted; for users on flat-rate plans (e.g. Cerebras
+ * Coder) it's just noise, and per-token billing users can derive their own
+ * cost from the token count if needed.
+ */
+function fmtUsage(result: {
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  model?: string;
+  provider?: string;
+}): string {
+  const u = result.usage;
+  const totalTokens = u ? u.input + u.output + u.cacheRead + u.cacheWrite : 0;
+  const tokens = totalTokens > 0 ? ` · ${fmtTokens(totalTokens)} tokens` : "";
+  const modelTag = result.model
+    ? ` · ${result.provider ? `${result.provider}/` : ""}${result.model}`
+    : "";
+  return `${tokens}${modelTag}`;
 }
 
 /**
@@ -85,9 +109,8 @@ function fmtCost(cost: number | undefined): string {
 function formatSingleReport(jobId: string, label: string, result: DispatchResult): string {
   const turns = result.usage?.turns ?? 0;
   const elapsed = fmtElapsed(result.ms);
-  const cost = fmtCost(result.usage?.cost);
   const status = result.ok ? "finished" : `FAILED (exit ${result.exitCode ?? "?"})`;
-  const head = `[ensemble:async] Subagent \`${label}\` (job ${jobId}) ${status} — ${turns} turns, ${elapsed}${cost}`;
+  const head = `[ensemble:async] Subagent \`${label}\` (job ${jobId}) ${status} — ${turns} turns, ${elapsed}${fmtUsage(result)}`;
   const body = result.text?.trim() || "(no output)";
   const footer = result.ok
     ? "---\nYou started this async dispatch earlier. Continue the workflow."
@@ -118,22 +141,23 @@ interface BatchReportInput {
 
 function formatBatchReport(input: BatchReportInput): string {
   const ms = Date.now() - input.startedAt;
-  const totalCost = input.members.reduce((acc, m) => {
+  const totalTokens = input.members.reduce((acc, m) => {
     if ("failed" in m.result) return acc;
-    return acc + (m.result.usage?.cost ?? 0);
+    const u = m.result.usage;
+    return acc + (u ? u.input + u.output + u.cacheRead + u.cacheWrite : 0);
   }, 0);
   const okCount = input.members.filter((m) => !("failed" in m.result) && m.result.ok).length;
-  const head = `[ensemble:async] Batch \`${input.batchLabel}\` (batch ${input.batchId}) finished — ${okCount}/${input.members.length} ok, ${fmtElapsed(ms)}${fmtCost(totalCost)}`;
+  const tokenTag = totalTokens > 0 ? ` · ${fmtTokens(totalTokens)} tokens` : "";
+  const head = `[ensemble:async] Batch \`${input.batchLabel}\` (batch ${input.batchId}) finished — ${okCount}/${input.members.length} ok, ${fmtElapsed(ms)}${tokenTag}`;
   const sections = input.members.map((m) => {
     if ("failed" in m.result) {
       return `=== ${m.label} (job ${m.jobId}) — FAILED ===\nerror: ${m.result.error.slice(-200)}`;
     }
     const turns = m.result.usage?.turns ?? 0;
     const elapsed = fmtElapsed(m.result.ms);
-    const cost = fmtCost(m.result.usage?.cost);
     const status = m.result.ok ? "ok" : `fail (exit ${m.result.exitCode ?? "?"})`;
     const body = m.result.text?.trim() || "(no output)";
-    return `=== ${m.label} (job ${m.jobId}) — ${status} · ${turns} turns · ${elapsed}${cost} ===\n${body}`;
+    return `=== ${m.label} (job ${m.jobId}) — ${status} · ${turns} turns · ${elapsed}${fmtUsage(m.result)} ===\n${body}`;
   });
   const footer = "---\nYou started this async batch earlier. Continue the workflow.";
   return `${head}\n\n${sections.join("\n\n")}\n\n${footer}`;
