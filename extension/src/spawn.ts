@@ -324,6 +324,11 @@ function collapseEvents(
     }
     for (const block of msg.content ?? []) {
       if (block.type === "text" && typeof block.text === "string") {
+        // GLM-4.7 (and possibly other models) emits literal {type: "text",
+        // text: "None"} placeholder blocks between tool calls. Skip those —
+        // they pollute the joined text otherwise (e.g. "Setup complete.NoneNoneNoneDone.").
+        const trimmed = block.text.trim();
+        if (trimmed === "None" || trimmed === "null" || trimmed === "undefined") continue;
         textParts.push(block.text);
       } else if (block.type === "toolCall") {
         toolUses.push(block);
@@ -331,7 +336,9 @@ function collapseEvents(
     }
   }
 
-  const text = textParts.join("");
+  // Join with double-newline so distinct text blocks across turns (separated
+  // by tool calls in between) stay visually delimited instead of concatenated.
+  const text = textParts.filter((t) => t.trim()).join("\n\n");
   return {
     role,
     ok: exitCode === 0,
