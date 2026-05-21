@@ -47,6 +47,12 @@ interface PairWatchParams {
   developerModel?: string;
   /** Model override for adversarial. */
   adversarialModel?: string;
+  /** Wall-clock cap in minutes (default 10; max 30). */
+  wallClockMin?: number;
+  /** Cost cap in USD (default $5). */
+  costUsd?: number;
+  /** Max adversarial interrupts (default 10). */
+  maxInterrupts?: number;
 }
 
 export interface PairCaps {
@@ -58,10 +64,14 @@ export interface PairCaps {
 }
 
 const DEFAULT_CAPS: PairCaps = {
-  wallClockMs: 5 * 60_000,
+  // Raised from 5min after first live test: even a 1-file refactor with quality
+  // gates (cargo fmt + clippy + test) easily fills 5min just for the dev work,
+  // leaving no headroom for the adversarial to converge on a verdict.
+  wallClockMs: 10 * 60_000,
   costUsd: 5,
   maxInterrupts: 10,
 };
+const MAX_WALL_CLOCK_MIN = 30;
 
 type Verdict = "APPROVED" | "ESCALATED" | "TIMEOUT" | "CAP_HIT" | "DEV_FINISHED_NO_VERDICT";
 
@@ -86,6 +96,15 @@ export function createSessionState(): SessionState {
   };
 }
 
+function resolveCaps(p: PairWatchParams): PairCaps {
+  const min = Math.max(1, Math.min(MAX_WALL_CLOCK_MIN, p.wallClockMin ?? 10));
+  return {
+    wallClockMs: min * 60_000,
+    costUsd: Math.max(0.5, p.costUsd ?? DEFAULT_CAPS.costUsd),
+    maxInterrupts: Math.max(1, Math.floor(p.maxInterrupts ?? DEFAULT_CAPS.maxInterrupts)),
+  };
+}
+
 export function registerPairWatchTool(pi: ExtensionAPI) {
   pi.registerTool({
     name: "pair_watch",
@@ -104,19 +123,35 @@ export function registerPairWatchTool(pi: ExtensionAPI) {
       adversarialModel: Type.Optional(
         Type.String({ description: "Model override for adversarial." }),
       ),
+      wallClockMin: Type.Optional(
+        Type.Number({
+          description: `Wall-clock cap in minutes (default ${DEFAULT_CAPS.wallClockMs / 60_000}; max ${MAX_WALL_CLOCK_MIN}). Increase for larger tasks; pair-watch budgets are real money, do not set it carelessly.`,
+        }),
+      ),
+      costUsd: Type.Optional(
+        Type.Number({
+          description: `Cost cap in USD across both children (default ${DEFAULT_CAPS.costUsd}).`,
+        }),
+      ),
+      maxInterrupts: Type.Optional(
+        Type.Number({
+          description: `Max adversarial interrupts before session ends with CAP_HIT (default ${DEFAULT_CAPS.maxInterrupts}).`,
+        }),
+      ),
     }),
     async execute(_id, raw) {
       const params = raw as PairWatchParams;
+      const caps = resolveCaps(params);
       const { jobId } = startJob(pi, {
         label: "pair_watch",
         role: "pair-watch",
-        work: (signal) => runPairWatchSession(params, DEFAULT_CAPS, signal),
+        work: (signal) => runPairWatchSession(params, caps, signal),
       });
       return {
         content: [
           {
             type: "text",
-            text: `Dispatched async pair_watch job ${jobId}. Verdict + summary will arrive as a [ensemble:async] user message when the session ends (wall-clock cap ${DEFAULT_CAPS.wallClockMs / 60_000}min, cost cap $${DEFAULT_CAPS.costUsd}, ${DEFAULT_CAPS.maxInterrupts} interrupts). End your turn.`,
+            text: `Dispatched async pair_watch job ${jobId}. Verdict + summary will arrive as a [ensemble:async] user message when the session ends (wall-clock cap ${caps.wallClockMs / 60_000}min, cost cap $${caps.costUsd}, ${caps.maxInterrupts} interrupts). End your turn.`,
           },
         ],
         details: { jobId, role: "pair-watch", async: true },
@@ -237,12 +272,16 @@ export function wireDeveloperEvents(
     const summary = summariseAssistantMessage(msg);
     if (!summary) return;
     state.devSummaries.push({ at: Date.now(), text: summary });
-    // Push the summary to the adversarial watcher as a steer message — never
-    // raw events, never the developer's transcript file.
+    // Push the summary to the adversarial watcher. We use `prompt` with
+    // streamingBehavior "steer" rather than the raw `steer` command because
+    // raw `steer` only works while the agent is streaming — and the watcher
+    // spends most of its time idle between dev-turn updates. `prompt` with
+    // streamingBehavior "steer" works in both states: idle → processed as a
+    // new user turn; streaming → queued for after the current tool calls.
     adversarial
-      .steer(`[pair:developer-turn ${state.devSummaries.length}]\n${summary}`)
+      .prompt(`[pair:developer-turn ${state.devSummaries.length}]\n${summary}`, "steer")
       .catch((err) => {
-        trace(`pair-watch: failed to steer adversarial: ${(err as Error).message}`);
+        trace(`pair-watch: failed to update adversarial: ${(err as Error).message}`);
       });
   });
 
@@ -251,8 +290,9 @@ export function wireDeveloperEvents(
     trace("pair-watch: developer agent_end");
     // Let the adversarial know developer is done; it should decide a verdict.
     adversarial
-      .steer(
+      .prompt(
         "[pair:developer-finished] The developer has emitted their final assistant turn. Inspect the summarised stream above and either call approve_developer (if satisfied), interrupt_developer (one last critique), or escalate_to_user (if unsafe to merge).",
+        "steer",
       )
       .catch(() => undefined);
   });
@@ -287,9 +327,11 @@ export function wireAdversarialEvents(
       }
       state.interrupts.push({ at: Date.now(), message });
       trace(`pair-watch: routing interrupt #${state.interrupts.length} to developer`);
+      // See sibling comment in wireDeveloperEvents — prompt+steer works
+      // whether developer is currently streaming or idle.
       developer
-        .steer(`[pair:adversarial] ${message}`)
-        .catch((err) => trace(`pair-watch: developer steer failed: ${(err as Error).message}`));
+        .prompt(`[pair:adversarial] ${message}`, "steer")
+        .catch((err) => trace(`pair-watch: developer update failed: ${(err as Error).message}`));
     } else if (toolName === "approve_developer") {
       state.verdict = "APPROVED";
       state.verdictReason =
