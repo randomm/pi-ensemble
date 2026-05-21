@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { startJob } from "./async-jobs.ts";
+import { adapterFor } from "./model-adapters.ts";
 import { type PiRpcEvent, type RpcClient, spawnRpcChild } from "./spawn-rpc.ts";
 import { trace } from "./trace.ts";
 import type { DispatchResult } from "./types.ts";
@@ -447,19 +448,23 @@ async function buildDevTurnUpdate(state: SessionState, summary: string): Promise
  *   we emit "[bash: cargo test] [read: src/foo.rs]" so the watcher knows
  *   which file/command the dev touched
  */
-function summariseAssistantMessage(msg: { content?: unknown[] }): string | null {
+function summariseAssistantMessage(msg: {
+  content?: unknown[];
+  model?: string;
+  provider?: string;
+}): string | null {
   const blocks = Array.isArray(msg.content) ? msg.content : [];
   const textParts: string[] = [];
   const toolTags: string[] = [];
+  // Resolve the per-message model adapter so we can drop family-specific text
+  // artifacts (e.g. GLM-4.x's "None" placeholders) without branching on
+  // model strings here. See extension/src/model-adapters.ts.
+  const adapter = adapterFor(msg.model, msg.provider);
   for (const block of blocks) {
     if (!block || typeof block !== "object") continue;
     const b = block as { type?: string; text?: string; name?: string; arguments?: unknown };
     if (b.type === "text" && typeof b.text === "string") {
-      // GLM-4.7 emits literal {type:"text", text:"None"} placeholder blocks
-      // between tool calls. Same filter as spawn.ts:collapseEvents — drop
-      // these before joining so summaries don't read as "None [bash: ...]".
-      const trimmed = b.text.trim();
-      if (trimmed === "None" || trimmed === "null" || trimmed === "undefined") continue;
+      if (adapter.isArtifactText?.(b.text)) continue;
       textParts.push(b.text);
     }
     if (b.type === "toolCall" && typeof b.name === "string") {
