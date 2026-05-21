@@ -111,17 +111,18 @@ Run the following cycle, incrementing `review_round` after each complete pass:
    - Option A: continue to Step 8 with the lens issues unresolved. Requires explicit "yes" confirmation. Record the override in vipune: `vipune add 'override issue #N PR#M: [lens names] bypassed. Reason: [user-provided]'`.
    - Option B: user manually addresses the remaining findings and confirms ready to proceed.
 
-Each lens's transcript is saved under `~/.pi/agent/ensemble-runs/` — inspect via `/runs` or open with `pi --session <path>`.
+Per-lens transcripts auto-save under `~/.pi/agent/ensemble-runs/` for the **user's** post-hoc inspection. Do NOT read them yourself — that bloats your context and re-imports content the lens-review tool already returned to you in summarised form.
 
 ### Step 7e — Mandatory observability output
 
 After Step 7f resolves (APPROVED, halted, or overridden), print a status line of the form:
 
 ```
-six-pass review · round <N> of 3 · verdict <APPROVED|ISSUES_FOUND|CRITICAL_ISSUES_FOUND> · transcripts ~/.pi/agent/ensemble-runs/<date>/<runId>-code-review-specialist-<lens>.json
+six-pass review · round <N> of 3 · verdict <APPROVED|ISSUES_FOUND|CRITICAL_ISSUES_FOUND>
+transcripts: <copy the `transcripts` block from the [ensemble:async] report verbatim>
 ```
 
-so the user can see exactly how many rounds ran and where to find the per-lens detail.
+so the user can see exactly how many rounds ran and where to find the per-lens detail. The `[ensemble:async]` report from `dispatch_lens_review` already contains the transcript paths — surface them verbatim, do not synthesise.
 
 ## Step 8 — CI monitoring
 
