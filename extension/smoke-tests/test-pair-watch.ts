@@ -39,6 +39,10 @@ interface StubSteer {
 
 function makeMockClient(role: string): { client: RpcClient; steers: StubSteer[] } {
   const ee = new EventEmitter() as unknown as RpcClient;
+  // We capture both `.steer(msg)` and `.prompt(msg, "steer")` into the same
+  // array because they are interchangeable inter-agent delivery paths. The
+  // orchestrator currently uses prompt+steer (works in both idle/streaming
+  // states); historical code used raw steer (which only worked when streaming).
   const steers: StubSteer[] = [];
   Object.defineProperty(ee, "role", { value: role });
   Object.defineProperty(ee, "transcriptPath", { value: `/tmp/fake-${role}.json` });
@@ -50,7 +54,13 @@ function makeMockClient(role: string): { client: RpcClient; steers: StubSteer[] 
     },
   });
   Object.defineProperty(ee, "prompt", {
-    value: async () => ({ type: "response", command: "prompt", success: true }),
+    value: async (message: string, streamingBehavior?: "steer" | "followUp") => {
+      // Only capture as a "steer" delivery if streamingBehavior says so — the
+      // initial role-prompt is sent without behaviour and should NOT be
+      // counted as a partner steer.
+      if (streamingBehavior === "steer") steers.push({ message, at: Date.now() });
+      return { type: "response", command: "prompt", success: true };
+    },
   });
   Object.defineProperty(ee, "abort", {
     value: async () => ({ type: "response", command: "abort", success: true }),
