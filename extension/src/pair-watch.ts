@@ -454,7 +454,14 @@ function summariseAssistantMessage(msg: { content?: unknown[] }): string | null 
   for (const block of blocks) {
     if (!block || typeof block !== "object") continue;
     const b = block as { type?: string; text?: string; name?: string; arguments?: unknown };
-    if (b.type === "text" && typeof b.text === "string") textParts.push(b.text);
+    if (b.type === "text" && typeof b.text === "string") {
+      // GLM-4.7 emits literal {type:"text", text:"None"} placeholder blocks
+      // between tool calls. Same filter as spawn.ts:collapseEvents — drop
+      // these before joining so summaries don't read as "None [bash: ...]".
+      const trimmed = b.text.trim();
+      if (trimmed === "None" || trimmed === "null" || trimmed === "undefined") continue;
+      textParts.push(b.text);
+    }
     if (b.type === "toolCall" && typeof b.name === "string") {
       toolTags.push(fmtToolTag(b.name, b.arguments));
     }
