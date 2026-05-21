@@ -14,7 +14,7 @@ export function registerDispatchTools(pi: ExtensionAPI) {
     name: "dispatch_specialist",
     label: "Dispatch Specialist",
     description:
-      "Spawn one specialist agent (developer, ops, explore, adversarial-developer, code-review-specialist) and return a job handle immediately. The subagent's final report arrives later as a user message starting with `[ensemble:async]`. End your turn after dispatching unless you have other parallel work.",
+      "Spawn EXACTLY ONE specialist (developer, ops, explore, adversarial-developer, code-review-specialist) and return a job handle immediately. **Use this whenever you need a single subagent.** If you need TWO OR MORE subagents to run simultaneously, use `dispatch_parallel` instead — never use `dispatch_parallel` with a single spec. The final report arrives later as a user message starting with `[ensemble:async]`. End your turn after dispatching unless you have other independent work to do.",
     parameters: Type.Object({
       role: Type.String({ description: roleDesc }),
       prompt: Type.String({ description: "Task description for the specialist." }),
@@ -52,7 +52,7 @@ export function registerDispatchTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "dispatch_parallel",
     label: "Dispatch Parallel",
-    description: `Fan out up to ${MAX_PARALLEL} specialists in parallel. Returns a batch handle immediately; ONE consolidated report (covering all members) arrives as a user message when every child has finished. Use for independent work where the parent has nothing to do until all complete (e.g. research angles, parallel implementation tasks).`,
+    description: `Fan out TWO OR MORE specialists in parallel (up to ${MAX_PARALLEL}). **Use ONLY when you have 2+ independent subagents to dispatch at the same time** — e.g., explore + developer, or developers across separate worktrees. For a single subagent, use \`dispatch_specialist\` instead; never pass a single-element specs array. Returns a batch handle immediately; ONE consolidated report (covering all members) arrives as a user message when every child has finished.`,
     parameters: Type.Object({
       specs: Type.Array(
         Type.Object({
@@ -71,6 +71,11 @@ export function registerDispatchTools(pi: ExtensionAPI) {
     }),
     async execute(_id, params) {
       const specs = (params as { specs: DispatchSpec[] }).specs;
+      if (specs.length < 2) {
+        throw new Error(
+          `dispatch_parallel requires 2+ specs; got ${specs.length}. Use dispatch_specialist for a single subagent.`,
+        );
+      }
       if (specs.length > MAX_PARALLEL) {
         throw new Error(`Max ${MAX_PARALLEL} parallel slots; got ${specs.length}`);
       }
