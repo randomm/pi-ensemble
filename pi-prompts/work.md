@@ -42,9 +42,15 @@ Identify parallel workstreams. Decide worktree strategy:
 
 ## Step 3 — Setup
 
-Delegate to `ops` via `dispatch_specialist`:
-- Create feature branch `feature/issue-{N}-brief-description`.
-- Create worktrees if parallelising (`.worktrees/task-A`, `.worktrees/task-B`). Ensure `.worktrees/` is in `.gitignore`.
+Delegate to `ops` via `dispatch_specialist`. The ops prompt MUST explicitly require these preconditions before creating the feature branch:
+
+1. **Identify the mainline branch.** Default `main`; if the repo uses a different convention (`master`, `develop`, `trunk`, etc.) detect via `git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@'`.
+2. **Verify clean working tree.** `git status --porcelain` must be empty. If dirty, ABORT and surface to PM — do NOT branch off uncommitted work.
+3. **Fetch and fast-forward the mainline.** `git fetch origin && git checkout <mainline> && git pull --ff-only origin <mainline>`. If `--ff-only` fails (mainline diverged), ABORT and surface to PM.
+4. **Create feature branch** `feature/issue-{N}-brief-description` from that fresh mainline tip.
+5. **Create worktrees if parallelising** (`.worktrees/task-A`, `.worktrees/task-B`). Ensure `.worktrees/` is in `.gitignore`.
+
+Never silently branch off stale or dirty state. If any precondition fails, ops surfaces the failure verbatim and PM stops the workflow to ask the user.
 
 ## Step 4 — Execute in parallel
 
