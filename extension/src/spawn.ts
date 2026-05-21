@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { adapterFor } from "./model-adapters.ts";
 import { resolveModel } from "./models.ts";
 import { type RunningState, emptyRunningState, ingestEvent } from "./progress.ts";
 import { ROLES, isRoleName } from "./roles.ts";
@@ -322,13 +323,13 @@ function collapseEvents(
       usage.cacheWrite += msg.usage.cacheWrite ?? 0;
       usage.cost += msg.usage.cost?.total ?? 0;
     }
+    // Per-message model adapter: handles quirks specific to the LLM family
+    // that emitted this message (e.g. GLM's "None" placeholder text blocks).
+    // Default adapter is no-op, so unknown models pass through unchanged.
+    const adapter = adapterFor(msg.model, msg.provider);
     for (const block of msg.content ?? []) {
       if (block.type === "text" && typeof block.text === "string") {
-        // GLM-4.7 (and possibly other models) emits literal {type: "text",
-        // text: "None"} placeholder blocks between tool calls. Skip those —
-        // they pollute the joined text otherwise (e.g. "Setup complete.NoneNoneNoneDone.").
-        const trimmed = block.text.trim();
-        if (trimmed === "None" || trimmed === "null" || trimmed === "undefined") continue;
+        if (adapter.isArtifactText?.(block.text)) continue;
         textParts.push(block.text);
       } else if (block.type === "toolCall") {
         toolUses.push(block);
