@@ -1,22 +1,30 @@
 /**
  * Companion Pi extension loaded into the adversarial (watcher) child during
- * pair_watch. Registers three tools the orchestrator can intercept via
- * Pi's `tool_execution_start` events.
+ * pair_watch. Registers four tools:
  *
- * The tool implementations themselves are no-ops — they exist so the
- * adversarial LLM has a structured surface for intent. The orchestrator (in
- * pair-watch.ts) hooks tool_execution_start and routes:
+ * - intent tools (orchestrator intercepts these as tool_execution_start
+ *   events in pair-watch.ts and routes accordingly):
+ *     interrupt_developer(message)  →  orchestrator sends `steer` to developer
+ *     approve_developer()           →  orchestrator ends the session with APPROVED
+ *     escalate_to_user(reason)      →  orchestrator ends the session with REJECTED
  *
- *   interrupt_developer(message)  →  orchestrator sends `steer` to developer
- *   approve_developer()           →  orchestrator ends the session with APPROVED
- *   escalate_to_user(reason)      →  orchestrator ends the session with REJECTED
+ * - investigation tool (executes here in the adversarial child):
+ *     view_current_diff()           →  runs `git diff` in the child's cwd and
+ *                                       returns the output. Adversarial uses
+ *                                       this to inspect the dev's actual changes
+ *                                       line-by-line rather than relying on the
+ *                                       --stat summary in the dev-turn updates.
  *
  * Loaded via `pi --no-extensions --extension <path-to-this-file>` from
  * pair-watch.ts; never auto-discovered.
  */
 
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+
+const execFile = promisify(execFileCb);
 
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
@@ -82,6 +90,52 @@ export default function (pi: ExtensionAPI) {
         content: [{ type: "text", text: "Escalated — pair_watch session ending." }],
         details: { verdict: "ESCALATED", reason: params.reason },
       };
+    },
+  });
+
+  pi.registerTool({
+    name: "view_current_diff",
+    label: "View Current Diff",
+    description:
+      "Pull the current `git diff` for the working tree the developer is editing. Returns the full unified diff so you can inspect actual line changes (not just the --stat summary you receive in dev-turn updates). Use this when the dev makes a change you want to verify line-by-line, especially before calling approve_developer.",
+    parameters: Type.Object({
+      stat_only: Type.Optional(
+        Type.Boolean({
+          description: "If true, returns `git diff --stat` instead of the full diff.",
+        }),
+      ),
+    }),
+    async execute(_id, raw) {
+      const params = raw as { stat_only?: boolean };
+      const details: Record<string, unknown> = {};
+      try {
+        const args = params.stat_only ? ["diff", "--stat"] : ["diff"];
+        const { stdout } = await execFile("git", args, {
+          // process.cwd() === the dev's workCwd because pair-watch.ts spawns
+          // this child with the same cwd as the developer.
+          cwd: process.cwd(),
+          timeout: 10_000,
+          maxBuffer: 1024 * 1024,
+        });
+        const trimmed = stdout.trim();
+        if (!trimmed) {
+          details.empty = true;
+          return {
+            content: [{ type: "text", text: "(no diff — working tree is clean)" }],
+            details,
+          };
+        }
+        // Cap output at 32k chars to stay context-bounded
+        const capped =
+          trimmed.length > 32_000 ? `${trimmed.slice(0, 32_000)}\n\n[truncated]` : trimmed;
+        details.bytes = capped.length;
+        details.truncated = trimmed.length > 32_000;
+        return { content: [{ type: "text", text: capped }], details };
+      } catch (err) {
+        const msg = (err as Error).message ?? "unknown error";
+        details.error = msg;
+        return { content: [{ type: "text", text: `git diff failed: ${msg}` }], details };
+      }
     },
   });
 }

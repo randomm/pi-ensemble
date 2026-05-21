@@ -52,6 +52,10 @@ Delegate to `ops` via `dispatch_specialist`. The ops prompt MUST explicitly requ
 
 Never silently branch off stale or dirty state. If any precondition fails, ops surfaces the failure verbatim and PM stops the workflow to ask the user.
 
+### If using `pair_watch` instead of separate developer + adversarial_loop
+
+Always pass `issueText` (the full issue body you fetched via `gh issue view`) along with `task` and `context`. The pair-watch tool forwards `issueText` to BOTH the developer and the adversarial — without it, the adversarial has no acceptance criteria to verify the diff against, and it tends to rubber-stamp instead of investigate.
+
 ## Step 4 — Execute in parallel
 
 Use `dispatch_parallel` with specs for:
