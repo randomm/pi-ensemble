@@ -70,7 +70,7 @@ function makeMockClient(role: string): { client: RpcClient; steers: StubSteer[] 
   return { client: ee, steers };
 }
 
-const caps: PairCaps = { wallClockMs: 60_000, costUsd: 1, maxInterrupts: 3 };
+const caps: PairCaps = { wallClockMs: 60_000, maxInputTokens: 1_000_000, maxInterrupts: 3 };
 
 // ---------------------------------------------------------------------------
 // Test 1 — dev message_end is summarised + steered to adversarial
@@ -81,25 +81,32 @@ const caps: PairCaps = { wallClockMs: 60_000, costUsd: 1, maxInterrupts: 3 };
   const adv = makeMockClient("adversarial");
   wireDeveloperEvents(dev.client, adv.client, state, caps);
 
-  // Emit a fake dev assistant message
+  // Emit a fake dev assistant message — text + tool call with file arg
   dev.client.emit("message_end", {
     message: {
       role: "assistant",
       content: [
         { type: "text", text: "I'm implementing the foo() function." },
-        { type: "toolCall", name: "edit" },
+        { type: "toolCall", name: "edit", arguments: { path: "src/foo.rs" } },
       ],
-      usage: { cost: { total: 0.005 } },
+      usage: { input: 1200, output: 80, cacheRead: 200, cacheWrite: 0 },
+      model: "zai-glm-4.7",
+      provider: "cerebras",
     },
   });
 
-  await new Promise((r) => setTimeout(r, 20));
+  await new Promise((r) => setTimeout(r, 30));
   assert(state.devSummaries.length === 1, "one dev summary captured");
-  assert(state.devCost > 0, "dev cost accumulated");
+  assert(state.devTokens.input === 1200, "dev input tokens accumulated");
+  assert(state.devModel === "zai-glm-4.7", "dev model captured");
+  assert(state.devProvider === "cerebras", "dev provider captured");
   assert(adv.steers.length === 1, "exactly one steer queued to adversarial");
   assert(adv.steers[0].message.includes("[pair:developer-turn 1]"), "steer carries dev-turn tag");
   assert(adv.steers[0].message.includes("implementing the foo"), "steer body contains dev text");
-  assert(adv.steers[0].message.includes("tools: edit"), "steer body lists tool names");
+  assert(
+    adv.steers[0].message.includes("[edit: src/foo.rs]"),
+    "steer body shows tool arg, not just tool name",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -183,38 +190,41 @@ const caps: PairCaps = { wallClockMs: 60_000, costUsd: 1, maxInterrupts: 3 };
 }
 
 // ---------------------------------------------------------------------------
-// Test 6 — cost cap fires across both children
+// Test 6 — input-token cap fires across both children
 // ---------------------------------------------------------------------------
 {
   const state = createSessionState();
   const dev = makeMockClient("developer");
   const adv = makeMockClient("adversarial");
-  const tight: PairCaps = { ...caps, costUsd: 0.01 };
+  const tight: PairCaps = { ...caps, maxInputTokens: 1000 };
   wireDeveloperEvents(dev.client, adv.client, state, tight);
   wireAdversarialEvents(adv.client, dev.client, state, tight);
 
-  // Push dev cost to 0.008
+  // Push dev input to 800 — under cap
   dev.client.emit("message_end", {
     message: {
       role: "assistant",
       content: [{ type: "text", text: "first turn" }],
-      usage: { cost: { total: 0.008 } },
+      usage: { input: 800, output: 100, cacheRead: 0, cacheWrite: 0 },
     },
   });
-  await new Promise((r) => setTimeout(r, 20));
-  assert(!state.verdict, "cost still under cap after first turn");
+  await new Promise((r) => setTimeout(r, 30));
+  assert(!state.verdict, "token cap not hit after first turn");
 
-  // Push adv cost to 0.005 → total 0.013 > 0.01 cap
+  // Push adv input to 500 → total 1300 > 1000 cap
   adv.client.emit("message_end", {
     message: {
       role: "assistant",
       content: [{ type: "text", text: "watching" }],
-      usage: { cost: { total: 0.005 } },
+      usage: { input: 500, output: 50, cacheRead: 0, cacheWrite: 0 },
     },
   });
   await new Promise((r) => setTimeout(r, 20));
-  assert(state.verdict === "CAP_HIT", "cost cap fired (CAP_HIT verdict)");
-  assert((state.verdictReason ?? "").includes("cost cap"), "reason cites cost cap");
+  assert(state.verdict === "CAP_HIT", "input-token cap fired (CAP_HIT verdict)");
+  assert(
+    (state.verdictReason ?? "").includes("input-token cap"),
+    "reason cites input-token cap",
+  );
 }
 
 // ---------------------------------------------------------------------------
