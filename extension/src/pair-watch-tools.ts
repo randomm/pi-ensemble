@@ -31,7 +31,7 @@ export default function (pi: ExtensionAPI) {
     name: "interrupt_developer",
     label: "Interrupt Developer",
     description:
-      "Send a steering message to your pair-coding partner (developer). Use SPARINGLY — only when you see something genuinely wrong or have advice that materially improves the work. Do not interrupt for stylistic preferences or to acknowledge progress. The developer will receive your message as a [pair:adversarial] user turn and may incorporate it before continuing.",
+      "Send a steering message to your pair-coding partner (developer). Bias toward USE — every interrupt that prevents a wrong turn saves an entire dev cycle and prevents the issue from reaching the six-pass code review (which costs ~1M tokens per round). The bar is 'I can predict a concrete failure mode the dev hasn't addressed' — wrong path, wrong API, scope drift, foreseeable runtime error, missing test for non-trivial logic. Do NOT interrupt for style or naming preferences, and do not interrupt to acknowledge progress. Predicting a likely bug and then waiting to see whether the dev hits it themselves is the failure mode this role exists to prevent — surface it before they hit it. The developer will receive your message as a [pair:adversarial] user turn.",
     parameters: Type.Object({
       message: Type.String({
         description:
