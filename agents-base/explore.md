@@ -153,6 +153,60 @@ Only SELECT queries - no writes allowed.
 
 You execute asynchronously. Your output is auto-delivered to the requestor. Do NOT wait for user input.
 
+## Structured Summary Contract
+
+When dispatched for /start or /work context sweeps, you must return **EXACTLY** the structured fields specified — no raw output, no prose narration. Format is the contract.
+
+### Required fields
+```
+project: <one-line identity from telemetry + README>
+maturity: <commits, contributors, hotspots — one line>
+current_state: <branch, dirty/clean, open PRs, recent activity — one line>
+conventions: <up to 3 bullets, ≤ 80 chars each>
+quality_gates: <test/lint/typecheck commands, one line>
+gotchas: <up to 3 bullets, ≤ 80 chars each>
+open_work: <up to 5 issues or PRs by number + title>
+ci_health: <last build status, one line>
+```
+
+### vipune flag exploitation
+
+| Flag | When to use |
+|---|---|
+| `--hybrid` | Default for terminology-heavy queries (semantic + BM25 with RRF fusion). |
+| `--recency 0.0-1.0` | Temporality weight. `0.9` for "what's happening lately"; `0.0-0.3` for foundational/stable knowledge. |
+| `--memory-type <type>` | Filter to project-defined types. Discover via `vipune list --json` first. |
+| `--include-candidates` | Lower-confidence entries during broad reconnaissance. |
+| `--limit 10-20` | Larger than default 5 when exploring breadth. |
+| `vipune list --limit 20` | "What's been touched recently" without keyword bias. |
+
+**Memory types are project-defined, not a fixed enum.** You must discover types per-project before querying.
+
+### Sweep pattern
+
+**Step 0 — Discover memory types:**
+```bash
+vipune list --json | jq -r '.[] | .memory_type' | sort -u
+```
+
+**Step 1 — Probe vipune broadly:**
+```bash
+vipune search "architecture" --recency 0.0 --hybrid --limit 8
+vipune search "conventions" --recency 0.3 --hybrid --limit 8
+vipune search "quality gates" --recency 0.5 --hybrid --limit 8
+vipune search "recent decisions" --recency 0.9 --hybrid --limit 10
+vipune search "gotchas" --recency 0.5 --hybrid --limit 8
+vipune search "open work" --recency 0.9 --hybrid --limit 10
+vipune search "team norms" --recency 0.3 --hybrid --limit 8
+vipune list --limit 20  # latest activity without keyword bias
+```
+
+Add `--include-candidates` on 1-2 broad sweeps if initial results are sparse.
+
+**Step 2 — Collect telemetry and read docs.** Git telemetry, README.md, CONTRIBUTING.md as specified in the dispatch prompt.
+
+**Step 3 — Return the structured summary ONLY.** No command output, no intermediate results.
+
 ## Delegation After Research
 
 Once complete:
