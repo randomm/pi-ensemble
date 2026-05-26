@@ -190,6 +190,8 @@ vipune list --json | jq -r '.[] | .memory_type' | sort -u
 ```
 Skip this step if you already know the project's memory types from this session.
 
+If this command fails for any reason, skip memory-type filtering and proceed with searches using `--hybrid` only (memory-type filtering is an optimization, not a requirement).
+
 **Step 1 — Probe vipune broadly:**
 Run 3-5 targeted searches using `--hybrid` and appropriate `--recency` based on what you don't already know from this session. Vary `--recency` by query intent: `0.0-0.3` for foundational/stable knowledge, `0.5-0.9` for recent decisions and current activity. Use `--limit 8-10` per query; add `--include-candidates` on 1-2 broad sweeps if initial results are sparse. Also run `vipune list --limit 20` for latest activity without keyword bias.
 
