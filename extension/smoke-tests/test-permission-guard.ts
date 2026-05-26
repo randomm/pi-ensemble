@@ -12,7 +12,7 @@
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { isToolAllowedForRole } from "../src/permission-guard.js";
+import { isToolAllowedForRole, BUILTIN_TOOLS } from "../src/permission-guard.js";
 
 let exitCode = 0;
 function assert(cond: boolean, msg: string) {
@@ -24,25 +24,6 @@ function assert(cond: boolean, msg: string) {
   }
 }
 
-// Built-in Pi tool names — from permission-guard.ts
-const BUILTIN_TOOLS = new Set([
-  "bash",
-  "read",
-  "write",
-  "edit",
-  "multiedit",
-  "rg",
-  "list",
-  "webfetch",
-  "websearch",
-  "skill",
-  "todowrite",
-  "task",
-  "cancel_task",
-  "list_tasks",
-  "check_task",
-  "question",
-]);
 
 let agentsConfig: Record<string, { permission?: Record<string, string | Record<string, string>> }>;
 try {

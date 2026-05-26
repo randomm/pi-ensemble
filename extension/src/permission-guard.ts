@@ -7,7 +7,7 @@ import { trace } from "./trace.js";
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 
 // Built-in Pi tool names — never block these
-const BUILTIN_TOOLS = new Set([
+export const BUILTIN_TOOLS = new Set([
   "bash",
   "read",
   "write",
