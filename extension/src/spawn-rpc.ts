@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { type ResolvedModelChoice, resolveModel } from "./models.ts";
 import { ROLES, isRoleName } from "./roles.ts";
+import { applyUserExtension } from "./spawn.ts";
 import { trace } from "./trace.ts";
 
 /**
@@ -145,19 +146,7 @@ export async function spawnRpcChild(
     tmpPromptFile,
   ];
   if (modelChoice.model) childArgs.push("--model", modelChoice.model);
-  const userExt = process.env.PI_ENSEMBLE_USER_EXTENSION;
-  if (userExt) {
-    const isNpmRef = userExt.startsWith("npm:");
-    const isAbsPath = userExt.startsWith("/") || userExt.startsWith("~");
-    if (!isNpmRef && !isAbsPath) {
-      trace(
-        `spawn-rpc[${spec.role}]: PI_ENSEMBLE_USER_EXTENSION rejected (must be npm: or absolute path): ${userExt}`,
-      );
-    } else {
-      childArgs.push("--extension", userExt);
-      trace(`spawn-rpc[${spec.role}]: --extension ${userExt}`);
-    }
-  }
+  applyUserExtension(childArgs, spec.role);
   if (spec.extraArgs?.length) childArgs.push(...spec.extraArgs);
   const invocation = getPiInvocation(childArgs);
 

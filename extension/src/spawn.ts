@@ -74,6 +74,21 @@ export function makeRunId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+export function applyUserExtension(childArgs: string[], role: string): void {
+  const userExt = process.env.PI_ENSEMBLE_USER_EXTENSION;
+  if (!userExt) return;
+  const isNpmRef = userExt.startsWith("npm:");
+  const isAbsPath = userExt.startsWith("/") || userExt.startsWith("~");
+  if (!isNpmRef && !isAbsPath) {
+    const msg = `pi-ensemble: PI_ENSEMBLE_USER_EXTENSION='${userExt}' rejected (must start with 'npm:' or be an absolute path) — MCP extension will NOT be loaded`;
+    console.warn(msg);
+    trace(`spawn[${role}]: ${msg}`);
+  } else {
+    childArgs.push("--extension", userExt);
+    trace(`spawn[${role}]: --extension ${userExt}`);
+  }
+}
+
 // Pi --mode json event shape (Pi 0.75.3). The canonical assembled answer is at
 // agent_end.messages[]; usage stats come from message_end.message.usage on
 // assistant messages.
@@ -170,19 +185,7 @@ export async function spawnSpecialist(
   if (modelChoice.model) {
     childArgs.push("--model", modelChoice.model);
   }
-  const userExt = process.env.PI_ENSEMBLE_USER_EXTENSION;
-  if (userExt) {
-    const isNpmRef = userExt.startsWith("npm:");
-    const isAbsPath = userExt.startsWith("/") || userExt.startsWith("~");
-    if (!isNpmRef && !isAbsPath) {
-      trace(
-        `spawn[${spec.role}]: PI_ENSEMBLE_USER_EXTENSION rejected (must be npm: or absolute path): ${userExt}`,
-      );
-    } else {
-      childArgs.push("--extension", userExt);
-      trace(`spawn[${spec.role}]: --extension ${userExt}`);
-    }
-  }
+  applyUserExtension(childArgs, spec.role);
   if (opts.extraArgs && opts.extraArgs.length > 0) {
     childArgs.push(...opts.extraArgs);
   }

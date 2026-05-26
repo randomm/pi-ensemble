@@ -36,7 +36,9 @@ function loadAgentsJson(): Record<
     const parsed = JSON.parse(raw);
     return parsed.agent ?? {};
   } catch (err) {
-    trace(`permission-guard: failed to load agents.json: ${err}`);
+    const msg = `pi-ensemble permission-guard: failed to load agents.json (${err}) — all non-builtin tools will be blocked`;
+    console.warn(msg);
+    trace(msg);
     return {};
   }
 }
@@ -70,7 +72,13 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
     return;
   }
   if (!(ROLE_NAMES as readonly string[]).includes(role)) {
-    trace(`permission-guard: unknown role '${role}', guard inactive`);
+    trace(`permission-guard: unknown role '${role}', blocking all non-builtin tools`);
+    pi.on("tool_call", (event) => {
+      if (!BUILTIN_TOOLS.has(event.toolName)) {
+        trace(`permission-guard: BLOCKED ${event.toolName} (unknown role '${role}')`);
+        return { block: true, reason: `Unknown role '${role}' — all non-builtin tools blocked` };
+      }
+    });
     return;
   }
   const agentsConfig = loadAgentsJson();

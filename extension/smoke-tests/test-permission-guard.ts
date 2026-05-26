@@ -14,13 +14,13 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { isToolAllowedForRole } from "../src/permission-guard.js";
 
-let exit = 0;
+let exitCode = 0;
 function assert(cond: boolean, msg: string) {
   if (cond) {
     console.log(`✓ ${msg}`);
   } else {
     console.error(`✗ ${msg}`);
-    exit = 1;
+    exitCode = 1;
   }
 }
 
@@ -112,5 +112,5 @@ const allowedForUnknownRole = isToolAllowedForRole("some_tool", "nonexistent_rol
 assert(!allowedForUnknownRole, "Test 7: non-builtin tool BLOCKED for role with no permission config");
 
 console.log("\n=== test-permission-guard summary ===");
-console.log(`exit ${exit}`);
-process.exit(exit);
+console.log(`exit ${exitCode}`);
+process.exit(exitCode);
