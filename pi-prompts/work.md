@@ -35,6 +35,8 @@ Simultaneously dispatch `explore` via `dispatch_specialist`:
 - `vipune search "<keyword>" --hybrid --recency <0.0-1.0> --limit 8-10` — prior decisions. Derive conceptual keywords from the issue title/body and run a focused search per keyword. Use `--hybrid` for semantic + BM25 fusion. Vary `--recency` by intent: `0.0-0.3` for foundational knowledge, `0.9` for "what's happening lately". Use your judgment for what's worth searching. Avoid passing the whole issue as a single query — vipune prefers short phrases.
 - `colgrep "<concept>"` — find existing code that implements something described in the issue. ColGREP is **code-only** semantic search; the query must describe something you'd expect to find in source files (e.g. `"JWT validation"`, `"retry on HTTP 5xx"`, `"users table migration"`). Do not use it for meta-questions like `"project architecture"` — those return useless matches.
 
+If explore does not return within ~2 minutes, proceed with issue-only context. Apply explore resilience fallback (Reconnaissance Doctrine) if the structured summary arrives incomplete.
+
 ## Step 2 — Decompose and plan
 
 Identify parallel workstreams. Decide worktree strategy:

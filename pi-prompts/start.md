@@ -35,7 +35,7 @@ argument-hint: ""
    - Use the `dispatch_specialist` tool with `role: ops` and prompt:
      "Run `git log --oneline -10`, `gh issue list --limit 15`, `gh pr list`, `gh run list --branch main --limit 3`, `git shortlog -sn --no-merges`, and `git for-each-ref --sort=-committerdate refs/heads --format='%(HEAD) %(refname:short) %(committerdate:relative)'`. Return raw output."
 
-5. **Wait for both dispatches** (explore from step 3 + ops from step 4) to return, then synthesise into the one readiness line.
+5. **Wait for both dispatches** (explore from step 3 + ops from step 4) to return, then synthesise into the one readiness line. If either dispatch does not return within ~2 minutes, proceed with context from available dispatches rather than blocking. Apply explore resilience fallback (see Reconnaissance Doctrine) if the structured summary is incomplete.
 
 6. **Store findings**:
    ```bash
