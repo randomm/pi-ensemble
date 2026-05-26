@@ -12,6 +12,10 @@ export type PermVerdict = "allow" | "deny" | "ask";
 type PermPattern = Record<string, PermVerdict>;
 export type RoleConfig = Record<string, { permission?: PermPattern }>;
 
+// Constants
+const DECISION_KEY_MAX_ARGS = 200;
+const MAX_CONFIG_FILE_SIZE = 1 * 1024 * 1024; // 1MB
+
 // Built-in Pi tool names — never block these
 export const BUILTIN_TOOLS = new Set([
   "bash",
@@ -32,6 +36,28 @@ export const BUILTIN_TOOLS = new Set([
   "question",
 ]);
 
+// Helper: lookup a tool in permission entries, exact match first then wildcard
+function lookupPermission(
+  entries: Record<string, string | Record<string, string>>,
+  toolName: string,
+): string | null {
+  // Check exact match first
+  const exactMatch = entries[toolName];
+  if (exactMatch !== undefined && typeof exactMatch === "string") {
+    return exactMatch;
+  }
+
+  // Check wildcard match
+  for (const [pattern, verdict] of Object.entries(entries)) {
+    if (typeof verdict !== "string") continue; // Skip nested objects
+    if (pattern.endsWith("*") && toolName.startsWith(pattern.slice(0, -1))) {
+      return verdict;
+    }
+  }
+
+  return null;
+}
+
 function loadAgentsJson(): Record<
   string,
   { permission?: Record<string, string | Record<string, string>> }
@@ -49,18 +75,41 @@ function loadAgentsJson(): Record<
   }
 }
 
-function matchesPattern(pattern: string, toolName: string): boolean {
-  if (pattern === toolName) return true;
-  if (pattern.endsWith("*") && toolName.startsWith(pattern.slice(0, -1))) return true;
-  return false;
-}
-
 function loadProjectConfig(): RoleConfig {
   const configPath = path.join(process.cwd(), ".pi", "permissions.json");
   try {
-    const raw = readFileSync(configPath, "utf8");
+    // Resolve symlinks before reading
+    const resolvedPath = require("node:fs").realpathSync(configPath);
+    const raw = readFileSync(resolvedPath, "utf8");
+
+    // Enforce max file size to prevent DoS
+    if (raw.length > MAX_CONFIG_FILE_SIZE) {
+      const msg = `pi-ensemble permission-guard: project config exceeds ${MAX_CONFIG_FILE_SIZE} bytes, skipping`;
+      console.warn(msg);
+      return {};
+    }
+
     return JSON.parse(raw).roles ?? {};
   } catch (err) {
+    if (err && typeof err === "object" && "code" in err) {
+      const code = (err as { code: string }).code;
+      if (code === "ENOENT") {
+        // Missing file is normal — silent
+        return {};
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        const msg = `pi-ensemble permission-guard: cannot read project config (${err})`;
+        console.warn(msg);
+        return {};
+      }
+    }
+    if (err instanceof SyntaxError) {
+      const msg = `pi-ensemble permission-guard: project config is not valid JSON (${err.message})`;
+      console.warn(msg);
+      return {};
+    }
+    // Other errors: trace for debugging
+    trace(`pi-ensemble permission-guard: error loading project config (${err})`);
     return {};
   }
 }
@@ -69,8 +118,35 @@ function loadGlobalConfig(): RoleConfig {
   const configPath = path.join(os.homedir(), ".pi", "agent", "permissions.json");
   try {
     const raw = readFileSync(configPath, "utf8");
+
+    // Enforce max file size to prevent DoS
+    if (raw.length > MAX_CONFIG_FILE_SIZE) {
+      const msg = `pi-ensemble permission-guard: global config exceeds ${MAX_CONFIG_FILE_SIZE} bytes, skipping`;
+      console.warn(msg);
+      return {};
+    }
+
     return JSON.parse(raw).roles ?? {};
   } catch (err) {
+    if (err && typeof err === "object" && "code" in err) {
+      const code = (err as { code: string }).code;
+      if (code === "ENOENT") {
+        // Missing file is normal — silent
+        return {};
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        const msg = `pi-ensemble permission-guard: cannot read global config (${err})`;
+        console.warn(msg);
+        return {};
+      }
+    }
+    if (err instanceof SyntaxError) {
+      const msg = `pi-ensemble permission-guard: global config is not valid JSON (${err.message})`;
+      console.warn(msg);
+      return {};
+    }
+    // Other errors: trace for debugging
+    trace(`pi-ensemble permission-guard: error loading global config (${err})`);
     return {};
   }
 }
@@ -83,32 +159,25 @@ export function resolveToolPermission(
   agents: Record<string, { permission?: Record<string, string | Record<string, string>> }>,
 ): PermVerdict {
   // Helper to check a single config
-  const checkConfig = (config: RoleConfig): { verdict: PermVerdict | null } => {
+  const checkConfig = (config: RoleConfig): PermVerdict | null => {
     const roleConfig = config[role];
-    if (!roleConfig?.permission) return { verdict: null };
+    if (!roleConfig?.permission) return null;
 
-    // Check exact match first
-    for (const [pattern, verdict] of Object.entries(roleConfig.permission)) {
-      if (pattern === toolName) return { verdict };
+    // Use shared helper: exact match first, then wildcard
+    const verdict = lookupPermission(roleConfig.permission, toolName);
+    if (verdict !== null) {
+      return verdict as PermVerdict;
     }
-
-    // Check wildcard match
-    for (const [pattern, verdict] of Object.entries(roleConfig.permission)) {
-      if (pattern.endsWith("*") && toolName.startsWith(pattern.slice(0, -1))) {
-        return { verdict };
-      }
-    }
-
-    return { verdict: null };
+    return null;
   };
 
   // Layer 1: Project config (exact then wildcard)
   const projectResult = checkConfig(project);
-  if (projectResult.verdict) return projectResult.verdict;
+  if (projectResult) return projectResult;
 
   // Layer 2: Global config (exact then wildcard)
   const globalResult = checkConfig(global);
-  if (globalResult.verdict) return globalResult.verdict;
+  if (globalResult) return globalResult;
 
   // Layer 3: agents.json (existing logic)
   const agentsRoleConfig = agents[role];
@@ -116,8 +185,19 @@ export function resolveToolPermission(
     for (const [pattern, verdict] of Object.entries(agentsRoleConfig.permission)) {
       // Skip nested objects (like 'bash') at this level
       if (typeof verdict === "object") continue;
-      if (matchesPattern(pattern, toolName)) {
-        return verdict === "allow" || verdict === "ask" ? verdict : "deny";
+      if (
+        pattern === toolName ||
+        (pattern.endsWith("*") && toolName.startsWith(pattern.slice(0, -1)))
+      ) {
+        // Explicit type check: only allow/deny/ask are valid verdicts
+        if (verdict === "allow" || verdict === "deny" || verdict === "ask") {
+          return verdict;
+        }
+        // Invalid verdict: treat as deny and log
+        trace(
+          `pi-ensemble permission-guard: invalid verdict '${verdict}' for tool ${pattern}, treating as deny`,
+        );
+        return "deny";
       }
     }
   }
@@ -133,28 +213,27 @@ export function isToolAllowedForRole(
   const roleConfig = agentsConfig[role];
   if (!roleConfig?.permission) return false; // no config = deny
 
-  // Check exact match first
-  for (const [pattern, verdict] of Object.entries(roleConfig.permission)) {
-    // Skip nested objects (like 'bash') at this level
-    if (typeof verdict === "object") continue;
-    if (pattern === toolName) return verdict === "allow"; // "ask" treated as deny for subagents
-  }
-
-  // Check wildcard match
-  for (const [pattern, verdict] of Object.entries(roleConfig.permission)) {
-    // Skip nested objects (like 'bash') at this level
-    if (typeof verdict === "object") continue;
-    if (pattern.endsWith("*") && toolName.startsWith(pattern.slice(0, -1))) {
-      return verdict === "allow";
-    }
+  // Use shared helper: exact match first, then wildcard
+  const verdict = lookupPermission(roleConfig.permission, toolName);
+  if (verdict !== null) {
+    // "ask" treated as deny for subagents
+    return verdict === "allow";
   }
 
   return false; // not mentioned = deny (deny-by-default)
 }
 
 export function decisionKey(toolName: string, args: unknown): string {
-  const argsStr = JSON.stringify(args ?? {}).slice(0, 200);
+  let argsStr: string;
+  try {
+    argsStr = JSON.stringify(args ?? {}).slice(0, DECISION_KEY_MAX_ARGS);
+  } catch {
+    // Fallback: just the type name if JSON.stringify fails (e.g., circular refs)
+    argsStr = JSON.stringify({ type: typeof args }).slice(0, DECISION_KEY_MAX_ARGS);
+  }
   return `${toolName}:${argsStr}`;
+  // NOTE: This serializes entire args before truncating. Acceptable for typical tool args (<1KB).
+  // Do NOT add custom replacer — over-engineering for this use case.
 }
 
 export function persistDecisions(
@@ -164,24 +243,58 @@ export function persistDecisions(
   const decisionsPath = path.join(piDir, "decisions.json");
   const tmpPath = `${decisionsPath}.tmp`;
 
-  // Ensure .pi/ exists with secure permissions
-  mkdirSync(piDir, { recursive: true });
   try {
-    chmodSync(piDir, 0o700);
-  } catch {}
+    // Ensure .pi/ exists with secure permissions in one call
+    mkdirSync(piDir, { recursive: true, mode: 0o700 });
 
-  // Evict oldest entries if over 500
-  let entries = [...decisionsMap.entries()].sort((a, b) =>
-    b[1].timestamp.localeCompare(a[1].timestamp),
-  );
-  if (entries.length > 500) entries = entries.slice(0, 500);
+    // Belt-and-braces chmod: log failure instead of silent catch
+    try {
+      chmodSync(piDir, 0o700);
+    } catch (err) {
+      trace(
+        `pi-ensemble permission-guard: chmod ${piDir} failed (${err}) — directory may have incorrect permissions`,
+      );
+    }
 
-  const obj = Object.fromEntries(entries);
-  writeFileSync(tmpPath, JSON.stringify(obj, null, 2), { mode: 0o600 });
-  renameSync(tmpPath, decisionsPath);
-  try {
-    chmodSync(decisionsPath, 0o600);
-  } catch {}
+    // Evict oldest entries if over 500
+    let entries = [...decisionsMap.entries()].sort((a, b) =>
+      b[1].timestamp.localeCompare(a[1].timestamp),
+    );
+    if (entries.length > 500) entries = entries.slice(0, 500);
+
+    // NOTE: writeFileSync blocks the event loop. Acceptable for now: decision writes are
+    // <50KB and happen only on "always" choices (not every tool call). Do NOT refactor to async.
+    const obj = Object.fromEntries(entries);
+    writeFileSync(tmpPath, JSON.stringify(obj, null, 2), { mode: 0o600 });
+    renameSync(tmpPath, decisionsPath);
+
+    // Belt-and-braces chmod: log failure instead of silent catch
+    try {
+      chmodSync(decisionsPath, 0o600);
+    } catch (err) {
+      trace(
+        `pi-ensemble permission-guard: chmod ${decisionsPath} failed (${err}) — file may have incorrect permissions`,
+      );
+    }
+  } catch (err) {
+    const msg = `pi-ensemble permission-guard: failed to persist decisions (${err})`;
+    console.warn(msg);
+    trace(msg);
+
+    // Clean up .tmp file if it exists (best-effort)
+    try {
+      // Use dynamic require to avoid importing fs at top level
+      const fs = require("node:fs");
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch {
+      // Cleanup failure is acceptable — .tmp will be ignored next write
+    }
+
+    // Return without crashing
+    return;
+  }
 }
 
 export function registerPermissionGuard(pi: ExtensionAPI): void {
@@ -189,6 +302,10 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
   const agentsConfig = loadAgentsJson();
   const projectConfig = loadProjectConfig();
   const globalConfig = loadGlobalConfig();
+
+  // NOTE: Configs are loaded once per session by design. Restart Pi to pick up config changes.
+  // Hot-reload adds complexity and race conditions and is out of scope for this PR.
+  // Cache invalidation is also out of scope.
 
   // In-memory decisions cache
   const decisions = new Map<string, { allowed: boolean; timestamp: string }>();
@@ -199,12 +316,39 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
     try {
       const raw = readFileSync(decisionsPath, "utf8");
       const parsed = JSON.parse(raw);
+      let loaded = 0;
       for (const [key, val] of Object.entries(parsed)) {
+        // Validate decision key format: must contain ":" and be ≤ 250 chars
+        if (!key.includes(":") || key.length > 250) {
+          trace(
+            `pi-ensemble permission-guard: skipping invalid decision key: ${key.slice(0, 50)}...`,
+          );
+          continue;
+        }
         decisions.set(key, val as { allowed: boolean; timestamp: string });
+        loaded++;
       }
-      trace(`permission-guard: loaded ${decisions.size} cached decisions`);
-    } catch {
-      // Missing file is normal on first run — silent
+      trace(`permission-guard: loaded ${loaded} cached decisions`);
+    } catch (err) {
+      if (err && typeof err === "object" && "code" in err) {
+        const code = (err as { code: string }).code;
+        if (code === "ENOENT") {
+          // Missing file is normal on first run — silent
+          return;
+        }
+        if (code === "EACCES") {
+          const msg = `pi-ensemble permission-guard: cannot read decisions file (${err})`;
+          console.warn(msg);
+          return;
+        }
+      }
+      if (err instanceof SyntaxError) {
+        const msg = `pi-ensemble permission-guard: decisions file is not valid JSON (${err.message})`;
+        console.warn(msg);
+        return;
+      }
+      // Other errors: trace for debugging
+      trace(`pi-ensemble permission-guard: error loading decisions (${err})`);
     }
   });
 
@@ -253,12 +397,18 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
     const argsPreview = JSON.stringify(event.input ?? {}).slice(0, 60);
     const message = `pi-ensemble [${role}]: ${event.toolName} ${argsPreview}`;
 
-    const choice = await ctx.ui.select(message, [
-      "Allow once",
-      "Allow always",
-      "Deny once",
-      "Deny always",
-    ]);
+    let choice: string | undefined;
+    try {
+      choice = await ctx.ui.select(message, [
+        "Allow once",
+        "Allow always",
+        "Deny once",
+        "Deny always",
+      ]);
+    } catch (err) {
+      trace(`pi-ensemble permission-guard: ctx.ui.select failed for ${event.toolName} (${err})`);
+      return { block: true, reason: `Tool '${event.toolName}' denied (UI error)` };
+    }
 
     if (!choice) {
       return {
