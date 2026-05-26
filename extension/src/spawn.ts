@@ -8,6 +8,7 @@ import { adapterFor } from "./model-adapters.ts";
 import { resolveModel } from "./models.ts";
 import { type RunningState, emptyRunningState, ingestEvent } from "./progress.ts";
 import { ROLES, isRoleName } from "./roles.ts";
+import { trace } from "./trace.ts";
 import type { DispatchResult, DispatchSpec } from "./types.ts";
 
 interface SpawnOptions {
@@ -169,6 +170,11 @@ export async function spawnSpecialist(
   if (modelChoice.model) {
     childArgs.push("--model", modelChoice.model);
   }
+  const userExt = process.env.PI_ENSEMBLE_USER_EXTENSION;
+  if (userExt) {
+    childArgs.push("--extension", userExt);
+    trace(`spawn[${spec.role}]: --extension ${userExt}`);
+  }
   if (opts.extraArgs && opts.extraArgs.length > 0) {
     childArgs.push(...opts.extraArgs);
   }
@@ -181,7 +187,7 @@ export async function spawnSpecialist(
     // stdin "ignore" is critical: leaving stdin open as a pipe makes Pi wait
     // for input even in -p mode and the spawn hangs forever.
     stdio: ["ignore", "pipe", "pipe"],
-    env: process.env,
+    env: { ...process.env, PI_ENSEMBLE_ROLE: spec.role },
   });
 
   const start = Date.now();

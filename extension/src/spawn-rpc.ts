@@ -145,6 +145,11 @@ export async function spawnRpcChild(
     tmpPromptFile,
   ];
   if (modelChoice.model) childArgs.push("--model", modelChoice.model);
+  const userExt = process.env.PI_ENSEMBLE_USER_EXTENSION;
+  if (userExt) {
+    childArgs.push("--extension", userExt);
+    trace(`spawn-rpc[${spec.role}]: --extension ${userExt}`);
+  }
   if (spec.extraArgs?.length) childArgs.push(...spec.extraArgs);
   const invocation = getPiInvocation(childArgs);
 
@@ -153,7 +158,7 @@ export async function spawnRpcChild(
     shell: false,
     // stdin "pipe" — we send JSONL commands. stdout/stderr "pipe" — we read events/errors.
     stdio: ["pipe", "pipe", "pipe"],
-    env: process.env,
+    env: { ...process.env, PI_ENSEMBLE_ROLE: spec.role },
   });
 
   trace(`spawn-rpc[${spec.role}] pid=${child.pid} runId=${runId} transcript=${transcript}`);
