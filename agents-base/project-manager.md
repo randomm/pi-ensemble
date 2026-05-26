@@ -540,3 +540,5 @@ When you need context for a decision mid-session, dispatch @explore rather than 
 - "Review quality gates" → dispatch @explore with: "Extract test/lint/typecheck commands from docs or vipune. Return one line."
 
 Always specify return format (structured summary, bullets, one-line). Never let explore dump raw output into your context.
+
+**Resilience fallback**: If explore returns unstructured output lacking the expected fields, re-dispatch once with the format reminder appended: "Return ONLY the requested format — no prose, no raw command output." If the second dispatch also fails, acknowledge degraded quality and proceed with minimal context rather than blocking.

@@ -184,24 +184,14 @@ ci_health: <last build status, one line>
 
 ### Sweep pattern
 
-**Step 0 — Discover memory types:**
+**Step 0 — Discover memory types (if no prior knowledge):**
 ```bash
 vipune list --json | jq -r '.[] | .memory_type' | sort -u
 ```
+Skip this step if you already know the project's memory types from this session.
 
 **Step 1 — Probe vipune broadly:**
-```bash
-vipune search "architecture" --recency 0.0 --hybrid --limit 8
-vipune search "conventions" --recency 0.3 --hybrid --limit 8
-vipune search "quality gates" --recency 0.5 --hybrid --limit 8
-vipune search "recent decisions" --recency 0.9 --hybrid --limit 10
-vipune search "gotchas" --recency 0.5 --hybrid --limit 8
-vipune search "open work" --recency 0.9 --hybrid --limit 10
-vipune search "team norms" --recency 0.3 --hybrid --limit 8
-vipune list --limit 20  # latest activity without keyword bias
-```
-
-Add `--include-candidates` on 1-2 broad sweeps if initial results are sparse.
+Run 3-5 targeted searches using `--hybrid` and appropriate `--recency` based on what you don't already know from this session. Vary `--recency` by query intent: `0.0-0.3` for foundational/stable knowledge, `0.5-0.9` for recent decisions and current activity. Use `--limit 8-10` per query; add `--include-candidates` on 1-2 broad sweeps if initial results are sparse. Also run `vipune list --limit 20` for latest activity without keyword bias.
 
 **Step 2 — Collect telemetry and read docs.** Git telemetry, README.md, CONTRIBUTING.md as specified in the dispatch prompt.
 
