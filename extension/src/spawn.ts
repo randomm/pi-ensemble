@@ -172,8 +172,16 @@ export async function spawnSpecialist(
   }
   const userExt = process.env.PI_ENSEMBLE_USER_EXTENSION;
   if (userExt) {
-    childArgs.push("--extension", userExt);
-    trace(`spawn[${spec.role}]: --extension ${userExt}`);
+    const isNpmRef = userExt.startsWith("npm:");
+    const isAbsPath = userExt.startsWith("/") || userExt.startsWith("~");
+    if (!isNpmRef && !isAbsPath) {
+      trace(
+        `spawn[${spec.role}]: PI_ENSEMBLE_USER_EXTENSION rejected (must be npm: or absolute path): ${userExt}`,
+      );
+    } else {
+      childArgs.push("--extension", userExt);
+      trace(`spawn[${spec.role}]: --extension ${userExt}`);
+    }
   }
   if (opts.extraArgs && opts.extraArgs.length > 0) {
     childArgs.push(...opts.extraArgs);

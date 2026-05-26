@@ -192,12 +192,16 @@ Grant access in `agents.json` for the roles that need the tool. For example, to 
 
 ```json
 {
-  "roles": {
+  "agent": {
     "developer": {
-      "mcpTools": ["postgres_*"]
+      "permission": {
+        "postgres_*": "allow"
+      }
     },
     "ops": {
-      "mcpTools": ["postgres_*"]
+      "permission": {
+        "postgres_*": "allow"
+      }
     }
   }
 }

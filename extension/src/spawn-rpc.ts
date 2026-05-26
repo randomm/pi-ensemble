@@ -147,8 +147,16 @@ export async function spawnRpcChild(
   if (modelChoice.model) childArgs.push("--model", modelChoice.model);
   const userExt = process.env.PI_ENSEMBLE_USER_EXTENSION;
   if (userExt) {
-    childArgs.push("--extension", userExt);
-    trace(`spawn-rpc[${spec.role}]: --extension ${userExt}`);
+    const isNpmRef = userExt.startsWith("npm:");
+    const isAbsPath = userExt.startsWith("/") || userExt.startsWith("~");
+    if (!isNpmRef && !isAbsPath) {
+      trace(
+        `spawn-rpc[${spec.role}]: PI_ENSEMBLE_USER_EXTENSION rejected (must be npm: or absolute path): ${userExt}`,
+      );
+    } else {
+      childArgs.push("--extension", userExt);
+      trace(`spawn-rpc[${spec.role}]: --extension ${userExt}`);
+    }
   }
   if (spec.extraArgs?.length) childArgs.push(...spec.extraArgs);
   const invocation = getPiInvocation(childArgs);

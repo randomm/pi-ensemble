@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { ROLE_NAMES } from "./roles.js";
 import { trace } from "./trace.js";
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
@@ -25,13 +26,17 @@ const BUILTIN_TOOLS = new Set([
   "question",
 ]);
 
-function loadAgentsJson(): Record<string, { permission?: Record<string, unknown> }> {
+function loadAgentsJson(): Record<
+  string,
+  { permission?: Record<string, string | Record<string, string>> }
+> {
   const agentsPath = path.resolve(__dirname, "../../..", "agents.json");
   try {
     const raw = readFileSync(agentsPath, "utf8");
     const parsed = JSON.parse(raw);
     return parsed.agent ?? {};
-  } catch {
+  } catch (err) {
+    trace(`permission-guard: failed to load agents.json: ${err}`);
     return {};
   }
 }
@@ -45,21 +50,27 @@ function matchesPattern(pattern: string, toolName: string): boolean {
 export function isToolAllowedForRole(
   toolName: string,
   role: string,
-  agentsConfig: Record<string, { permission?: Record<string, unknown> }>,
+  agentsConfig: Record<string, { permission?: Record<string, string | Record<string, string>> }>,
 ): boolean {
   if (BUILTIN_TOOLS.has(toolName)) return true;
   const roleConfig = agentsConfig[role];
-  if (!roleConfig?.permission) return true;
+  if (!roleConfig?.permission) return false; // no config = deny non-builtins
   for (const [pattern, verdict] of Object.entries(roleConfig.permission)) {
-    if (matchesPattern(pattern, toolName)) return verdict === "allow";
+    // Skip nested objects (like 'bash') at this level
+    if (typeof verdict === "object") continue;
+    if (matchesPattern(pattern, toolName)) return verdict === "allow"; // "ask" treated as deny for subagents
   }
-  return true; // not mentioned = allow (additive model)
+  return false; // not mentioned = deny (deny-by-default)
 }
 
 export function registerPermissionGuard(pi: ExtensionAPI): void {
   const role = process.env.PI_ENSEMBLE_ROLE;
   if (!role) {
     trace("permission-guard: no PI_ENSEMBLE_ROLE set, skipping");
+    return;
+  }
+  if (!(ROLE_NAMES as readonly string[]).includes(role)) {
+    trace(`permission-guard: unknown role '${role}', guard inactive`);
     return;
   }
   const agentsConfig = loadAgentsJson();

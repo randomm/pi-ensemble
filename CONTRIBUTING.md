@@ -57,7 +57,7 @@ CI runs the offline tests on every push and PR. Live tests run on the dev machin
 
 **CLI-backed tools** (the current pattern for most prerequisites):
 
-- Add command pattern to bash allowlist in `agents.json` under `cliAllowlist`
+- Add command pattern to `agents.json` under `agent.<role>.permission.bash`
 - Add to the 'Tool Access' section in `agents-base/<role>.md`
 - Run `bun run build` to regenerate role-specific prompts
 
@@ -67,8 +67,8 @@ Examples: `vipune`, `ctx7`, `gh`, `oo`, `parallel-cli`, `jq`, `sqlite3 -readonly
 
 - Install a Pi MCP bridge on the host (`pi install npm:pi-mcp-adapter`)
 - Set `PI_ENSEMBLE_USER_EXTENSION=npm:pi-mcp-adapter` in your shell profile (`~/.zshrc` / `~/.bashrc`)
-- Add tool name or pattern to `agents.json` under `mcpTools` for relevant roles
-- pi-ensemble's tool_call interceptor in `extension/src/dispatch.ts` enforces at runtime for subagents (tools not in a role's allowlist are blocked)
+- Add tool name or pattern with verdict to `agents.json` under `agent.<role>.permission` (e.g., `"postgres_*": "allow"`)
+- pi-ensemble's tool_call interceptor in `extension/src/permission-guard.ts` enforces at runtime for subagents (tools not explicitly allowed are blocked)
 - If you have [pi-permissions](https://github.com/randomm/pi-permissions) installed, it enforces interactively at the top-level session
 - Run `bun run build` to regenerate role-specific prompts
 
