@@ -180,7 +180,7 @@ function descriptionFor(name: SlashCommand): string {
     case "review":
       return "[#PR | path | latest N | empty=full] — On-demand six-pass code review (SECURITY/ERROR/TYPES/PERF/ARCH/SIMPLICITY)";
     case "audit":
-      return "[<path> | empty=full] — Standards-first repo/path audit against docs/config/CI/memory/examples";
+      return "[<path> | <path>=<scope> ...] — Audit repo/path against its own standards (derive from docs/config/examples, not hard-coded)";
   }
 }
 
