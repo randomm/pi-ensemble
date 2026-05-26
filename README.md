@@ -44,15 +44,32 @@ Required CLIs on `$PATH`. The role prompts assume all of these are installed —
 | [`parallel-cli`](https://docs.parallel.ai/cli/overview) | Web search / fetch / deep research used by the `explore` role. `/research` and cross-web investigation depend on it. |
 | [`ctx7`](https://context7.com) | Current third-party library documentation. Specialists run `ctx7 library <name>` → `ctx7 docs <id> <query>` to verify API shape. Free tier works without login. |
 
+### Supply-chain setup (recommended one-time before installing)
+
+Most prerequisites below install from npm or other public registries. Recent supply-chain attacks (compromised maintainer publishes a malicious version, caught and yanked within hours) make a release-age embargo worth setting up **once, globally**:
+
+```bash
+# npm — applies to all `npm install -g …` from now on
+npm config set min-release-age 4d                                 # requires npm ≥ 11.10.0
+
+# bun — applies to project-local `bun add` (global ~/.bunfig.toml is currently
+# silently ignored by `bun add`, see oven-sh/bun#30748; project-local works)
+# extension/bunfig.toml in THIS repo already sets minimumReleaseAge = 345600
+```
+
+This means the install commands below will refuse to fetch any version published in the last 4 days — protecting against the most common attack window. Skip this step if you accept the risk; the install instructions still work without it.
+
+We also recommend `--ignore-scripts` on every npm install (Pi's [own quickstart](https://pi.dev/docs/latest/quickstart) recommends it) to disable postinstall hooks — another common supply-chain vector.
+
 ### Install commands
 
-Copy-pasteable. Pinned versions where supply-chain risk warrants — see "Supply-chain note" below.
+Copy-pasteable. All installs use the latest version your package manager allows (with the embargo above, "latest" means ≥4 days old).
 
 ```bash
 # Pi (per https://pi.dev/docs/latest/quickstart)
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
-# bun (≥ 1.2.20 required for the bunfig minimumReleaseAge guard)
+# bun (≥ 1.2.20)
 curl -fsSL https://bun.com/install | bash
 
 # git, gh, jq — your OS package manager
@@ -70,24 +87,15 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/lightonai/next-plaid/re
 brew install parallel-web/tap/parallel-cli
 parallel-cli login
 
-# ctx7 (see supply-chain note below)
-npm install -g --ignore-scripts ctx7@0.4.3
+# ctx7
+npm install -g --ignore-scripts ctx7
 ```
 
 After install: `vipune version` once to initialise `~/.vipune/`, and `colgrep init $(pwd)` inside any project (the `/start` command does this for you on first use).
 
 Tested on macOS; should work on Linux. Bun ≥ 1.2.20 and Node ≥ 22 (Pi's own requirement) are assumed.
 
-### Supply-chain note (read before installing npm packages)
-
-The extension's own npm dependencies are guarded by a 4-day release-age embargo (`extension/bunfig.toml` + `extension/.npmrc`). The same discipline applies to **user-installed CLIs above** that come from npm:
-
-- **Pi** and **ctx7** install via npm. We recommend `--ignore-scripts` to disable postinstall hooks (matches Pi's official recommendation).
-- **ctx7 is pinned** to `0.4.3` (released 2026-05-21, past the 4-day embargo). To upgrade: wait ≥4 days after a new release, inspect the diff on the [ctx7 npm page](https://www.npmjs.com/package/ctx7), then bump the README pin.
-- **parallel-cli** ships via Homebrew tap (signed releases, lower risk than npm).
-- **vipune, oo, colgrep** ship as Rust binaries or installer scripts — different supply-chain surface than npm.
-
-If you're security-conscious, you can also defer ctx7 entirely; the `explore` role tries to call it but the rest of pi-ensemble works without it. The `developer` and `code-review-specialist` roles also benefit from current library docs.
+If you're security-conscious, you can also defer `ctx7` entirely; the `explore` role tries to call it but the rest of pi-ensemble works without it. The `developer` and `code-review-specialist` roles also benefit from current library docs.
 
 ## Quickstart
 
