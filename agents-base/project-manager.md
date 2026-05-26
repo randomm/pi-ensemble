@@ -541,6 +541,6 @@ When you need context for a decision mid-session, dispatch @explore rather than 
 
 Always specify return format (structured summary, bullets, one-line). Never let explore dump raw output into your context.
 
-**Timeout**: If no response arrives within a reasonable time (explore dispatches should complete within ~2 minutes for context sweeps), proceed with stale/minimal context rather than blocking.
+**Timeout**: If no response arrives within a reasonable time (explore dispatches should complete within 120 seconds for context sweeps), proceed with stale/minimal context rather than blocking.
 
 **Resilience fallback**: If explore response is missing any expected fields: re-dispatch once with the format reminder appended: "Return ONLY the requested format — no prose, no raw command output." If the second dispatch also fails or returns incomplete output, log as degraded context (warning, not error) and continue with whatever partial fields are available.
