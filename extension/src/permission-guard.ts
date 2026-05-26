@@ -14,9 +14,12 @@ export type RoleConfig = Record<string, { permission?: PermPattern }>;
 
 // Constants
 const DECISION_KEY_MAX_ARGS = 200;
+const DECISION_KEY_MAX_LENGTH = 250;
+const MAX_CACHED_DECISIONS = 500;
 const MAX_CONFIG_FILE_SIZE = 1 * 1024 * 1024; // 1MB
 
 // Built-in Pi tool names — never block these
+// Exported for tests and documentation — no longer used as runtime bypass
 export const BUILTIN_TOOLS = new Set([
   "bash",
   "read",
@@ -75,21 +78,48 @@ function loadAgentsJson(): Record<
   }
 }
 
-function loadProjectConfig(): RoleConfig {
-  const configPath = path.join(process.cwd(), ".pi", "permissions.json");
+function loadConfigFile(configPath: string, label: string): RoleConfig {
   try {
-    // Resolve symlinks before reading
-    const resolvedPath = require("node:fs").realpathSync(configPath);
-    const raw = readFileSync(resolvedPath, "utf8");
+    const raw = readFileSync(configPath, "utf8");
 
     // Enforce max file size to prevent DoS
     if (raw.length > MAX_CONFIG_FILE_SIZE) {
-      const msg = `pi-ensemble permission-guard: project config exceeds ${MAX_CONFIG_FILE_SIZE} bytes, skipping`;
+      const msg = `pi-ensemble permission-guard: ${label} config exceeds ${MAX_CONFIG_FILE_SIZE} bytes, skipping`;
       console.warn(msg);
       return {};
     }
 
     return JSON.parse(raw).roles ?? {};
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err) {
+      const code = (err as { code: string }).code;
+      if (code === "ENOENT") {
+        // Missing file is normal — silent
+        return {};
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        const msg = `pi-ensemble permission-guard: cannot read ${label} config (${err})`;
+        console.warn(msg);
+        return {};
+      }
+    }
+    if (err instanceof SyntaxError) {
+      const msg = `pi-ensemble permission-guard: ${label} config is not valid JSON (${err.message})`;
+      console.warn(msg);
+      return {};
+    }
+    // Other errors: trace for debugging
+    trace(`pi-ensemble permission-guard: error loading ${label} config (${err})`);
+    return {};
+  }
+}
+
+function loadProjectConfig(): RoleConfig {
+  const configPath = path.join(process.cwd(), ".pi", "permissions.json");
+  try {
+    // Resolve symlinks before reading
+    const resolvedPath = require("node:fs").realpathSync(configPath);
+    return loadConfigFile(resolvedPath, "project");
   } catch (err) {
     if (err && typeof err === "object" && "code" in err) {
       const code = (err as { code: string }).code;
@@ -103,12 +133,6 @@ function loadProjectConfig(): RoleConfig {
         return {};
       }
     }
-    if (err instanceof SyntaxError) {
-      const msg = `pi-ensemble permission-guard: project config is not valid JSON (${err.message})`;
-      console.warn(msg);
-      return {};
-    }
-    // Other errors: trace for debugging
     trace(`pi-ensemble permission-guard: error loading project config (${err})`);
     return {};
   }
@@ -116,39 +140,7 @@ function loadProjectConfig(): RoleConfig {
 
 function loadGlobalConfig(): RoleConfig {
   const configPath = path.join(os.homedir(), ".pi", "agent", "permissions.json");
-  try {
-    const raw = readFileSync(configPath, "utf8");
-
-    // Enforce max file size to prevent DoS
-    if (raw.length > MAX_CONFIG_FILE_SIZE) {
-      const msg = `pi-ensemble permission-guard: global config exceeds ${MAX_CONFIG_FILE_SIZE} bytes, skipping`;
-      console.warn(msg);
-      return {};
-    }
-
-    return JSON.parse(raw).roles ?? {};
-  } catch (err) {
-    if (err && typeof err === "object" && "code" in err) {
-      const code = (err as { code: string }).code;
-      if (code === "ENOENT") {
-        // Missing file is normal — silent
-        return {};
-      }
-      if (code === "EACCES" || code === "EPERM") {
-        const msg = `pi-ensemble permission-guard: cannot read global config (${err})`;
-        console.warn(msg);
-        return {};
-      }
-    }
-    if (err instanceof SyntaxError) {
-      const msg = `pi-ensemble permission-guard: global config is not valid JSON (${err.message})`;
-      console.warn(msg);
-      return {};
-    }
-    // Other errors: trace for debugging
-    trace(`pi-ensemble permission-guard: error loading global config (${err})`);
-    return {};
-  }
+  return loadConfigFile(configPath, "global");
 }
 
 export function resolveToolPermission(
@@ -166,7 +158,11 @@ export function resolveToolPermission(
     // Use shared helper: exact match first, then wildcard
     const verdict = lookupPermission(roleConfig.permission, toolName);
     if (verdict !== null) {
-      return verdict as PermVerdict;
+      if (verdict === "allow" || verdict === "deny" || verdict === "ask") {
+        return verdict as PermVerdict;
+      }
+      trace(`permission-guard: invalid verdict '${verdict}' in config, treating as deny`);
+      return "deny";
     }
     return null;
   };
@@ -226,10 +222,15 @@ export function isToolAllowedForRole(
 export function decisionKey(toolName: string, args: unknown): string {
   let argsStr: string;
   try {
-    argsStr = JSON.stringify(args ?? {}).slice(0, DECISION_KEY_MAX_ARGS);
+    try {
+      argsStr = JSON.stringify(args ?? {}).slice(0, DECISION_KEY_MAX_ARGS);
+    } catch {
+      // Fallback: just the type name if JSON.stringify fails (e.g., circular refs)
+      argsStr = JSON.stringify({ type: typeof args }).slice(0, DECISION_KEY_MAX_ARGS);
+    }
   } catch {
-    // Fallback: just the type name if JSON.stringify fails (e.g., circular refs)
-    argsStr = JSON.stringify({ type: typeof args }).slice(0, DECISION_KEY_MAX_ARGS);
+    // Last resort: tool name only if even the fallback fails
+    return `${toolName}:unknown`;
   }
   return `${toolName}:${argsStr}`;
   // NOTE: This serializes entire args before truncating. Acceptable for typical tool args (<1KB).
@@ -256,11 +257,11 @@ export function persistDecisions(
       );
     }
 
-    // Evict oldest entries if over 500
+    // Evict oldest entries if over limit
     let entries = [...decisionsMap.entries()].sort((a, b) =>
       b[1].timestamp.localeCompare(a[1].timestamp),
     );
-    if (entries.length > 500) entries = entries.slice(0, 500);
+    if (entries.length > MAX_CACHED_DECISIONS) entries = entries.slice(0, MAX_CACHED_DECISIONS);
 
     // NOTE: writeFileSync blocks the event loop. Acceptable for now: decision writes are
     // <50KB and happen only on "always" choices (not every tool call). Do NOT refactor to async.
@@ -318,14 +319,25 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
       const parsed = JSON.parse(raw);
       let loaded = 0;
       for (const [key, val] of Object.entries(parsed)) {
-        // Validate decision key format: must contain ":" and be ≤ 250 chars
-        if (!key.includes(":") || key.length > 250) {
+        // Validate decision key format: must contain ":" and be ≤ DECISION_KEY_MAX_LENGTH chars
+        if (!key.includes(":") || key.length > DECISION_KEY_MAX_LENGTH) {
           trace(
             `pi-ensemble permission-guard: skipping invalid decision key: ${key.slice(0, 50)}...`,
           );
           continue;
         }
-        decisions.set(key, val as { allowed: boolean; timestamp: string });
+        // Validate decision value structure
+        const record = val as Record<string, unknown>;
+        if (
+          typeof val !== "object" ||
+          val === null ||
+          typeof record.allowed !== "boolean" ||
+          typeof record.timestamp !== "string"
+        ) {
+          trace(`permission-guard: skipping malformed decision for key: ${key.slice(0, 50)}`);
+          continue;
+        }
+        decisions.set(key, { allowed: record.allowed, timestamp: record.timestamp });
         loaded++;
       }
       trace(`permission-guard: loaded ${loaded} cached decisions`);
@@ -355,77 +367,99 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
   trace(`permission-guard: active for role=${role}`);
 
   pi.on("tool_call", async (event, ctx) => {
-    const verdict = resolveToolPermission(
-      event.toolName,
-      role,
-      projectConfig,
-      globalConfig,
-      agentsConfig,
-    );
-
-    if (verdict === "allow") return; // allowed
-
-    // Check cached decisions first (for both deny and ask)
-    const key = decisionKey(event.toolName, event.input);
-    const cached = decisions.get(key);
-    if (cached !== undefined) {
-      if (cached.allowed) return; // cached allow
-      return {
-        block: true,
-        reason: `Tool '${event.toolName}' denied (cached decision)`,
-      };
-    }
-
-    // For deny verdict (not ask), block immediately
-    if (verdict === "deny") {
-      trace(`permission-guard: BLOCKED ${event.toolName} for role=${role} (verdict=deny)`);
-      return {
-        block: true,
-        reason: `Tool '${event.toolName}' is not permitted for role '${role}'`,
-      };
-    }
-
-    // verdict === "ask": prompt if UI, deny if headless
-    if (!ctx.hasUI) {
-      return {
-        block: true,
-        reason: `Tool '${event.toolName}' requires approval (no UI available)`,
-      };
-    }
-
-    // Prompt the user
-    const argsPreview = JSON.stringify(event.input ?? {}).slice(0, 60);
-    const message = `pi-ensemble [${role}]: ${event.toolName} ${argsPreview}`;
-
-    let choice: string | undefined;
     try {
-      choice = await ctx.ui.select(message, [
-        "Allow once",
-        "Allow always",
-        "Deny once",
-        "Deny always",
-      ]);
+      const verdict = resolveToolPermission(
+        event.toolName,
+        role,
+        projectConfig,
+        globalConfig,
+        agentsConfig,
+      );
+
+      if (verdict === "allow") return; // allowed
+
+      // Check cached decisions first (for both deny and ask)
+      const key = decisionKey(event.toolName, event.input);
+      const cached = decisions.get(key);
+      if (cached !== undefined) {
+        if (cached.allowed) return; // cached allow
+        return {
+          block: true,
+          reason: `Tool '${event.toolName}' denied (cached decision)`,
+        };
+      }
+
+      // For deny verdict (not ask), block immediately
+      if (verdict === "deny") {
+        trace(`permission-guard: BLOCKED ${event.toolName} for role=${role} (verdict=deny)`);
+        return {
+          block: true,
+          reason: `Tool '${event.toolName}' is not permitted for role '${role}'`,
+        };
+      }
+
+      // verdict === "ask": prompt if UI, deny if headless
+      if (!ctx.hasUI) {
+        return {
+          block: true,
+          reason: `Tool '${event.toolName}' requires approval (no UI available)`,
+        };
+      }
+
+      // Prompt the user
+      let argsPreview: string;
+      try {
+        argsPreview = JSON.stringify(event.input ?? {}).slice(0, 60);
+      } catch {
+        argsPreview = "[args]";
+      }
+      const message = `pi-ensemble [${role}]: ${event.toolName} ${argsPreview}`;
+
+      let choice: string | undefined;
+      try {
+        choice = await ctx.ui.select(message, [
+          "Allow once",
+          "Allow always",
+          "Deny once",
+          "Deny always",
+        ]);
+      } catch (err) {
+        trace(`pi-ensemble permission-guard: ctx.ui.select failed for ${event.toolName} (${err})`);
+        return { block: true, reason: `Tool '${event.toolName}' denied (UI error)` };
+      }
+
+      if (!choice) {
+        return {
+          block: true,
+          reason: `Tool '${event.toolName}' denied (user cancelled)`,
+        };
+      }
+
+      const allowed = choice === "Allow once" || choice === "Allow always";
+
+      if (choice === "Allow always" || choice === "Deny always") {
+        decisions.set(key, { allowed, timestamp: new Date().toISOString() });
+        // Evict oldest entries if over limit
+        if (decisions.size > MAX_CACHED_DECISIONS) {
+          const entries = [...decisions.entries()].sort((a, b) =>
+            a[1].timestamp.localeCompare(b[1].timestamp),
+          );
+          decisions.clear();
+          const keep = entries.slice(entries.length - MAX_CACHED_DECISIONS);
+          for (const [k, v] of keep) {
+            decisions.set(k, v);
+          }
+        }
+        persistDecisions(decisions);
+      }
+
+      if (!allowed) {
+        return { block: true, reason: `Tool '${event.toolName}' denied by user` };
+      }
     } catch (err) {
-      trace(`pi-ensemble permission-guard: ctx.ui.select failed for ${event.toolName} (${err})`);
-      return { block: true, reason: `Tool '${event.toolName}' denied (UI error)` };
-    }
-
-    if (!choice) {
-      return {
-        block: true,
-        reason: `Tool '${event.toolName}' denied (user cancelled)`,
-      };
-    }
-
-    const allowed = choice === "Allow once" || choice === "Allow always";
-
-    if (choice === "Allow always" || choice === "Deny always") {
-      decisions.set(key, { allowed, timestamp: new Date().toISOString() });
-      persistDecisions(decisions);
-    }
-
-    if (!allowed) {
-      return { block: true, reason: `Tool '${event.toolName}' denied by user` };
+      // Unexpected error: deny and log
+      trace(`permission-guard: internal error handling tool call (${err})`);
+      return { block: true, reason: "Tool denied due to internal error" };
     }
   });
 }
