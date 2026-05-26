@@ -16,7 +16,7 @@ Five slash commands, an orchestrator-shaped system prompt, and six tools that dr
 | `/start` | Initialises a project session — searches memory, indexes the codebase, gathers git/PR/CI state, reports readiness. |
 | `/research <topic>` | Fans out multiple `explore` specialists in parallel against web, codebase, and prior memory. Synthesises and saves. |
 | `/plan <description>` | Drafts a GitHub issue from your input — auto-classifies as bug/feature/epic/chore/spike, applies the right template, asks before creating. |
-| `/work <issue#>` | Runs an issue end-to-end: feature branch → optional parallel worktrees → developer dispatches → **mandatory adversarial gate** → ops commits → PR → **six-pass code review** → CI watch → merge per `AGENTS.md` policy. |
+| `/work <issue#>` | Runs an issue end-to-end: feature branch → optional parallel worktrees → `pair_watch` (developer + live adversarial observer, in one call) → ops commits → PR → **six-pass code review** → CI watch → merge per project policy. |
 | `/review [#PR \| path \| latest N]` | On-demand six-pass code review of a PR, file, directory, or the latest N PRs. Returns a deduplicated, precedence-merged verdict (APPROVED / ISSUES_FOUND / CRITICAL_ISSUES_FOUND). |
 
 Plus two utility commands:
@@ -31,22 +31,63 @@ Plus two utility commands:
 
 Required CLIs on `$PATH`. The role prompts assume all of these are installed — without them, the agents fail at runtime.
 
-| Tool | Purpose | Install |
-|---|---|---|
-| [Pi](https://pi.dev) | The terminal coding agent this extends. | `bun add -g @earendil-works/pi-coding-agent` |
-| [`bun`](https://bun.sh) | Runtime for the extension (loads TS via `jiti`). | `curl -fsSL https://bun.sh/install \| bash` |
-| `git` ≥ 2.20 | Worktrees, branches, diffs. | OS package manager |
-| [`gh`](https://cli.github.com/) | GitHub issue/PR/CI operations from inside `/work` and `/review`. | `brew install gh` |
-| [`vipune`](https://github.com/randomm/vipune) | Cross-session memory (fact + observation patterns). All agents call this. | `cargo install vipune` |
-| [`colgrep`](https://github.com/lightonai/next-plaid) | Semantic **code** search. Used to find existing implementations. | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/lightonai/next-plaid/releases/latest/download/colgrep-installer.sh \| sh` |
-| [`oo`](https://github.com/randomm/oo) | Context-efficient wrapper for chatty CLIs (git, gh) used throughout the role prompts. | `cargo install double-o` |
-| `jq` | Used by `build.sh` to assemble the capability matrix into the PM prompt. | `brew install jq` |
-| [`parallel-cli`](https://docs.parallel.ai/cli/overview) | Web search / fetch / deep research used by the `explore` role. Optional but `/research` dispatches and any cross-web investigation expect it. | `brew install parallel-web/tap/parallel-cli` then `parallel-cli login` |
-| [`ctx7`](https://context7.com) | Current third-party library documentation via the Context7 CLI. Specialists call `ctx7 library <name>` → `ctx7 docs <id> <query>` to verify API shape before writing or reviewing code. Free tier works without login. | `npm install -g ctx7` (Node.js ≥ 18) |
+| Tool | Purpose |
+|---|---|
+| [Pi](https://pi.dev) | The terminal coding agent this extends. |
+| [`bun`](https://bun.com) | Runtime for the extension (loads TS via `jiti`). |
+| `git` ≥ 2.20 | Worktrees, branches, diffs. |
+| [`gh`](https://cli.github.com/) | GitHub issue / PR / CI ops from inside `/work` and `/review`. |
+| [`vipune`](https://github.com/randomm/vipune) | Cross-session memory (fact + observation patterns). All agents call this. |
+| [`colgrep`](https://github.com/lightonai/next-plaid) | Semantic **code** search. Used to find existing implementations. |
+| [`oo`](https://github.com/randomm/oo) | Context-efficient wrapper for chatty CLIs (git, gh). |
+| `jq` | Used by `build.sh` to assemble the capability matrix into the PM prompt. |
+| [`parallel-cli`](https://docs.parallel.ai/cli/overview) | Web search / fetch / deep research used by the `explore` role. `/research` and cross-web investigation depend on it. |
+| [`ctx7`](https://context7.com) | Current third-party library documentation. Specialists run `ctx7 library <name>` → `ctx7 docs <id> <query>` to verify API shape. Free tier works without login. |
 
-Tested on macOS; should work on Linux. Bun ≥ 1.1 and Node ≥ 22 (Pi's own requirement) are assumed.
+### Install commands
 
-After install, run `vipune version` once to initialise `~/.vipune/`, and `colgrep init $(pwd)` inside any project you plan to work in (the `/start` command does this for you on first use).
+Copy-pasteable. Pinned versions where supply-chain risk warrants — see "Supply-chain note" below.
+
+```bash
+# Pi (per https://pi.dev/docs/latest/quickstart)
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+# bun (≥ 1.2.20 required for the bunfig minimumReleaseAge guard)
+curl -fsSL https://bun.com/install | bash
+
+# git, gh, jq — your OS package manager
+brew install git gh jq                                                # macOS
+# sudo apt install git gh jq                                          # Debian/Ubuntu
+
+# vipune, oo — cargo from source (Rust toolchain required)
+cargo install vipune
+cargo install double-o
+
+# colgrep
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/lightonai/next-plaid/releases/latest/download/colgrep-installer.sh | sh
+
+# parallel-cli
+brew install parallel-web/tap/parallel-cli
+parallel-cli login
+
+# ctx7 (see supply-chain note below)
+npm install -g --ignore-scripts ctx7@0.4.3
+```
+
+After install: `vipune version` once to initialise `~/.vipune/`, and `colgrep init $(pwd)` inside any project (the `/start` command does this for you on first use).
+
+Tested on macOS; should work on Linux. Bun ≥ 1.2.20 and Node ≥ 22 (Pi's own requirement) are assumed.
+
+### Supply-chain note (read before installing npm packages)
+
+The extension's own npm dependencies are guarded by a 4-day release-age embargo (`extension/bunfig.toml` + `extension/.npmrc`). The same discipline applies to **user-installed CLIs above** that come from npm:
+
+- **Pi** and **ctx7** install via npm. We recommend `--ignore-scripts` to disable postinstall hooks (matches Pi's official recommendation).
+- **ctx7 is pinned** to `0.4.3` (released 2026-05-21, past the 4-day embargo). To upgrade: wait ≥4 days after a new release, inspect the diff on the [ctx7 npm page](https://www.npmjs.com/package/ctx7), then bump the README pin.
+- **parallel-cli** ships via Homebrew tap (signed releases, lower risk than npm).
+- **vipune, oo, colgrep** ship as Rust binaries or installer scripts — different supply-chain surface than npm.
+
+If you're security-conscious, you can also defer ctx7 entirely; the `explore` role tries to call it but the rest of pi-ensemble works without it. The `developer` and `code-review-specialist` roles also benefit from current library docs.
 
 ## Quickstart
 
@@ -65,7 +106,7 @@ cd ~/some/git/repo
 pi
 # in the Pi prompt:
 > /ensemble-debug
-# should list 8 slash commands, 4 tools, and the per-role model table.
+# should list 8 slash commands, 7 tools, and the per-role model table.
 ```
 
 ## How it works
@@ -74,16 +115,19 @@ The parent `pi` you launch becomes the **project manager (PM)**. When you fire a
 
 Each **specialist** is a child `pi` process spawned with `pi --mode json -p --no-extensions --no-session --append-system-prompt <role.md>`. Six roles ship: `project-manager`, `developer`, `ops`, `explore`, `adversarial-developer`, `code-review-specialist`. Each has its own system prompt assembled from `agents-base/`, `modules/`, and `manifests/` via `build.sh`.
 
-Tools:
+Tools (all async via push-callback — tools return a `{ jobId }` immediately; the final report arrives later as an `[ensemble:async]` user message):
 
 | Tool | Purpose |
 |---|---|
-| `dispatch_specialist` | Single child spawn. |
-| `dispatch_parallel` | Up to 10 concurrent children via `Promise.all`. |
-| `adversarial_loop` | Mandatory pre-commit gate — adversarial reviewer with up to 3 rounds of fixes. |
-| `dispatch_lens_review` | The six-pass code review — fans out six children, each pinned to its lens skill. Findings come back as native `report_finding` tool calls (schema-validated by Pi inside the child), get deduped by `(path, line, title)`, precedence-merged, and turned into a verdict. |
+| `dispatch_specialist` | Spawn exactly ONE specialist (developer / ops / explore / adversarial-developer / code-review-specialist). |
+| `dispatch_parallel` | Fan out 2-10 specialists in parallel; ONE consolidated report arrives when all complete. |
+| `pair_watch` | Live pair-coding gate — spawns developer + adversarial-developer concurrently. Adversarial observes a summarised live stream of dev's turns and may interrupt mid-task. **The pair_watch verdict IS the adversarial gate**; do not call `adversarial_loop` separately afterwards. Default path for `/work` Step 4 and Step 6f fix loops. |
+| `adversarial_loop` | Encapsulated 3-round adversarial review (legacy / fallback path). Used when `pair_watch` returns TIMEOUT / CAP_HIT / DEV_FINISHED_NO_VERDICT. |
+| `dispatch_lens_review` | Six-pass code review — fans out six children, each pinned to its lens skill. Findings come back as native `report_finding` tool calls (schema-validated by Pi inside the child), deduped by `(path, line, title)`, precedence-merged, turned into a verdict. |
+| `dispatch_status` | List in-flight async jobs (jobId, role, elapsed). Metadata only — never transcript content. |
+| `dispatch_kill <jobId>` | Abort a running subagent or batch. |
 
-Per-child transcripts are saved to `~/.pi/agent/ensemble-runs/<date>/<runId>-<role>[-<tag>].json` — replay with `pi --session <path>` or browse via `/runs`.
+Per-child transcripts are saved to `~/.pi/agent/ensemble-runs/<date>/<runId>-<role>[-<tag>].json` — replay with `pi --session <path>` or browse via `/runs`. The user inspects these; orchestrating agents do NOT read them (the dispatch tool's report is the bounded summary by design).
 
 ## Configuring subagent models
 
