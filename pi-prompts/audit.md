@@ -29,6 +29,7 @@ You may specify paths and scopes: e.g., `src/` for src directory only, `src/ lib
 - Severity (critical | high | medium | low)
 - Confidence (high | medium | low)
 - Source standard (documented | enforced | inferred | heuristic)
+- Discovery mode and limitations when discovery degrades
 - Observed deviation
 - Evidence (file:line or pattern)
 - Suggested next action
@@ -310,6 +311,8 @@ Use this exact JSON shape as the discovery contract:
 
 ```json
 {
+  "discovery_mode": "complete",
+  "limitations": [],
   "standards": {
     "documented": [
       {
@@ -339,6 +342,8 @@ Use this exact JSON shape for merged findings and synthesis:
 
 ```json
 {
+  "discovery_mode": "complete",
+  "limitations": [],
   "summary": {
     "critical": 0,
     "high": 1,
@@ -367,6 +372,8 @@ Use this exact JSON shape when one audit pass fails but synthesis continues:
 
 ```json
 {
+  "discovery_mode": "partial",
+  "limitations": ["architecture pass unavailable"],
   "summary": {
     "critical": 0,
     "high": 0,
