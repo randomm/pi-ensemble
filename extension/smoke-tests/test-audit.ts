@@ -72,20 +72,15 @@ class AssertionError extends Error {}
 function assert(cond: unknown, msg: string): asserts cond {
   if (cond) {
     console.log(`✓ ${msg}`);
-    return;
+  } else {
+    console.error(`✗ ${msg}`);
+    exit = 1;
+    throw new AssertionError(msg);
   }
-
-  console.error(`✗ ${msg}`);
-  exit = 1;
-  throw new AssertionError(msg);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function assertRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
-  assert(isRecord(value), `${label} is an object`);
+  assert(typeof value === "object" && value !== null && !Array.isArray(value), `${label} is an object`);
 }
 
 function assertArray(value: unknown, label: string): asserts value is unknown[] {
@@ -98,6 +93,14 @@ function assertString(value: unknown, label: string): asserts value is string {
 
 function assertNumber(value: unknown, label: string): asserts value is number {
   assert(typeof value === "number", `${label} is a number`);
+}
+
+function assertStringFields(record: Record<string, unknown>, label: string, fields: readonly string[]) {
+  for (const field of fields) assertString(record[field], `${label}.${field}`);
+}
+
+function assertNumberFields(record: Record<string, unknown>, label: string, fields: readonly string[]) {
+  for (const field of fields) assertNumber(record[field], `${label}.${field}`);
 }
 
 function getSection(content: string, heading: string) {
@@ -232,9 +235,7 @@ try {
   assert(documented.length > 0, "standards example includes at least one documented entry");
   const firstDocumented = documented[0];
   assertRecord(firstDocumented, "standards.documented[0]");
-  assertString(firstDocumented.source, "standards.documented[0].source");
-  assertString(firstDocumented.summary, "standards.documented[0].summary");
-  assertString(firstDocumented.evidence, "standards.documented[0].evidence");
+  assertStringFields(firstDocumented, "standards.documented[0]", ["source", "summary", "evidence"]);
   assert(firstDocumented.source === "README.md", "standards example includes a documented source");
   assert(
     firstDocumented.summary === "Run bun run check before returning",
@@ -269,14 +270,16 @@ try {
   assert(findings.length === 1, "merged report example includes one finding");
   const firstFinding = findings[0];
   assertRecord(firstFinding, "merged report finding[0]");
-  assertString(firstFinding.category, "merged report finding[0].category");
-  assertString(firstFinding.severity, "merged report finding[0].severity");
-  assertString(firstFinding.confidence, "merged report finding[0].confidence");
-  assertString(firstFinding.standard_source, "merged report finding[0].standard_source");
-  assertString(firstFinding.standard_description, "merged report finding[0].standard_description");
-  assertString(firstFinding.observed_deviation, "merged report finding[0].observed_deviation");
-  assertString(firstFinding.evidence, "merged report finding[0].evidence");
-  assertString(firstFinding.suggested_action, "merged report finding[0].suggested_action");
+  assertStringFields(firstFinding, "merged report finding[0]", [
+    "category",
+    "severity",
+    "confidence",
+    "standard_source",
+    "standard_description",
+    "observed_deviation",
+    "evidence",
+    "suggested_action",
+  ]);
   assert(firstFinding.category === "test-gap", "merged finding includes category");
   assert(firstFinding.severity === "high", "merged finding includes severity");
   assert(firstFinding.confidence === "high", "merged finding includes confidence field");
@@ -289,12 +292,14 @@ try {
   assertRecord(partialJson, "partial failure JSON");
   const partialSummary = partialJson.summary;
   assertRecord(partialSummary, "partial failure summary");
-  assertNumber(partialSummary.critical, "partial failure summary critical");
-  assertNumber(partialSummary.high, "partial failure summary high");
-  assertNumber(partialSummary.medium, "partial failure summary medium");
-  assertNumber(partialSummary.low, "partial failure summary low");
-  assertNumber(partialSummary.passes_completed, "partial failure summary passes_completed");
-  assertNumber(partialSummary.total_passes, "partial failure summary total_passes");
+  assertNumberFields(partialSummary, "partial failure summary", [
+    "critical",
+    "high",
+    "medium",
+    "low",
+    "passes_completed",
+    "total_passes",
+  ]);
   assert(partialSummary.critical === 0, "partial failure summary preserves critical count");
   assert(partialSummary.high === 0, "partial failure summary preserves high count");
   assert(partialSummary.medium === 1, "partial failure summary preserves medium count");
@@ -309,8 +314,7 @@ try {
   assert(passFailures.length === 1, "partial failure example includes one failed pass");
   const firstPassFailure = passFailures[0];
   assertRecord(firstPassFailure, "partial failure pass_failures[0]");
-  assertString(firstPassFailure.pass, "partial failure pass_failures[0].pass");
-  assertString(firstPassFailure.error, "partial failure pass_failures[0].error");
+  assertStringFields(firstPassFailure, "partial failure pass_failures[0]", ["pass", "error"]);
   assert(firstPassFailure.pass === "architecture", "partial failure example names the failed pass");
   assert(
     firstPassFailure.error === "colgrep unavailable",
@@ -321,14 +325,16 @@ try {
   assert(partialFindings.length === 1, "partial failure example keeps remaining findings");
   const firstPartialFinding = partialFindings[0];
   assertRecord(firstPartialFinding, "partial failure findings[0]");
-  assertString(firstPartialFinding.category, "partial failure findings[0].category");
-  assertString(firstPartialFinding.severity, "partial failure findings[0].severity");
-  assertString(firstPartialFinding.confidence, "partial failure findings[0].confidence");
-  assertString(firstPartialFinding.standard_source, "partial failure findings[0].standard_source");
-  assertString(firstPartialFinding.standard_description, "partial failure findings[0].standard_description");
-  assertString(firstPartialFinding.observed_deviation, "partial failure findings[0].observed_deviation");
-  assertString(firstPartialFinding.evidence, "partial failure findings[0].evidence");
-  assertString(firstPartialFinding.suggested_action, "partial failure findings[0].suggested_action");
+  assertStringFields(firstPartialFinding, "partial failure findings[0]", [
+    "category",
+    "severity",
+    "confidence",
+    "standard_source",
+    "standard_description",
+    "observed_deviation",
+    "evidence",
+    "suggested_action",
+  ]);
   assert(
     firstPartialFinding.category === "quality-gate",
     "partial failure example includes a finding category",

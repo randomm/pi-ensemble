@@ -59,7 +59,7 @@ See [../docs/audit-colgrep-policy.md](../docs/audit-colgrep-policy.md) for the c
 
 - Use colgrep for concrete code patterns during standards discovery and audit passes.
 - Prefer files-only for breadth checks and content inspection for concrete matches.
-- Never fail the entire audit if colgrep is unavailable; continue without colgrep and note the limitation in the report.
+- If colgrep is unavailable or fails, continue standards discovery with docs/config/CI/vipune evidence only, and carry a limitation note into synthesis/final report.
 - Keep query examples and fallback guidance in the canonical doc.
 
 ## Phase 0: Argument Normalization
@@ -104,6 +104,7 @@ Your job: derive what this repo INTENDS to follow by inspecting:
    - colgrep 'test pattern' → find typical test structure
    - colgrep 'async function' → find async patterns if the codebase uses them
 
+If colgrep is unavailable or errors, do not abort discovery: continue using docs/config/CI/vipune evidence only, record a limitation note, and proceed as long as you still have enough evidence to build a usable standards model.
 Do NOT use colgrep for meta-questions like 'project architecture' — that returns useless matches.
 
 OUTPUT FORMAT (return this EXACT structure as your final assistant text):
@@ -141,7 +142,7 @@ If a category has no findings, return it as an empty array. Conflicts are import
 
 Wait for the `[ensemble:async]` report. The discovery output becomes the `standardsModel` for audit passes.
 
-**If discovery fails**: Surface the error and halt. Cannot audit without standards.
+**If total discovery fails**: Surface the error and halt. Cannot audit without any usable standards model.
 
 ---
 
