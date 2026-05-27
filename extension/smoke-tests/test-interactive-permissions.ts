@@ -98,6 +98,13 @@ assert(prefix4 === "echo hello", "extractCommandPrefix extracts full command fro
 const prefix5 = extractCommandPrefix("");
 assert(prefix5 === "bash", "extractCommandPrefix returns 'bash' for empty string");
 
+// Security: command separators stop prefix extraction
+assert(extractCommandPrefix("git; rm -rf /") === "git", "extractCommandPrefix stops at semicolon");
+assert(extractCommandPrefix("echo $(whoami)") === "echo", "extractCommandPrefix stops at $()");
+assert(extractCommandPrefix("echo `whoami`") === "echo", "extractCommandPrefix stops at backtick");
+assert(extractCommandPrefix("cmd1 && cmd2") === "cmd1", "extractCommandPrefix stops at &&");
+assert(extractCommandPrefix("cmd1 || cmd2") === "cmd1", "extractCommandPrefix stops at ||");
+
 // Test 6: persistDecisions creates .pi/ directory
 const decisions = new Map<string, { allowed: boolean; timestamp: string }>();
 decisions.set("bash:ls", { allowed: true, timestamp: "2024-01-01T00:00:00Z" });

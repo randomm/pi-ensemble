@@ -18,6 +18,21 @@ const DECISION_KEY_MAX_LENGTH = 250;
 const MAX_CACHED_DECISIONS = 500;
 const MAX_CONFIG_FILE_SIZE = 1 * 1024 * 1024; // 1MB
 
+// Pattern key constants for bash command prefix caching
+const BASH_PATTERN_PREFIX = "bash:";
+const PATTERN_SUFFIX = " *";
+
+// Pattern key helpers
+function buildPatternKey(prefix: string): string {
+  return `${BASH_PATTERN_PREFIX}${prefix}${PATTERN_SUFFIX}`;
+}
+function isPatternKey(key: string): boolean {
+  return key.startsWith(BASH_PATTERN_PREFIX) && key.endsWith(PATTERN_SUFFIX);
+}
+function extractPatternPrefix(key: string): string {
+  return key.slice(BASH_PATTERN_PREFIX.length, -PATTERN_SUFFIX.length);
+}
+
 // Helper: extract command prefix from bash command for pattern caching
 export function extractCommandPrefix(command: string): string {
   const tokens = command
@@ -33,8 +48,21 @@ export function extractCommandPrefix(command: string): string {
       /^\d+$/.test(token) ||
       token.includes(">") ||
       token.includes("|") ||
-      token.includes("&")
+      token.includes("&") ||
+      token.includes(";") ||
+      token.includes("$") ||
+      token.includes("`")
     ) {
+      // If token contains a command separator, extract the part before it
+      const sepIndex =
+        token.indexOf(";") !== -1
+          ? token.indexOf(";")
+          : token.indexOf("$") !== -1
+            ? token.indexOf("$")
+            : token.indexOf("`");
+      if (sepIndex > 0) {
+        prefixTokens.push(token.slice(0, sepIndex));
+      }
       break;
     }
     prefixTokens.push(token);
@@ -420,10 +448,14 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
       // Then check pattern matches (for bash "always" decisions)
       if (event.toolName === "bash") {
         const command = (event.input as { command?: string })?.command ?? "";
+        const commandPrefix = extractCommandPrefix(command);
         for (const [patternKey, decision] of decisions) {
-          if (patternKey.startsWith("bash:") && patternKey.endsWith(" *")) {
-            const prefix = patternKey.slice(5, -2); // remove "bash:" and " *"
-            if (command.startsWith(prefix)) {
+          if (isPatternKey(patternKey)) {
+            const prefix = extractPatternPrefix(patternKey);
+            // Security: enforce word boundary — after prefix, must be space or end of string
+            const nextCharIndex = prefix.length;
+            const isValidMatch = nextCharIndex === command.length || command[nextCharIndex] === " ";
+            if (isValidMatch && command.startsWith(prefix) && prefix === commandPrefix) {
               if (decision.allowed) return; // cached pattern allow
               return {
                 block: true,
@@ -508,7 +540,7 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
       if (choice.startsWith("Allow always") || choice.startsWith("Deny always")) {
         let cacheKey: string;
         if (event.toolName === "bash" && patternScope) {
-          cacheKey = `bash:${patternScope} *`;
+          cacheKey = buildPatternKey(patternScope);
         } else {
           cacheKey = event.toolName; // tool-name level for non-bash
         }
