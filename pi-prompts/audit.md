@@ -45,6 +45,133 @@ You may specify paths and scopes: e.g., `src/` for src directory only, `src/ lib
 
 ---
 
+## Vipune Memory Policy
+
+Vipune is the repo's cross-session memory for durable audit knowledge. Search it before auditing, and write to it sparingly only when the result will help future audits.
+
+**Search before audit** — Derive search terms from the audited scope in `$ARGUMENTS` and any focused subsystem names, then query vipune for that specific context before running audit passes:
+
+```bash
+# For a path-scoped audit, seed searches from the scope and subsystem names first.
+# Examples:
+#   /audit src/auth/        → search "auth", "session", "token"
+#   /audit extension/src/   → search "extension", "command", "smoke test"
+#   /audit manifests/       → search "prompt", "manifest", "role"
+#   /audit pi-prompts/audit.md → search "audit prompt", "vipune policy", "colgrep policy"
+vipune search "$ARGUMENTS" --limit 10
+vipune search "<scoped subsystem>" --limit 10
+vipune search "<path-derived concept>" --limit 5
+
+# Then fall back to broader repo knowledge only when needed.
+vipune search "audit" --limit 10
+vipune search "architecture" --limit 10
+vipune search "convention" --limit 5
+vipune search "quality gate" --limit 5
+vipune search "bug" --limit 5
+vipune search "fix" --limit 5
+```
+
+**Store only after audit** — Write to vipune sparsely, for durable results only:
+
+- ✅ **CRITICAL and HIGH findings** — Severity high-durability issues (as `fact`)
+- ✅ **Inferred conventions** — Patterns discovered from 3+ code examples (as `fact`)
+- ✅ **Architecture decisions** — Structural inferences with evidence (as `fact`)
+- ✅ **Quality gate configurations** — Documented or enforced thresholds (as `fact`)
+- ✅ **Aggregated recurring drift** — One entry for 3+ instances of same pattern (as `fact`)
+- ✅ **Working hypotheses** — Low-confidence observations for verification (as `observation`, decays in ~1-2 weeks)
+
+**Do NOT store** — These do not help future audits:
+
+- ❌ Low-confidence findings of any severity
+- ❌ Low-severity findings with low confidence
+- ❌ Individual heuristic concerns without evidence
+- ❌ Every individual violation of a recurring pattern (aggregate instead)
+- ❌ Temporary issues (failing tests in PR, merge conflicts)
+- ❌ Duplicates or superseded findings
+- ❌ Trivial or language-default observations
+
+**Candidate vs. superseded behavior** — Treat uncertain results as candidates only until they are confirmed by evidence; once a later audit supersedes an earlier result, record the resolution instead of duplicating the old entry.
+
+**Duplicate detection** — Before storing, search for similar entries:
+
+```bash
+vipune search "[audit] CRITICAL: <title>" --limit 5
+vipune search "[audit] Convention: <topic>" --limit 5
+```
+
+If identical: DO NOT duplicate. Reference prior finding or note "last seen".
+
+**Superseding** — If a prior finding is now fixed:
+- Add `[audit] RESOLVED: <title>` entry
+- Future audits skip superseded entries
+
+---
+
+## ColGREP Usage Policy
+
+**Pre-warm/verify indexing** — Before using colgrep:
+
+```bash
+# Check if initialized
+# If not, run: colgrep init
+# If init fails, log warning and continue without colgrep
+```
+
+Never fail entire audit due to colgrep unavailability. Degrade gracefully and note limitation in report.
+
+**Use for concrete implementation queries only** — Colgrep works best when your query describes code that actually exists in source files:
+
+**Good queries** ✅
+- `colgrep "error handling"` — Code has error-handling blocks
+- `colgrep "test coverage"` — Test files contain coverage logic
+- `colgrep "API endpoint"` — API code defines endpoints
+- `colgrep "validation"` — Validation functions exist
+- `colgrep "transaction"` — Database code uses transactions
+- `colgrep "authentication"` — Auth code has auth checks
+- `colgrep "middleware"` — Framework middleware patterns
+- `colgrep "retry on transient HTTP failures"` — HTTP client retry logic
+- `colgrep "session cookie handling"` — Auth session cookie code
+- `colgrep "dependency injection"` — Code injects dependencies
+- `colgrep "circuit breaker"` — Failure-handling patterns
+- `colgrep "cache invalidation"` — Caching invalidation logic
+- `colgrep "user registration"` — User registration flows
+- `colgrep "password hashing"` — Auth password hashing
+
+**Bad queries** ❌
+- `colgrep "project architecture"` — Meta-question, no file contains this
+- `colgrep "workflow conventions"` — Code doesn't describe workflows
+- `colgrep "testing quality gates"` — No file says "quality gates"
+- `colgrep "team norms"` — Norms not in code
+- `colgrep "best practices"` — Subjective, no literal match
+- `colgrep "clean code"` — Subjective, no literal match
+- `colgrep "technical debt"` — Maybe in comments, but poor query
+- `colgrep "coding standards"` — Better to read actual docs
+
+**Breadth vs content inspection**
+
+- **`files-only` mode** — Survey which files match pattern without deep content inspection:
+  ```bash
+  colgrep "test" --files-only    # Find all test files
+  colgrep "router" --files-only  # Find all route files
+  ```
+  Use for: "List all test files to sample", "Survey which modules have auth code"
+
+- **Content inspection (default)** — Extract actual code examples:
+  ```bash
+  colgrep "try catch"  # Get error handling patterns
+  colgrep "endpoint"   # Get API endpoint examples
+  ```
+  Use for: "Infer conventions", "Check consistency", "Trace references"
+
+**When NOT to use colgrep**
+
+- Meta-questions about the project (use vipune search or read docs instead)
+- Vague semantic queries (won't find relevant matches)
+- Questions code doesn't literally contain (use docs/config/CI instead)
+- Performance concerns are minimal — colgrep is fast once indexed
+
+---
+
 ## Phase 0: Argument Normalization
 
 Parse `$ARGUMENTS` into paths and flags:
@@ -285,6 +412,94 @@ Audit transcripts are auto-saved to `~/.pi/agent/ensemble-runs/` under the same 
 DO NOT read transcript files yourself — that bloats context and defeats the bounded-summary invariant of async dispatch.
 
 ---
+
+## Standards Discovery Output Shape
+
+Use this exact JSON shape as the discovery contract:
+
+```json
+{
+  "standards": {
+    "documented": [
+      {
+        "source": "README.md",
+        "summary": "Run bun run check before returning",
+        "evidence": "README.md:42"
+      }
+    ],
+    "enforced": [],
+    "inferred": [],
+    "heuristic": []
+  },
+  "quality_gates": [
+    {
+      "gate": "bun run check",
+      "source": "extension/.npmrc"
+    }
+  ],
+  "architecture_patterns": [],
+  "conflicts": []
+}
+```
+
+## Merged Audit Report Shape
+
+Use this exact JSON shape for merged findings and synthesis:
+
+```json
+{
+  "summary": {
+    "critical": 0,
+    "high": 1,
+    "medium": 0,
+    "low": 0,
+    "passes_completed": 3
+  },
+  "findings": [
+    {
+      "category": "test-gap",
+      "severity": "high",
+      "confidence": "high",
+      "standard_source": "documented",
+      "standard_description": "Offline smoke tests must cover merged finding/report shape",
+      "observed_deviation": "The smoke test only checked for generic substrings.",
+      "evidence": "extension/smoke-tests/test-audit.ts:1",
+      "suggested_action": "Assert a parsed JSON finding object and report wrapper."
+    }
+  ]
+}
+```
+
+## Partial-Failure Graceful Degradation Shape
+
+Use this exact JSON shape when one audit pass fails but synthesis continues:
+
+```json
+{
+  "summary": {
+    "passes_completed": 2,
+    "total_passes": 3
+  },
+  "pass_failures": [
+    {
+      "pass": "architecture",
+      "error": "colgrep unavailable"
+    }
+  ],
+  "findings": [
+    {
+      "category": "quality-gate",
+      "severity": "medium",
+      "confidence": "high",
+      "standard_source": "enforced",
+      "standard_description": "The audit should degrade gracefully when one pass fails.",
+      "observed_deviation": "One pass failed, but the merged report still contains the remaining findings.",
+      "evidence": "pi-prompts/audit.md:1",
+      "suggested_action": "Surface the failure and continue synthesizing the successful passes."
+    }
+  ]
+}
+```
 
 ## Principles
 

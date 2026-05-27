@@ -201,6 +201,207 @@ assert(
   "audit.md mentions /runs for transcript access",
 );
 
+// Test 11: Verify vipune memory policy section exists and is scope-aware
+function getSection(content: string, heading: string) {
+  const start = content.indexOf(heading);
+  assert(start !== -1, `${heading} section exists`);
+  const section = content.slice(start);
+  const next = section.slice(heading.length).search(/\n##\s/);
+  return next === -1 ? section : section.slice(0, heading.length + next);
+}
+
+function parseJsonBlock(section: string, label: string) {
+  const match = section.match(/```json\n([\s\S]*?)\n```/);
+  assert(match !== null, `${label} contains a JSON code block`);
+  if (!match) throw new Error(`missing ${label} JSON block`);
+  return JSON.parse(match[1]) as Record<string, unknown>;
+}
+
+const vipuneSection = getSection(auditContent, '## Vipune Memory Policy');
+assert(
+  vipuneSection.includes('Derive search terms from the audited scope in `$ARGUMENTS`'),
+  'Vipune policy derives search terms from the audited scope',
+);
+assert(
+  vipuneSection.includes('/audit src/auth/        → search "auth", "session", "token"'),
+  'Vipune policy includes a scoped auth example',
+);
+assert(
+  vipuneSection.includes('/audit extension/src/   → search "extension", "command", "smoke test"'),
+  'Vipune policy includes a scoped extension example',
+);
+assert(
+  vipuneSection.includes('/audit pi-prompts/audit.md → search "audit prompt", "vipune policy", "colgrep policy"'),
+  'Vipune policy includes a prompt-scoped example',
+);
+assert(
+  vipuneSection.includes('Candidate vs. superseded behavior'),
+  'Vipune policy documents candidate versus superseded behavior',
+);
+
+// Test 12: Verify colgrep usage policy section exists
+const colgrepSection = getSection(auditContent, '## ColGREP Usage Policy');
+assert(
+  colgrepSection.includes('Pre-warm/verify indexing'),
+  'Colgrep policy mentions pre-warm/verify indexing',
+);
+assert(
+  colgrepSection.includes('Use for concrete implementation queries only'),
+  'Colgrep policy mentions concrete implementation queries',
+);
+assert(
+  colgrepSection.includes('Breadth vs content inspection'),
+  'Colgrep policy explains breadth vs content inspection',
+);
+assert(
+  colgrepSection.includes('files-only'),
+  'Colgrep policy documents files-only breadth mode',
+);
+assert(
+  colgrepSection.includes('Content inspection (default)'),
+  'Colgrep policy documents content inspection mode',
+);
+assert(
+  colgrepSection.includes('Good queries'),
+  'Colgrep policy shows good query examples',
+);
+assert(
+  colgrepSection.includes('Bad queries'),
+  'Colgrep policy shows bad query examples',
+);
+assert(
+  colgrepSection.includes('Never fail entire audit due to colgrep unavailability'),
+  'Colgrep policy degrades gracefully when colgrep is unavailable',
+);
+
+// Test 13: Verify standards discovery output shape
+const standardsSection = getSection(auditContent, '## Standards Discovery Output Shape');
+const standardsJson = parseJsonBlock(standardsSection, 'standards discovery');
+const standards = standardsJson.standards as Record<string, unknown>;
+assert(Array.isArray(standards.documented), 'standards.documented is an array');
+assert(Array.isArray(standards.enforced), 'standards.enforced is an array');
+assert(Array.isArray(standards.inferred), 'standards.inferred is an array');
+assert(Array.isArray(standards.heuristic), 'standards.heuristic is an array');
+assert(Array.isArray(standardsJson.quality_gates), 'quality_gates is an array');
+assert(Array.isArray(standardsJson.architecture_patterns), 'architecture_patterns is an array');
+assert(Array.isArray(standardsJson.conflicts), 'conflicts is an array');
+const documented = standards.documented as Array<Record<string, unknown>>;
+assert(documented[0]?.source === 'README.md', 'standards example includes a documented source');
+assert(documented[0]?.summary === 'Run bun run check before returning', 'standards example includes a summary');
+assert(documented[0]?.evidence === 'README.md:42', 'standards example includes evidence');
+
+// Test 14: Verify merged audit report/finding shape
+const mergedSection = getSection(auditContent, '## Merged Audit Report Shape');
+const mergedJson = parseJsonBlock(mergedSection, 'merged audit report');
+const mergedSummary = mergedJson.summary as Record<string, unknown>;
+assert(mergedSummary.critical === 0, 'merged summary includes critical count');
+assert(mergedSummary.high === 1, 'merged summary includes high count');
+assert(mergedSummary.medium === 0, 'merged summary includes medium count');
+assert(mergedSummary.low === 0, 'merged summary includes low count');
+assert(mergedSummary.passes_completed === 3, 'merged summary includes passes_completed');
+const findings = mergedJson.findings as Array<Record<string, unknown>>;
+assert(findings.length === 1, 'merged report example includes one finding');
+const finding = findings[0];
+assert(finding.category === 'test-gap', 'merged finding includes category');
+assert(finding.severity === 'high', 'merged finding includes severity');
+assert(finding.confidence === 'high', 'merged finding includes confidence');
+assert(finding.standard_source === 'documented', 'merged finding includes standard_source');
+assert(
+  finding.standard_description === 'Offline smoke tests must cover merged finding/report shape',
+  'merged finding includes standard_description',
+);
+assert(
+  finding.observed_deviation === 'The smoke test only checked for generic substrings.',
+  'merged finding includes observed_deviation',
+);
+assert(
+  finding.evidence === 'extension/smoke-tests/test-audit.ts:1',
+  'merged finding includes evidence',
+);
+assert(
+  finding.suggested_action === 'Assert a parsed JSON finding object and report wrapper.',
+  'merged finding includes suggested_action',
+);
+
+// Test 15: Verify partial-failure graceful degradation path
+const partialSection = getSection(auditContent, '## Partial-Failure Graceful Degradation Shape');
+const partialJson = parseJsonBlock(partialSection, 'partial failure');
+const partialSummary = partialJson.summary as Record<string, unknown>;
+assert(partialSummary.passes_completed === 2, 'partial failure example keeps completed pass count');
+assert(partialSummary.total_passes === 3, 'partial failure example keeps total pass count');
+const passFailures = partialJson.pass_failures as Array<Record<string, unknown>>;
+assert(passFailures.length === 1, 'partial failure example includes one failed pass');
+assert(passFailures[0]?.pass === 'architecture', 'partial failure example names the failed pass');
+assert(passFailures[0]?.error === 'colgrep unavailable', 'partial failure example includes the failure reason');
+const partialFindings = partialJson.findings as Array<Record<string, unknown>>;
+assert(partialFindings.length === 1, 'partial failure example keeps remaining findings');
+assert(partialFindings[0]?.category === 'quality-gate', 'partial failure example includes a finding category');
+assert(partialFindings[0]?.severity === 'medium', 'partial failure example includes a finding severity');
+
+// Test 16: Verify policy specific storage guidelines
+assert(
+  vipuneSection.includes('CRITICAL and HIGH findings'),
+  'Vipune policy specifies CRITICAL and HIGH findings are stored',
+);
+assert(
+  vipuneSection.includes('Inferred conventions'),
+  'Vipune policy specifies inferred conventions are stored',
+);
+assert(
+  vipuneSection.includes('Architecture decisions'),
+  'Vipune policy specifies architecture decisions are stored',
+);
+assert(
+  vipuneSection.includes('Quality gate configurations'),
+  'Vipune policy specifies quality gate configurations are stored',
+);
+assert(
+  vipuneSection.includes('Aggregated recurring drift'),
+  'Vipune policy specifies aggregated recurring drift is stored',
+);
+assert(
+  vipuneSection.includes('Do NOT store'),
+  'Vipune policy specifies what is not stored',
+);
+assert(
+  vipuneSection.includes('Low-confidence findings of any severity'),
+  'Vipune policy specifies low-confidence findings are NOT stored',
+);
+assert(
+  vipuneSection.includes('Low-severity findings with low confidence'),
+  'Vipune policy specifies low-severity findings are NOT stored',
+);
+
+// Test 17: Verify query examples and failure handling remain documented
+assert(
+  colgrepSection.includes('colgrep "error handling"'),
+  'Colgrep policy includes a concrete query example',
+);
+assert(
+  colgrepSection.includes('colgrep "API endpoint"'),
+  'Colgrep policy includes an API endpoint query example',
+);
+assert(
+  colgrepSection.includes('colgrep "validation"'),
+  'Colgrep policy includes a validation query example',
+);
+assert(
+  colgrepSection.includes('colgrep "authentication"'),
+  'Colgrep policy includes an authentication query example',
+);
+assert(
+  colgrepSection.includes('If init fails'),
+  'Colgrep policy handles init failure explicitly',
+);
+assert(
+  colgrepSection.includes('continue without colgrep'),
+  'Colgrep policy continues without colgrep on failure',
+);
+assert(
+  colgrepSection.includes('log warning'),
+  'Colgrep policy logs a warning when unavailable',
+);
+
 console.log("\n=== test-audit summary ===");
 console.log("All command registration and prompt flow tests passed.");
 console.log(`exit ${exit}`);
