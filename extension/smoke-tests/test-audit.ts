@@ -13,6 +13,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extensionEntry from "../src/index.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -25,6 +26,10 @@ type PiRecord = {
   registeredCommands: string[];
 };
 
+type RegisterCommand = Pick<ExtensionAPI, "registerCommand">["registerCommand"];
+type RegisteredCommand = Parameters<RegisterCommand>[1];
+type CommandHandler = RegisteredCommand["handler"];
+
 function makePi() {
   const rec: PiRecord = {
     sentMessages: [],
@@ -32,28 +37,27 @@ function makePi() {
   };
   const pi = {
     registerTool: () => undefined,
-    registerCommand: (name: string, def: { handler: (a: string, c: unknown) => Promise<void> }) => {
+    registerCommand: (name, def) => {
       rec.registeredCommands.push(name);
       handlers[name] = def.handler;
     },
     on: () => undefined,
-    sendUserMessage: (msg: string) => {
-      rec.sentMessages.push(msg);
+    sendUserMessage: (msg) => {
+      rec.sentMessages.push(typeof msg === "string" ? msg : JSON.stringify(msg));
     },
-    sendMessage: () => undefined,
-    getCommands: () => [],
-  };
+  } satisfies Pick<ExtensionAPI, "registerTool" | "registerCommand" | "on" | "sendUserMessage">;
   return { pi, rec };
 }
 
-function makeCtx() {
-  return {
+function makeCtx(): Parameters<CommandHandler>[1] {
+  const ctx = {
     isIdle: () => true,
     cwd: process.cwd(),
     ui: {
       notify: () => undefined,
     },
-  };
+  } satisfies Parameters<CommandHandler>[1];
+  return ctx;
 }
 
 class AssertionError extends Error {}
@@ -90,15 +94,14 @@ function assertNumber(value: unknown, label: string) {
   assert(typeof value === "number", `${label} is a number`);
 }
 
-function assertArray(value: unknown, label: string) {
+function assertArray(value: unknown, label: string): asserts value is unknown[] {
   assert(Array.isArray(value), `${label} is an array`);
 }
 
-const handlers: Record<string, (args: string, ctx: unknown) => Promise<void>> = {};
+const handlers: Record<string, CommandHandler> = {};
 const { pi, rec } = makePi();
 
-// biome-ignore lint/suspicious/noExplicitAny: test double intentionally narrows the real ExtensionAPI
-await extensionEntry(pi as any);
+await extensionEntry(pi);
 
 try {
   assert(rec.registeredCommands.includes("audit"), "/audit registered");
@@ -127,14 +130,17 @@ try {
   assert(partialSection.includes("findings"), "partial section mentions findings");
 
   await handlers.audit!("", makeCtx());
-  assert(rec.sentMessages.length === 1, "/audit emits one message for default scope");
+  const sentAfterDefault = rec.sentMessages.length;
+  assert(sentAfterDefault === 1, "/audit emits one message for default scope");
 
   await handlers.audit!("src/", makeCtx());
-  assert(rec.sentMessages.length === 2, "/audit emits a second message for one path");
+  const sentAfterSinglePath = rec.sentMessages.length;
+  assert(sentAfterSinglePath === 2, "/audit emits a second message for one path");
   assert(rec.sentMessages[1].includes("src/"), "/audit forwards a single path argument");
 
   await handlers.audit!("src/ lib/", makeCtx());
-  assert(rec.sentMessages.length === 3, "/audit emits a third message for multiple paths");
+  const sentAfterMultiplePaths = rec.sentMessages.length;
+  assert(sentAfterMultiplePaths === 3, "/audit emits a third message for multiple paths");
   assert(rec.sentMessages[2].includes("src/ lib/"), "/audit forwards multiple path arguments");
 
   const examplesContent = await fs.readFile(AUDIT_EXAMPLES, "utf8");
