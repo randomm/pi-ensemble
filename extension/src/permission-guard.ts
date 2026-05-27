@@ -9,7 +9,7 @@ const __dirname = path.dirname(new URL(import.meta.url).pathname);
 
 // Type definitions
 export type PermVerdict = "allow" | "deny" | "ask";
-type PermPattern = Record<string, PermVerdict>;
+type PermPattern = Record<string, PermVerdict | Record<string, PermVerdict>>;
 export type RoleConfig = Record<string, { permission?: PermPattern }>;
 
 // Constants
@@ -17,6 +17,14 @@ const DECISION_KEY_MAX_ARGS = 200;
 const DECISION_KEY_MAX_LENGTH = 250;
 const MAX_CACHED_DECISIONS = 500;
 const MAX_CONFIG_FILE_SIZE = 1 * 1024 * 1024; // 1MB
+
+// Helper: evict oldest entries from a decisions map
+function evictOldest(map: Map<string, { allowed: boolean; timestamp: string }>, max: number): void {
+  if (map.size <= max) return;
+  const sorted = [...map.entries()].sort((a, b) => b[1].timestamp.localeCompare(a[1].timestamp));
+  map.clear();
+  for (const [k, v] of sorted.slice(0, max)) map.set(k, v);
+}
 
 // Built-in Pi tool names — never block these
 // Exported for tests and documentation — no longer used as runtime bypass
@@ -70,6 +78,7 @@ function loadAgentsJson(): Record<
   try {
     const raw = readFileSync(agentsPath, "utf8");
     const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
     const obj = parsed as {
       agent?: Record<string, { permission?: Record<string, string | Record<string, string>> }>;
     };
@@ -93,8 +102,10 @@ function loadConfigFile(configPath: string, label: string): RoleConfig {
       return {};
     }
 
-    const parsed = JSON.parse(raw) as { roles?: RoleConfig };
-    return parsed.roles ?? {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const rolesObj = parsed as { roles?: RoleConfig };
+    return rolesObj.roles ?? {};
   } catch (err) {
     if (err && typeof err === "object" && "code" in err) {
       const code = (err as { code: string }).code;
@@ -180,26 +191,19 @@ export function resolveToolPermission(
   const globalResult = checkConfig(global);
   if (globalResult) return globalResult;
 
-  // Layer 3: agents.json (existing logic)
+  // Layer 3: agents.json (reuse lookup helper)
   const agentsRoleConfig = agents[role];
   if (agentsRoleConfig?.permission) {
-    for (const [pattern, verdict] of Object.entries(agentsRoleConfig.permission)) {
-      // Skip nested objects (like 'bash') at this level
-      if (typeof verdict === "object") continue;
-      if (
-        pattern === toolName ||
-        (pattern.endsWith("*") && toolName.startsWith(pattern.slice(0, -1)))
-      ) {
-        // Explicit type check: only allow/deny/ask are valid verdicts
-        if (verdict === "allow" || verdict === "deny" || verdict === "ask") {
-          return verdict;
-        }
-        // Invalid verdict: treat as deny and log
-        trace(
-          `pi-ensemble permission-guard: invalid verdict '${verdict}' for tool ${pattern}, treating as deny`,
-        );
-        return "deny";
+    const verdict = lookupPermission(agentsRoleConfig.permission, toolName);
+    if (verdict !== null) {
+      if (verdict === "allow" || verdict === "deny" || verdict === "ask") {
+        return verdict;
       }
+      // Invalid verdict: treat as deny and log
+      trace(
+        `pi-ensemble permission-guard: invalid verdict '${verdict}' for tool ${toolName}, treating as deny`,
+      );
+      return "deny";
     }
   }
 
@@ -225,19 +229,13 @@ export function isToolAllowedForRole(
 }
 
 export function decisionKey(toolName: string, args: unknown): string {
-  let argsStr: string;
   try {
-    try {
-      argsStr = JSON.stringify(args ?? {}).slice(0, DECISION_KEY_MAX_ARGS);
-    } catch {
-      // Fallback: just the type name if JSON.stringify fails (e.g., circular refs)
-      argsStr = JSON.stringify({ type: typeof args }).slice(0, DECISION_KEY_MAX_ARGS);
-    }
-  } catch {
-    // Last resort: tool name only if even the fallback fails
-    return `${toolName}:unknown`;
-  }
-  return `${toolName}:${argsStr}`;
+    return `${toolName}:${JSON.stringify(args ?? {}).slice(0, DECISION_KEY_MAX_ARGS)}`;
+  } catch {}
+  try {
+    return `${toolName}:${JSON.stringify({ type: typeof args }).slice(0, DECISION_KEY_MAX_ARGS)}`;
+  } catch {}
+  return `${toolName}:unknown`;
   // NOTE: This serializes entire args before truncating. Acceptable for typical tool args (<1KB).
   // Do NOT add custom replacer — over-engineering for this use case.
 }
@@ -253,24 +251,12 @@ export function persistDecisions(
     // Ensure .pi/ exists with secure permissions in one call
     mkdirSync(piDir, { recursive: true, mode: 0o700 });
 
-    // Belt-and-braces chmod: log failure instead of silent catch
-    try {
-      chmodSync(piDir, 0o700);
-    } catch (err) {
-      trace(
-        `pi-ensemble permission-guard: chmod ${piDir} failed (${err}) — directory may have incorrect permissions`,
-      );
-    }
-
     // Evict oldest entries if over limit
-    let entries = [...decisionsMap.entries()].sort((a, b) =>
-      b[1].timestamp.localeCompare(a[1].timestamp),
-    );
-    if (entries.length > MAX_CACHED_DECISIONS) entries = entries.slice(0, MAX_CACHED_DECISIONS);
+    evictOldest(decisionsMap, MAX_CACHED_DECISIONS);
 
     // NOTE: writeFileSync blocks the event loop. Acceptable for now: decision writes are
     // <50KB and happen only on "always" choices (not every tool call). Do NOT refactor to async.
-    const obj = Object.fromEntries(entries);
+    const obj = Object.fromEntries(decisionsMap.entries());
     writeFileSync(tmpPath, JSON.stringify(obj, null, 2), { mode: 0o600 });
     renameSync(tmpPath, decisionsPath);
 
@@ -337,7 +323,11 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
           continue;
         }
         const entry = val as Record<string, unknown>;
-        if (typeof entry.allowed !== "boolean" || typeof entry.timestamp !== "string") {
+        if (
+          typeof entry.allowed !== "boolean" ||
+          typeof entry.timestamp !== "string" ||
+          entry.timestamp.length > 50
+        ) {
           trace(`permission-guard: skipping malformed decision for key: ${key.slice(0, 50)}`);
           continue;
         }
@@ -444,16 +434,7 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
       if (choice === "Allow always" || choice === "Deny always") {
         decisions.set(key, { allowed, timestamp: new Date().toISOString() });
         // Evict oldest entries if over limit
-        if (decisions.size > MAX_CACHED_DECISIONS) {
-          const entries = [...decisions.entries()].sort((a, b) =>
-            a[1].timestamp.localeCompare(b[1].timestamp),
-          );
-          decisions.clear();
-          const keep = entries.slice(entries.length - MAX_CACHED_DECISIONS);
-          for (const [k, v] of keep) {
-            decisions.set(k, v);
-          }
-        }
+        evictOldest(decisions, MAX_CACHED_DECISIONS);
         persistDecisions(decisions);
       }
 
