@@ -70,6 +70,8 @@ function lookupPermission(
   return null;
 }
 
+// agents.json ships with the repo, so ENOENT is unexpected and should warn.
+// In contrast, project/global config ENOENT is silent (user may not have created them).
 function loadAgentsJson(): Record<
   string,
   { permission?: Record<string, string | Record<string, string>> }
@@ -84,7 +86,7 @@ function loadAgentsJson(): Record<
     };
     return obj.agent ?? {};
   } catch (err) {
-    const msg = `pi-ensemble permission-guard: failed to load agents.json (${err}) — all non-builtin tools will be blocked`;
+    const msg = `pi-ensemble permission-guard: failed to load agents.json (${err}) — non-builtin tools will require interactive approval (or be blocked in headless mode)`;
     console.warn(msg);
     trace(msg);
     return {};
@@ -231,10 +233,14 @@ export function isToolAllowedForRole(
 export function decisionKey(toolName: string, args: unknown): string {
   try {
     return `${toolName}:${JSON.stringify(args ?? {}).slice(0, DECISION_KEY_MAX_ARGS)}`;
-  } catch {}
+  } catch (err) {
+    trace(`permission-guard: JSON.stringify args failed (${err}), falling back to type-only`);
+  }
   try {
     return `${toolName}:${JSON.stringify({ type: typeof args }).slice(0, DECISION_KEY_MAX_ARGS)}`;
-  } catch {}
+  } catch (err) {
+    trace(`permission-guard: JSON.stringify fallback failed (${err}), using generic key`);
+  }
   return `${toolName}:unknown`;
   // NOTE: This serializes entire args before truncating. Acceptable for typical tool args (<1KB).
   // Do NOT add custom replacer — over-engineering for this use case.
