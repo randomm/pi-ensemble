@@ -84,8 +84,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isRecordArray(value: unknown): value is Array<Record<string, unknown>> {
-  return Array.isArray(value) && value.every(isRecord);
+function assertRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
+  assert(isRecord(value), `${label} is an object`);
+}
+
+function assertArray(value: unknown, label: string): asserts value is unknown[] {
+  assert(Array.isArray(value), `${label} is an array`);
+}
+
+function assertString(value: unknown, label: string): asserts value is string {
+  assert(typeof value === "string", `${label} is a string`);
+}
+
+function assertNumber(value: unknown, label: string): asserts value is number {
+  assert(typeof value === "number", `${label} is a number`);
 }
 
 function getSection(content: string, heading: string) {
@@ -96,11 +108,11 @@ function getSection(content: string, heading: string) {
   return next === -1 ? section : section.slice(0, heading.length + next);
 }
 
-function parseJsonBlock(section: string, label: string): Record<string, unknown> {
+function parseJsonBlock(section: string, label: string): unknown {
   const match = section.match(/```json\n([\s\S]*?)\n```/);
   assert(match !== null, `${label} contains a JSON code block`);
   if (!match) throw new Error(`missing ${label} JSON block`);
-  return JSON.parse(match[1]) as Record<string, unknown>;
+  return JSON.parse(match[1]);
 }
 
 // Capture handlers as they register — registerCommand stores name only above,
@@ -129,6 +141,14 @@ try {
   assert(auditContent.includes("description:"), "audit.md has description field");
   assert(auditContent.includes("argument-hint:"), "audit.md has argument-hint field");
   assert(auditContent.includes("standards-first"), "audit.md body mentions standards-first");
+  assert(
+    auditContent.includes("../docs/audit-vipune-policy.md"),
+    "audit.md references canonical vipune policy",
+  );
+  assert(
+    auditContent.includes("../docs/audit-colgrep-policy.md"),
+    "audit.md references canonical colgrep policy",
+  );
   assert(
     auditContent.includes("Phase 1: Standards Discovery"),
     "audit.md describes Phase 1 (standards discovery)",
@@ -187,135 +207,94 @@ try {
   assert(auditContent.includes("[ensemble:async]"), "audit.md mentions async report format");
   assert(auditContent.includes("/runs"), "audit.md mentions /runs for transcript access");
 
-  // Test 11: Verify vipune memory policy section exists and is scope-aware
+  // Test 11: Verify vipune and colgrep policy references exist
   const vipuneSection = getSection(auditContent, "## Vipune Memory Policy");
   assert(
-    vipuneSection.includes("Derive search terms from the audited scope in `$ARGUMENTS`"),
-    "Vipune policy section includes scope guidance",
-  );
-  assert(vipuneSection.includes("/audit "), "Vipune policy includes at least one scoped example");
-  assert(vipuneSection.includes("/audit src/auth/"), "Vipune policy includes a scoped auth example");
-  assert(
-    vipuneSection.includes("/audit extension/src/"),
-    "Vipune policy includes a scoped extension example",
-  );
-  assert(
-    vipuneSection.includes("Candidate vs. superseded behavior"),
-    "Vipune policy documents candidate versus superseded behavior",
+    vipuneSection.includes("See [../docs/audit-vipune-policy.md](../docs/audit-vipune-policy.md)"),
+    "Vipune policy section uses canonical link",
   );
 
   // Test 12: Verify colgrep usage policy section exists
   const colgrepSection = getSection(auditContent, "## ColGREP Usage Policy");
   assert(
-    colgrepSection.includes("Pre-warm/verify indexing"),
-    "Colgrep policy mentions pre-warm/verify indexing",
-  );
-  assert(colgrepSection.includes("files-only"), "Colgrep policy documents files-only breadth mode");
-  assert(
-    colgrepSection.includes("Content inspection (default)"),
-    "Colgrep policy documents content inspection mode",
-  );
-  assert(colgrepSection.includes("Good queries"), "Colgrep policy includes example queries");
-  assert(colgrepSection.includes("Bad queries"), "Colgrep policy includes anti-examples");
-  assert(
-    colgrepSection.includes("Never fail entire audit due to colgrep unavailability"),
-    "Colgrep policy degrades gracefully when colgrep is unavailable",
+    colgrepSection.includes("See [../docs/audit-colgrep-policy.md](../docs/audit-colgrep-policy.md)"),
+    "Colgrep policy section uses canonical link",
   );
 
   // Test 13: Verify standards discovery output shape
   const standardsSection = getSection(auditContent, "## Standards Discovery Output Shape");
-  const standardsJson = parseJsonBlock(standardsSection, "standards discovery") as {
-    standards: {
-      documented: Array<{
-        source: string;
-        summary: string;
-        evidence: string;
-      }>;
-      enforced: unknown[];
-      inferred: unknown[];
-      heuristic: unknown[];
-    };
-    quality_gates: unknown[];
-    architecture_patterns: unknown[];
-    conflicts: unknown[];
-  };
+  const standardsJson = parseJsonBlock(standardsSection, "standards discovery");
+  assertRecord(standardsJson, "standards discovery JSON");
   const standards = standardsJson.standards;
+  assertRecord(standards, "standards discovery standards");
   const documented = standards.documented;
-  assert(isRecordArray(documented), "standards.documented is an array of objects");
-  assert(Array.isArray(standards.enforced), "standards.enforced is an array");
-  assert(Array.isArray(standards.inferred), "standards.inferred is an array");
-  assert(Array.isArray(standards.heuristic), "standards.heuristic is an array");
-  assert(Array.isArray(standardsJson.quality_gates), "quality_gates is an array");
-  assert(Array.isArray(standardsJson.architecture_patterns), "architecture_patterns is an array");
-  assert(Array.isArray(standardsJson.conflicts), "conflicts is an array");
+  assertArray(documented, "standards.documented");
   assert(documented.length > 0, "standards example includes at least one documented entry");
-  assert(documented[0].source === "README.md", "standards example includes a documented source");
+  const firstDocumented = documented[0];
+  assertRecord(firstDocumented, "standards.documented[0]");
+  assertString(firstDocumented.source, "standards.documented[0].source");
+  assertString(firstDocumented.summary, "standards.documented[0].summary");
+  assertString(firstDocumented.evidence, "standards.documented[0].evidence");
+  assert(firstDocumented.source === "README.md", "standards example includes a documented source");
   assert(
-    documented[0].summary === "Run bun run check before returning",
+    firstDocumented.summary === "Run bun run check before returning",
     "standards example includes a summary",
   );
-  assert(documented[0].evidence === "README.md:42", "standards example includes evidence");
+  assert(firstDocumented.evidence === "README.md:42", "standards example includes evidence");
+  assertArray(standards.enforced, "standards.enforced");
+  assertArray(standards.inferred, "standards.inferred");
+  assertArray(standards.heuristic, "standards.heuristic");
+  assertArray(standardsJson.quality_gates, "quality_gates");
+  assertArray(standardsJson.architecture_patterns, "architecture_patterns");
+  assertArray(standardsJson.conflicts, "conflicts");
 
   // Test 14: Verify merged audit report/finding shape
   const mergedSection = getSection(auditContent, "## Merged Audit Report Shape");
-  const mergedJson = parseJsonBlock(mergedSection, "merged audit report") as {
-    summary: {
-      critical: number;
-      high: number;
-      medium: number;
-      low: number;
-      passes_completed: number;
-    };
-    findings: Array<{
-      category: string;
-      severity: string;
-      confidence: string;
-      standard_source: string;
-      standard_description: string;
-      observed_deviation: string;
-      evidence: string;
-      suggested_action: string;
-    }>;
-  };
+  const mergedJson = parseJsonBlock(mergedSection, "merged audit report");
+  assertRecord(mergedJson, "merged audit report JSON");
   const mergedSummary = mergedJson.summary;
+  assertRecord(mergedSummary, "merged audit report summary");
+  assertNumber(mergedSummary.critical, "merged summary critical");
+  assertNumber(mergedSummary.high, "merged summary high");
+  assertNumber(mergedSummary.medium, "merged summary medium");
+  assertNumber(mergedSummary.low, "merged summary low");
+  assertNumber(mergedSummary.passes_completed, "merged summary passes_completed");
   assert(mergedSummary.critical === 0, "merged summary includes critical count");
   assert(mergedSummary.high === 1, "merged summary includes high count");
   assert(mergedSummary.medium === 0, "merged summary includes medium count");
   assert(mergedSummary.low === 0, "merged summary includes low count");
   assert(mergedSummary.passes_completed === 3, "merged summary includes passes_completed");
   const findings = mergedJson.findings;
+  assertArray(findings, "merged audit report findings");
   assert(findings.length === 1, "merged report example includes one finding");
-  const finding = findings[0];
-  assert(finding.category === "test-gap", "merged finding includes category");
-  assert(finding.severity === "high", "merged finding includes severity");
-  assert(finding.confidence === "high", "merged finding includes confidence field");
-  assert(finding.standard_source === "documented", "merged finding includes standard_source field");
-  assert(finding.evidence === "extension/smoke-tests/test-audit.ts:1", "merged finding includes evidence field");
+  const firstFinding = findings[0];
+  assertRecord(firstFinding, "merged report finding[0]");
+  assertString(firstFinding.category, "merged report finding[0].category");
+  assertString(firstFinding.severity, "merged report finding[0].severity");
+  assertString(firstFinding.confidence, "merged report finding[0].confidence");
+  assertString(firstFinding.standard_source, "merged report finding[0].standard_source");
+  assertString(firstFinding.standard_description, "merged report finding[0].standard_description");
+  assertString(firstFinding.observed_deviation, "merged report finding[0].observed_deviation");
+  assertString(firstFinding.evidence, "merged report finding[0].evidence");
+  assertString(firstFinding.suggested_action, "merged report finding[0].suggested_action");
+  assert(firstFinding.category === "test-gap", "merged finding includes category");
+  assert(firstFinding.severity === "high", "merged finding includes severity");
+  assert(firstFinding.confidence === "high", "merged finding includes confidence field");
+  assert(firstFinding.standard_source === "documented", "merged finding includes standard_source field");
+  assert(firstFinding.evidence === "extension/smoke-tests/test-audit.ts:1", "merged finding includes evidence field");
 
   // Test 15: Verify partial-failure graceful degradation path
   const partialSection = getSection(auditContent, "## Partial-Failure Graceful Degradation Shape");
-  const partialJson = parseJsonBlock(partialSection, "partial failure") as {
-    summary: {
-      critical: number;
-      high: number;
-      medium: number;
-      low: number;
-      passes_completed: number;
-      total_passes: number;
-    };
-    pass_failures: Array<{ pass: string; error: string }>;
-    findings: Array<{
-      category: string;
-      severity: string;
-      confidence: string;
-      standard_source: string;
-      standard_description: string;
-      observed_deviation: string;
-      evidence: string;
-      suggested_action: string;
-    }>;
-  };
+  const partialJson = parseJsonBlock(partialSection, "partial failure");
+  assertRecord(partialJson, "partial failure JSON");
   const partialSummary = partialJson.summary;
+  assertRecord(partialSummary, "partial failure summary");
+  assertNumber(partialSummary.critical, "partial failure summary critical");
+  assertNumber(partialSummary.high, "partial failure summary high");
+  assertNumber(partialSummary.medium, "partial failure summary medium");
+  assertNumber(partialSummary.low, "partial failure summary low");
+  assertNumber(partialSummary.passes_completed, "partial failure summary passes_completed");
+  assertNumber(partialSummary.total_passes, "partial failure summary total_passes");
   assert(partialSummary.critical === 0, "partial failure summary preserves critical count");
   assert(partialSummary.high === 0, "partial failure summary preserves high count");
   assert(partialSummary.medium === 1, "partial failure summary preserves medium count");
@@ -326,41 +305,52 @@ try {
   );
   assert(partialSummary.total_passes === 3, "partial failure example keeps total pass count");
   const passFailures = partialJson.pass_failures;
+  assertArray(passFailures, "partial failure pass_failures");
   assert(passFailures.length === 1, "partial failure example includes one failed pass");
-  assert(passFailures[0].pass === "architecture", "partial failure example names the failed pass");
+  const firstPassFailure = passFailures[0];
+  assertRecord(firstPassFailure, "partial failure pass_failures[0]");
+  assertString(firstPassFailure.pass, "partial failure pass_failures[0].pass");
+  assertString(firstPassFailure.error, "partial failure pass_failures[0].error");
+  assert(firstPassFailure.pass === "architecture", "partial failure example names the failed pass");
   assert(
-    passFailures[0].error === "colgrep unavailable",
+    firstPassFailure.error === "colgrep unavailable",
     "partial failure example includes the failure reason",
   );
   const partialFindings = partialJson.findings;
+  assertArray(partialFindings, "partial failure findings");
   assert(partialFindings.length === 1, "partial failure example keeps remaining findings");
+  const firstPartialFinding = partialFindings[0];
+  assertRecord(firstPartialFinding, "partial failure findings[0]");
+  assertString(firstPartialFinding.category, "partial failure findings[0].category");
+  assertString(firstPartialFinding.severity, "partial failure findings[0].severity");
+  assertString(firstPartialFinding.confidence, "partial failure findings[0].confidence");
+  assertString(firstPartialFinding.standard_source, "partial failure findings[0].standard_source");
+  assertString(firstPartialFinding.standard_description, "partial failure findings[0].standard_description");
+  assertString(firstPartialFinding.observed_deviation, "partial failure findings[0].observed_deviation");
+  assertString(firstPartialFinding.evidence, "partial failure findings[0].evidence");
+  assertString(firstPartialFinding.suggested_action, "partial failure findings[0].suggested_action");
   assert(
-    partialFindings[0].category === "quality-gate",
+    firstPartialFinding.category === "quality-gate",
     "partial failure example includes a finding category",
   );
   assert(
-    partialFindings[0].severity === "medium",
+    firstPartialFinding.severity === "medium",
     "partial failure example includes a finding severity",
   );
-  assert("confidence" in partialFindings[0], "partial failure example includes confidence field");
+  assert("confidence" in firstPartialFinding, "partial failure example includes confidence field");
   assert(
-    "evidence" in partialFindings[0],
+    "evidence" in firstPartialFinding,
     "partial failure example includes evidence field",
   );
 
   // Test 16: Verify policy-specific storage and failure handling stay documented
   assert(
-    vipuneSection.includes("CRITICAL and HIGH findings"),
-    "Vipune policy preserves high-severity storage guidance",
-  );
-  assert(vipuneSection.includes("Do NOT store"), "Vipune policy preserves non-storage guidance");
-  assert(
-    colgrepSection.includes('colgrep "error handling"'),
-    "Colgrep policy includes a representative query example",
+    vipuneSection.includes("See [../docs/audit-vipune-policy.md](../docs/audit-vipune-policy.md)"),
+    "Vipune policy preserves short reference",
   );
   assert(
-    colgrepSection.includes("continue without colgrep"),
-    "Colgrep policy preserves fallback behavior",
+    colgrepSection.includes("See [../docs/audit-colgrep-policy.md](../docs/audit-colgrep-policy.md)"),
+    "Colgrep policy preserves short reference",
   );
 } catch (error) {
   if (!(error instanceof AssertionError)) {
