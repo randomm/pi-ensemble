@@ -477,6 +477,10 @@ Use this exact JSON shape when one audit pass fails but synthesis continues:
 ```json
 {
   "summary": {
+    "critical": 0,
+    "high": 0,
+    "medium": 1,
+    "low": 0,
     "passes_completed": 2,
     "total_passes": 3
   },
