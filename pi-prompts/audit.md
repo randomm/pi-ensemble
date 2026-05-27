@@ -307,101 +307,51 @@ DO NOT read transcript files yourself — that bloats context and defeats the bo
 
 ## Standards Discovery Output Shape
 
-Use this exact JSON shape as the discovery contract:
+See [../docs/audit-contract-examples.md](../docs/audit-contract-examples.md) for full examples.
 
-```json
-{
-  "discovery_mode": "complete",
-  "limitations": [],
-  "standards": {
-    "documented": [
-      {
-        "source": "README.md",
-        "summary": "Run bun run check before returning",
-        "evidence": "README.md:42"
-      }
-    ],
-    "enforced": [],
-    "inferred": [],
-    "heuristic": []
-  },
-  "quality_gates": [
-    {
-      "gate": "bun run check",
-      "source": "extension/.npmrc"
-    }
-  ],
-  "architecture_patterns": [],
-  "conflicts": []
-}
-```
+Required keys:
+- `discovery_mode`
+- `limitations`
+- `standards`
+- `quality_gates`
+- `architecture_patterns`
+- `conflicts`
+
+`standards` contains these arrays:
+- `documented[]` → `source`, `summary`, `evidence`
+- `enforced[]` → `source`, `rule`, `tool`
+- `inferred[]` → `source`, `convention`, `confidence`
+- `heuristic[]` → `assumption`, `basis`
+
+`quality_gates[]` entries use `gate` + `source`; `architecture_patterns[]` use `pattern` + `evidence`; `conflicts[]` use `description` + `signals`.
 
 ## Merged Audit Report Shape
 
-Use this exact JSON shape for merged findings and synthesis:
+See [../docs/audit-contract-examples.md](../docs/audit-contract-examples.md) for full examples.
 
-```json
-{
-  "discovery_mode": "complete",
-  "limitations": [],
-  "summary": {
-    "critical": 0,
-    "high": 1,
-    "medium": 0,
-    "low": 0,
-    "passes_completed": 3
-  },
-  "findings": [
-    {
-      "category": "test-gap",
-      "severity": "high",
-      "confidence": "high",
-      "standard_source": "documented",
-      "standard_description": "Offline smoke tests must cover merged finding/report shape",
-      "observed_deviation": "The smoke test only checked for generic substrings.",
-      "evidence": "extension/smoke-tests/test-audit.ts:1",
-      "suggested_action": "Assert a parsed JSON finding object and report wrapper."
-    }
-  ]
-}
-```
+Required keys:
+- `discovery_mode`
+- `limitations`
+- `summary`
+- `findings`
+
+`summary` contains `critical`, `high`, `medium`, `low`, and `passes_completed`.
+`findings[]` entries use `category`, `severity`, `confidence`, `standard_source`, `standard_description`, `observed_deviation`, `evidence`, and `suggested_action`.
 
 ## Partial-Failure Graceful Degradation Shape
 
-Use this exact JSON shape when one audit pass fails but synthesis continues:
+See [../docs/audit-contract-examples.md](../docs/audit-contract-examples.md) for full examples.
 
-```json
-{
-  "discovery_mode": "partial",
-  "limitations": ["architecture pass unavailable"],
-  "summary": {
-    "critical": 0,
-    "high": 0,
-    "medium": 1,
-    "low": 0,
-    "passes_completed": 2,
-    "total_passes": 3
-  },
-  "pass_failures": [
-    {
-      "pass": "architecture",
-      "error": "colgrep unavailable"
-    }
-  ],
-  "findings": [
-    {
-      "category": "quality-gate",
-      "severity": "medium",
-      "confidence": "high",
-      "standard_source": "enforced",
-      "standard_description": "The audit should degrade gracefully when one pass fails.",
-      "observed_deviation": "One pass failed, but the merged report still contains the remaining findings.",
-      "evidence": "pi-prompts/audit.md:1",
-      "suggested_action": "Surface the failure and continue synthesizing the successful passes."
-    }
-  ]
-}
-```
+Required keys:
+- `discovery_mode`
+- `limitations`
+- `summary`
+- `pass_failures`
+- `findings`
+
+`summary` contains `critical`, `high`, `medium`, `low`, `passes_completed`, and `total_passes`.
+`pass_failures[]` entries use `pass` + `error`.
+`findings[]` use the same fields as the merged report.
 
 ## Principles
 

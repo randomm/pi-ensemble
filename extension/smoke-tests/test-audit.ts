@@ -6,8 +6,8 @@
  *   - command registration and message wiring
  *   - prompt frontmatter keys
  *   - policy link presence
- *   - JSON contract shapes for standards discovery, merged reporting, and
- *     partial-failure synthesis
+ *   - compact contract guidance in the runtime prompt
+ *   - a few load-bearing shape checks in the non-runtime examples doc
  */
 
 import fs from "node:fs/promises";
@@ -18,6 +18,7 @@ import extensionEntry from "../src/index.ts";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJ_DIR = path.resolve(__dirname, "..", "..");
 const AUDIT_PROMPT = path.join(PROJ_DIR, "pi-prompts", "audit.md");
+const AUDIT_EXAMPLES = path.join(PROJ_DIR, "docs", "audit-contract-examples.md");
 
 type PiRecord = {
   sentMessages: string[];
@@ -63,24 +64,10 @@ function assert(condition: unknown, message: string): asserts condition {
   throw new AssertionError(message);
 }
 
-function assertObject(value: unknown, label: string): asserts value is Record<string, unknown> {
-  assert(typeof value === "object" && value !== null && !Array.isArray(value), `${label} is an object`);
-}
-
-function assertArray(value: unknown, label: string): asserts value is unknown[] {
-  assert(Array.isArray(value), `${label} is an array`);
-}
-
-function assertString(value: unknown, label: string): asserts value is string {
-  assert(typeof value === "string", `${label} is a string`);
-}
-
-function assertNumber(value: unknown, label: string): asserts value is number {
-  assert(typeof value === "number", `${label} is a number`);
-}
-
-function requireKeys(record: Record<string, unknown>, label: string, keys: readonly string[]) {
-  for (const key of keys) assert(key in record, `${label}.${key} exists`);
+function parseJsonBlock(section: string, label: string): unknown {
+  const match = section.match(/```json\n([\s\S]*?)\n```/);
+  assert(match !== null, `${label} contains a JSON code block`);
+  return JSON.parse(match[1]);
 }
 
 function getSection(content: string, heading: string) {
@@ -91,172 +78,20 @@ function getSection(content: string, heading: string) {
   return next === -1 ? section : section.slice(0, heading.length + next);
 }
 
-function parseJsonBlock(section: string, label: string): unknown {
-  const match = section.match(/```json\n([\s\S]*?)\n```/);
-  assert(match !== null, `${label} contains a JSON code block`);
-  return JSON.parse(match[1]);
+function assertObject(value: unknown, label: string): asserts value is Record<string, unknown> {
+  assert(typeof value === "object" && value !== null && !Array.isArray(value), `${label} is an object`);
 }
 
-function assertEntryShape(value: unknown, label: string, keys: readonly string[]) {
-  assertObject(value, label);
-  requireKeys(value, label, keys);
-  for (const key of keys) assertString(value[key], `${label}.${key}`);
+function assertString(value: unknown, label: string) {
+  assert(typeof value === "string", `${label} is a string`);
 }
 
-function assertConflictShape(value: unknown, label: string) {
-  assertObject(value, label);
-  requireKeys(value, label, ["description", "signals"]);
-  assertString(value.description, `${label}.description`);
-  assertArray(value.signals, `${label}.signals`);
+function assertNumber(value: unknown, label: string) {
+  assert(typeof value === "number", `${label} is a number`);
 }
 
-function assertStandardsShape(value: unknown) {
-  assertObject(value, "standards discovery JSON");
-  requireKeys(value, "standards discovery JSON", [
-    "standards",
-    "quality_gates",
-    "architecture_patterns",
-    "conflicts",
-    "discovery_mode",
-    "limitations",
-  ]);
-  assertString(value.discovery_mode, "standards discovery JSON.discovery_mode");
-  assertArray(value.limitations, "standards discovery JSON.limitations");
-
-  const standards = value.standards;
-  assertObject(standards, "standards discovery JSON.standards");
-  requireKeys(standards, "standards discovery JSON.standards", [
-    "documented",
-    "enforced",
-    "inferred",
-    "heuristic",
-  ]);
-  for (const field of ["documented", "enforced", "inferred", "heuristic"] as const) {
-    assertArray(standards[field], `standards discovery JSON.standards.${field}`);
-  }
-  if (standards.documented.length > 0) {
-    assertEntryShape(standards.documented[0], "standards discovery JSON.standards.documented[0]", [
-      "source",
-      "summary",
-      "evidence",
-    ]);
-  }
-  if (standards.enforced.length > 0) {
-    assertEntryShape(standards.enforced[0], "standards discovery JSON.standards.enforced[0]", [
-      "source",
-      "rule",
-      "tool",
-    ]);
-  }
-  if (standards.inferred.length > 0) {
-    assertEntryShape(standards.inferred[0], "standards discovery JSON.standards.inferred[0]", [
-      "source",
-      "convention",
-      "confidence",
-    ]);
-  }
-  if (standards.heuristic.length > 0) {
-    assertEntryShape(standards.heuristic[0], "standards discovery JSON.standards.heuristic[0]", [
-      "assumption",
-      "basis",
-    ]);
-  }
-
-  assertArray(value.quality_gates, "standards discovery JSON.quality_gates");
-  if (value.quality_gates.length > 0) {
-    assertEntryShape(value.quality_gates[0], "standards discovery JSON.quality_gates[0]", ["gate", "source"]);
-  }
-  assertArray(value.architecture_patterns, "standards discovery JSON.architecture_patterns");
-  if (value.architecture_patterns.length > 0) {
-    assertEntryShape(value.architecture_patterns[0], "standards discovery JSON.architecture_patterns[0]", [
-      "pattern",
-      "evidence",
-    ]);
-  }
-  assertArray(value.conflicts, "standards discovery JSON.conflicts");
-  if (value.conflicts.length > 0) {
-    assertConflictShape(value.conflicts[0], "standards discovery JSON.conflicts[0]");
-  }
-}
-
-function assertMergedShape(value: unknown) {
-  assertObject(value, "merged audit report JSON");
-  requireKeys(value, "merged audit report JSON", ["summary", "findings", "discovery_mode", "limitations"]);
-  assertString(value.discovery_mode, "merged audit report JSON.discovery_mode");
-  assertArray(value.limitations, "merged audit report JSON.limitations");
-
-  const summary = value.summary;
-  assertObject(summary, "merged audit report JSON.summary");
-  requireKeys(summary, "merged audit report JSON.summary", [
-    "critical",
-    "high",
-    "medium",
-    "low",
-    "passes_completed",
-  ]);
-  for (const key of ["critical", "high", "medium", "low", "passes_completed"] as const) {
-    assertNumber(summary[key], `merged audit report JSON.summary.${key}`);
-  }
-
-  assertArray(value.findings, "merged audit report JSON.findings");
-  if (value.findings.length > 0) {
-    assertEntryShape(value.findings[0], "merged audit report JSON.findings[0]", [
-      "category",
-      "severity",
-      "confidence",
-      "standard_source",
-      "standard_description",
-      "observed_deviation",
-      "evidence",
-      "suggested_action",
-    ]);
-  }
-}
-
-function assertPartialShape(value: unknown) {
-  assertObject(value, "partial failure JSON");
-  requireKeys(value, "partial failure JSON", [
-    "summary",
-    "pass_failures",
-    "findings",
-    "discovery_mode",
-    "limitations",
-  ]);
-  assertString(value.discovery_mode, "partial failure JSON.discovery_mode");
-  assertArray(value.limitations, "partial failure JSON.limitations");
-
-  const summary = value.summary;
-  assertObject(summary, "partial failure JSON.summary");
-  requireKeys(summary, "partial failure JSON.summary", [
-    "critical",
-    "high",
-    "medium",
-    "low",
-    "passes_completed",
-    "total_passes",
-  ]);
-  for (const key of ["critical", "high", "medium", "low", "passes_completed", "total_passes"] as const) {
-    assertNumber(summary[key], `partial failure JSON.summary.${key}`);
-  }
-
-  assertArray(value.pass_failures, "partial failure JSON.pass_failures");
-  if (value.pass_failures.length > 0) {
-    assertEntryShape(value.pass_failures[0], "partial failure JSON.pass_failures[0]", ["pass", "error"]);
-  }
-
-  assertArray(value.findings, "partial failure JSON.findings");
-  if (value.findings.length > 0) {
-    assertEntryShape(value.findings[0], "partial failure JSON.findings[0]", [
-      "category",
-      "severity",
-      "confidence",
-      "standard_source",
-      "standard_description",
-      "observed_deviation",
-      "evidence",
-      "suggested_action",
-    ]);
-  }
+function assertArray(value: unknown, label: string) {
+  assert(Array.isArray(value), `${label} is an array`);
 }
 
 const handlers: Record<string, (args: string, ctx: unknown) => Promise<void>> = {};
@@ -271,38 +106,82 @@ try {
   const auditContent = await fs.readFile(AUDIT_PROMPT, "utf8");
   const frontmatter = auditContent.match(/^---\n([\s\S]*?)\n---\n/);
   assert(frontmatter !== null, "audit.md has frontmatter");
-  if (frontmatter) {
-    assert(frontmatter[1].includes("description:"), "audit.md frontmatter includes description");
-    assert(frontmatter[1].includes("argument-hint:"), "audit.md frontmatter includes argument-hint");
-  }
+  assert(frontmatter?.[1].includes("description:"), "audit.md frontmatter includes description");
+  assert(frontmatter?.[1].includes("argument-hint:"), "audit.md frontmatter includes argument-hint");
   assert(auditContent.includes("../docs/audit-vipune-policy.md"), "audit.md references vipune policy");
   assert(auditContent.includes("../docs/audit-colgrep-policy.md"), "audit.md references colgrep policy");
+  assert(auditContent.includes("../docs/audit-contract-examples.md"), "audit.md references contract examples doc");
+  assert(!auditContent.includes("```json"), "runtime prompt no longer contains inline JSON examples");
 
-  const defaultCtx = makeCtx();
-  await handlers.audit!("", defaultCtx);
+  const discoverySection = getSection(auditContent, "## Standards Discovery Output Shape");
+  assert(discoverySection.includes("discovery_mode"), "discovery section mentions discovery_mode");
+  assert(discoverySection.includes("quality_gates"), "discovery section mentions quality_gates");
+  assert(discoverySection.includes("../docs/audit-contract-examples.md"), "discovery section points to examples doc");
+
+  const mergedSection = getSection(auditContent, "## Merged Audit Report Shape");
+  assert(mergedSection.includes("summary"), "merged section mentions summary");
+  assert(mergedSection.includes("findings"), "merged section mentions findings");
+
+  const partialSection = getSection(auditContent, "## Partial-Failure Graceful Degradation Shape");
+  assert(partialSection.includes("pass_failures"), "partial section mentions pass_failures");
+  assert(partialSection.includes("findings"), "partial section mentions findings");
+
+  await handlers.audit!("", makeCtx());
   assert(rec.sentMessages.length === 1, "/audit emits one message for default scope");
 
-  const srcCtx = makeCtx();
-  await handlers.audit!("src/", srcCtx);
+  await handlers.audit!("src/", makeCtx());
   assert(rec.sentMessages.length === 2, "/audit emits a second message for one path");
   assert(rec.sentMessages[1].includes("src/"), "/audit forwards a single path argument");
 
-  const multiCtx = makeCtx();
-  await handlers.audit!("src/ lib/", multiCtx);
+  await handlers.audit!("src/ lib/", makeCtx());
   assert(rec.sentMessages.length === 3, "/audit emits a third message for multiple paths");
   assert(rec.sentMessages[2].includes("src/ lib/"), "/audit forwards multiple path arguments");
 
-  const standards = parseJsonBlock(getSection(auditContent, "## Standards Discovery Output Shape"), "standards discovery");
-  assertStandardsShape(standards);
+  const examplesContent = await fs.readFile(AUDIT_EXAMPLES, "utf8");
+  assert(examplesContent.includes("## Standards Discovery Output Shape"), "examples doc includes discovery example");
+  assert(examplesContent.includes("## Merged Audit Report Shape"), "examples doc includes merged example");
+  assert(examplesContent.includes("## Partial-Failure Graceful Degradation Shape"), "examples doc includes partial example");
 
-  const merged = parseJsonBlock(getSection(auditContent, "## Merged Audit Report Shape"), "merged audit report");
-  assertMergedShape(merged);
+  const discovery = parseJsonBlock(getSection(examplesContent, "## Standards Discovery Output Shape"), "standards discovery example");
+  assertObject(discovery, "standards discovery example");
+  assertString(discovery.discovery_mode, "standards discovery example.discovery_mode");
+  assertArray(discovery.limitations, "standards discovery example.limitations");
+  const discoveryStandards = discovery.standards;
+  assertObject(discoveryStandards, "standards discovery example.standards");
+  const discoveryDocumented = discoveryStandards.documented;
+  assertArray(discoveryDocumented, "standards discovery example.standards.documented");
+  const discoveryDocumentedFirst = discoveryDocumented[0];
+  assertObject(discoveryDocumentedFirst, "standards discovery example.standards.documented[0]");
+  assertString(discoveryDocumentedFirst.source, "standards discovery example.standards.documented[0].source");
+  assertString(discoveryDocumentedFirst.summary, "standards discovery example.standards.documented[0].summary");
+  assertString(discoveryDocumentedFirst.evidence, "standards discovery example.standards.documented[0].evidence");
 
-  const partial = parseJsonBlock(
-    getSection(auditContent, "## Partial-Failure Graceful Degradation Shape"),
-    "partial failure",
-  );
-  assertPartialShape(partial);
+  const merged = parseJsonBlock(getSection(examplesContent, "## Merged Audit Report Shape"), "merged audit example");
+  assertObject(merged, "merged audit example");
+  assertString(merged.discovery_mode, "merged audit example.discovery_mode");
+  const mergedSummary = merged.summary;
+  assertObject(mergedSummary, "merged audit example.summary");
+  assertNumber(mergedSummary.passes_completed, "merged audit example.summary.passes_completed");
+  const mergedFindings = merged.findings;
+  assertArray(mergedFindings, "merged audit example.findings");
+  const mergedFirstFinding = mergedFindings[0];
+  assertObject(mergedFirstFinding, "merged audit example.findings[0]");
+  assertString(mergedFirstFinding.category, "merged audit example.findings[0].category");
+  assertString(mergedFirstFinding.severity, "merged audit example.findings[0].severity");
+  assertString(mergedFirstFinding.evidence, "merged audit example.findings[0].evidence");
+
+  const partial = parseJsonBlock(getSection(examplesContent, "## Partial-Failure Graceful Degradation Shape"), "partial failure example");
+  assertObject(partial, "partial failure example");
+  assertString(partial.discovery_mode, "partial failure example.discovery_mode");
+  const partialSummary = partial.summary;
+  assertObject(partialSummary, "partial failure example.summary");
+  assertNumber(partialSummary.total_passes, "partial failure example.summary.total_passes");
+  const partialFailures = partial.pass_failures;
+  assertArray(partialFailures, "partial failure example.pass_failures");
+  const partialFirstFailure = partialFailures[0];
+  assertObject(partialFirstFailure, "partial failure example.pass_failures[0]");
+  assertString(partialFirstFailure.pass, "partial failure example.pass_failures[0].pass");
+  assertString(partialFirstFailure.error, "partial failure example.pass_failures[0].error");
 } catch (error) {
   exit = 1;
   console.error(error instanceof Error ? error.message : error);
