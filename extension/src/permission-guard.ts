@@ -40,6 +40,7 @@ export const BUILTIN_TOOLS = new Set([
 ]);
 
 // Helper: lookup a tool in permission entries, exact match first then wildcard
+// Permission entries: string verdicts or nested objects (e.g. bash subcommands)
 function lookupPermission(
   entries: Record<string, string | Record<string, string>>,
   toolName: string,
@@ -69,7 +70,10 @@ function loadAgentsJson(): Record<
   try {
     const raw = readFileSync(agentsPath, "utf8");
     const parsed = JSON.parse(raw);
-    return parsed.agent ?? {};
+    const obj = parsed as {
+      agent?: Record<string, { permission?: Record<string, string | Record<string, string>> }>;
+    };
+    return obj.agent ?? {};
   } catch (err) {
     const msg = `pi-ensemble permission-guard: failed to load agents.json (${err}) — all non-builtin tools will be blocked`;
     console.warn(msg);
@@ -89,7 +93,8 @@ function loadConfigFile(configPath: string, label: string): RoleConfig {
       return {};
     }
 
-    return JSON.parse(raw).roles ?? {};
+    const parsed = JSON.parse(raw) as { roles?: RoleConfig };
+    return parsed.roles ?? {};
   } catch (err) {
     if (err && typeof err === "object" && "code" in err) {
       const code = (err as { code: string }).code;
@@ -159,7 +164,7 @@ export function resolveToolPermission(
     const verdict = lookupPermission(roleConfig.permission, toolName);
     if (verdict !== null) {
       if (verdict === "allow" || verdict === "deny" || verdict === "ask") {
-        return verdict as PermVerdict;
+        return verdict satisfies PermVerdict;
       }
       trace(`permission-guard: invalid verdict '${verdict}' in config, treating as deny`);
       return "deny";
@@ -319,25 +324,24 @@ export function registerPermissionGuard(pi: ExtensionAPI): void {
       const parsed = JSON.parse(raw);
       let loaded = 0;
       for (const [key, val] of Object.entries(parsed)) {
-        // Validate decision key format: must contain ":" and be ≤ DECISION_KEY_MAX_LENGTH chars
+        // Validate key format
         if (!key.includes(":") || key.length > DECISION_KEY_MAX_LENGTH) {
           trace(
             `pi-ensemble permission-guard: skipping invalid decision key: ${key.slice(0, 50)}...`,
           );
           continue;
         }
-        // Validate decision value structure
-        const record = val as Record<string, unknown>;
-        if (
-          typeof val !== "object" ||
-          val === null ||
-          typeof record.allowed !== "boolean" ||
-          typeof record.timestamp !== "string"
-        ) {
+        // Validate entry shape BEFORE casting
+        if (val === null || typeof val !== "object") {
           trace(`permission-guard: skipping malformed decision for key: ${key.slice(0, 50)}`);
           continue;
         }
-        decisions.set(key, { allowed: record.allowed, timestamp: record.timestamp });
+        const entry = val as Record<string, unknown>;
+        if (typeof entry.allowed !== "boolean" || typeof entry.timestamp !== "string") {
+          trace(`permission-guard: skipping malformed decision for key: ${key.slice(0, 50)}`);
+          continue;
+        }
+        decisions.set(key, { allowed: entry.allowed, timestamp: entry.timestamp });
         loaded++;
       }
       trace(`permission-guard: loaded ${loaded} cached decisions`);
