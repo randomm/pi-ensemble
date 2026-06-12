@@ -182,6 +182,14 @@ pi
 
 **Host mode is still available.** `pi` continues to work with the layered permission system for users who don't have Docker, prefer the legacy UX, or are iterating on pi-ensemble itself. Choice per invocation: `pi-ensemble` for sandbox, `pi` for host.
 
+**Reaching hosts that live on your tailnet / LAN.** The container's resolver doesn't see Tailscale MagicDNS or your `/etc/hosts`. If you've registered an OpenAI-compatible LLM gateway at `http://halo:8080` (or similar) in your `~/.pi/agent/models.json`, the wrapper teaches the container's resolver via `--add-host` so the hostname works inside. The default registration covers `halo:192.168.8.249`. Override or extend via env:
+
+```bash
+PI_ENSEMBLE_HOST_ALIASES="halo:192.168.8.249,llm-box:10.0.0.7" pi-ensemble
+```
+
+Comma-separated `name:ip` pairs. The IPs must be reachable from the host (the container's network rides the host's stack via Docker bridge); Tailscale-only hostnames work as long as your host can route to the tailnet IP.
+
 ## How it works
 
 The parent `pi` you launch becomes the **project manager (PM)**. When you fire a registered slash command, the extension injects PM doctrine into the system prompt for that turn (one-shot, no global bleed). The PM then runs through the workflow body and calls tools to dispatch specialists.
