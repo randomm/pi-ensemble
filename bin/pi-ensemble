@@ -141,12 +141,13 @@ build_mounts() {
     mounts+=(-v pi-ensemble-sessions:/home/vscode/.pi/agent/sessions)
   fi
 
-  # ensemble-models.json — pi-ensemble's per-role model picks. Only bind
-  # if present on host. Otherwise the container uses its own (defaults).
-  # Optional — model picks via /ensemble-model inside the container will
-  # persist via the named state volume if we add one (TODO follow-up).
+  # ensemble-models.json — pi-ensemble's per-role model picks. Bound RW
+  # (not :ro) so /ensemble-model inside the sandbox can update picks and
+  # those updates persist back to the host's ~/.pi/agent/ensemble-models.json
+  # (symmetric with the sessions/ bind from PR #206). Only bind if present
+  # on host; otherwise the container uses its own (defaults) and won't write.
   if [ -f "$HOME/.pi/agent/ensemble-models.json" ]; then
-    mounts+=(-v "$HOME/.pi/agent/ensemble-models.json:/home/vscode/.pi/agent/ensemble-models.json:ro")
+    mounts+=(-v "$HOME/.pi/agent/ensemble-models.json:/home/vscode/.pi/agent/ensemble-models.json")
   fi
 
   # models.json — Pi's PROVIDER config (custom OpenAI-compatible endpoints
