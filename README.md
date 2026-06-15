@@ -212,7 +212,9 @@ PI_ENSEMBLE_HOST_ALIASES="halo:192.168.8.249,llm-box:10.0.0.7" pi-ensemble
 
 Comma-separated `name:ip` pairs. The IPs must be reachable from the host (the container's network rides the host's stack via Docker bridge); Tailscale-only hostnames work as long as your host can route to the tailnet IP.
 
-**Drag-and-drop images.** Pi supports `@file.png "describe this"` to attach an image as multimodal input. Terminal drag-and-drop pastes the file path; prefix `@` (most terminals do this automatically). For paths to resolve inside the container, the wrapper bind-mounts `$HOME/Downloads`, `$HOME/Desktop`, and `$HOME/Pictures` read-only at their host absolute paths and tells `sandbox-fs-guard` to permit reads under those roots via `PI_ENSEMBLE_ALLOWED_ROOTS`. Drop a screenshot into your `pi-ensemble` session, prefix `@`, and a vision-capable model (Claude / GPT-4o / Qwen3.6-35B / Gemma-4 / etc.) sees it.
+**Drag-and-drop images.** Pi uses `@<path>` to attach a file as multimodal input — e.g. `@/Users/you/Downloads/screenshot.png describe this`. Dragging an image into the terminal pastes its absolute path; **you then type `@` in front of the pasted path yourself** (the terminal doesn't add it). Without the `@` prefix, Pi treats the path as plain text in the prompt and never attaches the bytes.
+
+Typical flow: drag image → cursor lands after the pasted path → press `Home` (or `Ctrl-A`) to jump to line start → type `@` → submit. The wrapper bind-mounts `$HOME/Downloads`, `$HOME/Desktop`, and `$HOME/Pictures` read-only at their host absolute paths and tells `sandbox-fs-guard` to permit reads under those roots via `PI_ENSEMBLE_ALLOWED_ROOTS`, so the path the terminal pastes resolves inside the container. A vision-capable model (Claude / GPT-4o / Qwen3.6-35B / Gemma-4 / etc.) then sees the image.
 
 Add or replace image dirs via env:
 
