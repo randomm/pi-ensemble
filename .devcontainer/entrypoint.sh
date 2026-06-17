@@ -42,7 +42,7 @@ if [ "$(id -u)" = "0" ]; then
   if [ -S /var/run/docker.sock ]; then
     chmod 666 /var/run/docker.sock 2>/dev/null || true
   fi
-  # SSH agent-forward sanity check (post-#221). The wrapper bind-mounts the
+  # SSH agent-forward sanity check (post-#227). The wrapper bind-mounts the
   # host's $SSH_AUTH_SOCK to /run/host-ssh-auth.sock and forwards that path
   # in the container env. Two failure modes need handling:
   #   (a) Socket is a real socket but root-owned with restrictive perms

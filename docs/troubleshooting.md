@@ -221,7 +221,7 @@ Outbound `ssh` then fails with `Permission denied (publickey,...)` even though y
 **Cause:** Two sub-cases:
 
 1. **Stale wrapper (pre-#220).** The wrapper didn't bind-mount `~/.ssh/` or forward `$SSH_AUTH_SOCK`. Fix: `cd ~/.config/opencode/pi-ensemble && git pull && ./install.sh`.
-2. **Broken agent forward (pre-#221).** Wrapper attempted the forward but Docker created an empty **directory** at `/run/host-ssh-auth.sock` instead of a usable socket — common on macOS Docker Desktop where the host's `$SSH_AUTH_SOCK` is a launchd-managed path Docker can't bind-mount cleanly. SSH then loops on "Error connecting to agent" even though on-disk keys at `~/.ssh/` would work. **Post-#221 the entrypoint detects this and unsets `SSH_AUTH_SOCK`** so SSH falls back to your on-disk keys cleanly. Refresh with `./install.sh`.
+2. **Broken agent forward (pre-#227).** Wrapper attempted the forward but Docker created an empty **directory** at `/run/host-ssh-auth.sock` instead of a usable socket — common on macOS Docker Desktop where the host's `$SSH_AUTH_SOCK` is a launchd-managed path Docker can't bind-mount cleanly. SSH then loops on "Error connecting to agent" even though on-disk keys at `~/.ssh/` would work. **Post-#227 the entrypoint detects this and unsets `SSH_AUTH_SOCK`** so SSH falls back to your on-disk keys cleanly. Refresh with `./install.sh`.
 
 **Diagnose your case (inside the sandbox):**
 
@@ -255,7 +255,7 @@ pi-ensemble
 ssh -o IdentityAgent=none -i ~/.ssh/<your-key> user@host
 ```
 
-PRs: [#220](https://github.com/randomm/pi-ensemble/pull/220), [#221](https://github.com/randomm/pi-ensemble/pull/221)
+PRs: [#220](https://github.com/randomm/pi-ensemble/pull/220), [#227](https://github.com/randomm/pi-ensemble/pull/227)
 
 ### I want a tighter sandbox — disable SSH credentials access
 
