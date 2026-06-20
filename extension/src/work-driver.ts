@@ -59,6 +59,7 @@
 
 import { exec } from "node:child_process";
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -138,6 +139,94 @@ export const MAX_CI_RETRIES = 2;
  * Persisted in `pipelineState.reviewCapStartedAt` so it survives restart.
  */
 export const REVIEW_WALL_CLOCK_MS = 90 * 60 * 1000;
+
+/**
+ * Project-local scratch directory for ephemeral /work artefacts (diff
+ * snapshots between adversarial rounds, captured screenshots, one-off
+ * verification scripts, analysis outputs).
+ *
+ * Background: PR #239 live-tested on nessie issue #553 left 12+ dot-
+ * prefixed diff files (`.pr503_r2.diff`, `.regate-512.diff`, etc.) in the
+ * repo root, plus PNG screenshots, e2e scenario scripts, a 2.3 GB ELF
+ * core dump, and a scratch test_string_error.rs at root. Causes:
+ * agents improvised "save diff between rounds" with arbitrary names, and
+ * the project's .gitignore didn't anticipate. The next /work's branch
+ * step ABORTed correctly ("working tree is not clean") — but PR #239
+ * lacked B3 (ABORT detection) so the abort was swallowed.
+ *
+ * PR2 fold-in: driver creates `<repoRoot>/tmp/issue-<N>/` on cycle
+ * start, adds `tmp/` to `.git/info/exclude` (per-clone, NOT a committed
+ * `.gitignore` entry — exclusion is local tooling concern, not project
+ * shape), and tells every dispatched subagent via its prompt where to
+ * write scratch. Convention: this path OR /tmp; never repo root, never
+ * tracked dirs unless committing.
+ *
+ * Cleanup policy: on `merged` (success) the driver removes the dir.
+ * On `handoff` or `aborted`, KEPT so the user can inspect what the
+ * agents produced when something went wrong.
+ */
+export function scratchDir(repoRoot: string, issue: number): string {
+  return path.join(repoRoot, "tmp", `issue-${issue}`);
+}
+
+/**
+ * Idempotent setup: create `<repoRoot>/tmp/issue-<N>/`, ensure
+ * `.git/info/exclude` contains a `/tmp/` line so the tmp tree is hidden
+ * from `git status` without touching the committed `.gitignore`.
+ *
+ * Failure modes return silently with a trace log — the cycle can still
+ * proceed; the worst case is agents continuing to write to repo root
+ * (the legacy behaviour). This is best-effort hygiene, not a hard gate.
+ */
+export async function setupWorkspaceTmp(repoRoot: string, issue: number): Promise<string> {
+  const dir = scratchDir(repoRoot, issue);
+  try {
+    await fs.mkdir(dir, { recursive: true });
+  } catch (err) {
+    trace(`work-driver: failed to mkdir scratch dir ${dir}: ${(err as Error).message}`);
+  }
+  // Add `/tmp/` to .git/info/exclude if absent. The leading slash anchors
+  // to repo root (subdir `node_modules/tmp/` would NOT be ignored). The
+  // file may not exist on fresh clones; create with the line.
+  const excludeFile = path.join(repoRoot, ".git", "info", "exclude");
+  try {
+    let current = "";
+    try {
+      current = await fs.readFile(excludeFile, "utf8");
+    } catch {
+      /* fresh repo or no .git/info dir — handled below */
+    }
+    if (!/^\/tmp\/?\s*$/m.test(current)) {
+      const banner = current.includes("# pi-ensemble")
+        ? ""
+        : "\n# pi-ensemble: scratch dir for /work cycles (see docs/troubleshooting.md)\n";
+      const next = `${current.endsWith("\n") || current.length === 0 ? current : `${current}\n`}${banner}/tmp/\n`;
+      // Ensure the parent directory exists; .git/info may be missing on
+      // weird clones (e.g., shallow worktrees) but mkdir -p is harmless.
+      await fs.mkdir(path.dirname(excludeFile), { recursive: true });
+      await fs.writeFile(excludeFile, next, "utf8");
+      trace(`work-driver: added /tmp/ to ${excludeFile}`);
+    }
+  } catch (err) {
+    trace(`work-driver: failed to update ${excludeFile}: ${(err as Error).message}`);
+  }
+  return dir;
+}
+
+/**
+ * Remove the scratch dir for a finished /work cycle. Called only on
+ * `merged` (success) — handoff/aborted preserves it for inspection.
+ * Silent on failure (best-effort).
+ */
+export async function teardownWorkspaceTmp(repoRoot: string, issue: number): Promise<void> {
+  const dir = scratchDir(repoRoot, issue);
+  try {
+    await fs.rm(dir, { recursive: true, force: true });
+    trace(`work-driver: removed scratch dir ${dir}`);
+  } catch (err) {
+    trace(`work-driver: failed to rm scratch dir ${dir}: ${(err as Error).message}`);
+  }
+}
 
 export interface DriverContext {
   pi: ExtensionAPI;
@@ -311,7 +400,7 @@ async function runExplore(ctx: DriverContext, state: WorkState, now: number): Pr
   // TODO(work-driver-pr1): load `pi-prompts/work/explore.md` template once
   // the step-template commit lands. Inline fallback preserves the v1
   // contract until then.
-  const prompt = inlineExplorePrompt(ctx.issue);
+  const prompt = inlineExplorePrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue));
   const startedAt = Date.now();
 
   let result: DispatchResult;
@@ -356,7 +445,7 @@ async function runExplore(ctx: DriverContext, state: WorkState, now: number): Pr
  */
 async function runBranch(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
   const next = await runSingleDispatch(ctx, state, "branch", "ops", "ops", now, () =>
-    inlineBranchPrompt(ctx.issue),
+    inlineBranchPrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue)),
   );
   // Parse the `branch: <name>` line ops's prompt asks for. Stored on
   // pipelineState so downstream prompts (develop / commit-pr / ci) can
@@ -378,7 +467,7 @@ async function runBranch(ctx: DriverContext, state: WorkState, now: number): Pro
  */
 async function runDevelop(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
   return runSingleDispatch(ctx, state, "develop", "developer", "developer", now, () =>
-    inlineDevelopPrompt(ctx.issue),
+    inlineDevelopPrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue)),
   );
 }
 
@@ -505,7 +594,7 @@ async function runAdversarial(
  */
 async function runCommitPr(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
   return runSingleDispatch(ctx, state, "commit-pr", "ops", "ops:commit-pr", now, () =>
-    inlineCommitPrPrompt(ctx.issue),
+    inlineCommitPrPrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue)),
   );
 }
 
@@ -616,7 +705,7 @@ async function runLensFix(ctx: DriverContext, state: WorkState, now: number): Pr
     "developer",
     `developer:lens-fix-${state.pipelineState.reviewRound}`,
     now,
-    () => inlineLensFixPrompt(findings),
+    () => inlineLensFixPrompt(findings, scratchDir(ctx.repoRoot, ctx.issue)),
   );
 }
 
@@ -638,7 +727,7 @@ async function runStepBack(ctx: DriverContext, state: WorkState, now: number): P
     .map((e) => e.findings)
     .join("\n---\n");
   return runSingleDispatch(ctx, state, "step-back", "explore", "explore:step-back", now, () =>
-    inlineStepBackPrompt(ctx.issue, allFindings),
+    inlineStepBackPrompt(ctx.issue, allFindings, scratchDir(ctx.repoRoot, ctx.issue)),
   );
 }
 
@@ -649,7 +738,7 @@ async function runStepBack(ctx: DriverContext, state: WorkState, now: number): P
  */
 async function runCi(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
   let next = await runSingleDispatch(ctx, state, "ci", "ops", "ops:ci", now, () =>
-    inlineCiPrompt(ctx.issue),
+    inlineCiPrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue)),
   );
   // Parse the just-appended dispatch-completed event for a structured status
   // line. The ops prompt asks the agent to end with `ci-status: success` or
@@ -965,8 +1054,37 @@ async function runSingleDispatch(
   return appendEvent(next, event);
 }
 
+/**
+ * Boilerplate appended to every inline prompt. Tells the subagent where
+ * the project-local scratch dir is so they don't drop diffs, screenshots,
+ * capture scripts, analysis files at the repo root (the empirical pollution
+ * pattern from nessie issue #553 — 12 dot-prefixed diff files, 2 PNG
+ * screenshots at root, scratch test_string_error.rs, etc).
+ *
+ * Both `./tmp/` (project-local, gitignored via .git/info/exclude) and
+ * `/tmp/` (host-level) are acceptable. The driver creates and points at
+ * the project-local path by default because it survives /tmp cleanup
+ * policies and stays alongside the worktree for inspection on handoff.
+ */
+function scratchHygieneSection(scratchDirAbs: string): string {
+  return [
+    "",
+    "## Scratch files",
+    "",
+    "Write any ephemeral artefacts (diff snapshots between adversarial rounds,",
+    "captured screenshots, analysis outputs, one-off verification scripts) under:",
+    "",
+    `  ${scratchDirAbs}`,
+    "",
+    "Do NOT write scratch to the repo root or any tracked directory. Acceptable",
+    "alternatives are `/tmp/pi-ensemble/...` (host-level). When this dispatch",
+    "ends, leave the scratch dir in place — the work-driver removes it on a",
+    "successful merge and keeps it on handoff for the user to inspect.",
+  ].join("\n");
+}
+
 /** Inline explore prompt used until the step-template commit lands. */
-function inlineExplorePrompt(issue: number): string {
+function inlineExplorePrompt(issue: number, scratchDirAbs: string): string {
   return [
     `Run \`gh issue view ${issue}\` first and report the issue body verbatim.`,
     "",
@@ -980,10 +1098,11 @@ function inlineExplorePrompt(issue: number): string {
     "  - parallel-workstream candidates (heading: `## Workstreams`),",
     "  - relevant prior decisions (heading: `## Prior decisions`),",
     "  - touchpoint files (heading: `## Touchpoints`).",
+    scratchHygieneSection(scratchDirAbs),
   ].join("\n");
 }
 
-function inlineBranchPrompt(issue: number): string {
+function inlineBranchPrompt(issue: number, scratchDirAbs: string): string {
   return [
     `/work issue #${issue} — Step 3 (Setup). Create the feature branch under the safety preconditions below.`,
     "",
@@ -994,10 +1113,11 @@ function inlineBranchPrompt(issue: number): string {
     "  5. End your reply with a single line `branch: <branch-name>` so the driver can capture it.",
     "",
     "Do NOT create worktrees in v1 (the driver currently does single-task /work).",
+    scratchHygieneSection(scratchDirAbs),
   ].join("\n");
 }
 
-function inlineDevelopPrompt(issue: number): string {
+function inlineDevelopPrompt(issue: number, scratchDirAbs: string): string {
   return [
     `/work issue #${issue} — Step 4 (Implementation).`,
     "",
@@ -1007,10 +1127,11 @@ function inlineDevelopPrompt(issue: number): string {
     "  4. End your reply with a `## Touched files` section listing every file you changed and a one-line `## Summary`.",
     "",
     "Discourage drive-by edits; only touch files in scope for the issue.",
+    scratchHygieneSection(scratchDirAbs),
   ].join("\n");
 }
 
-function inlineCommitPrPrompt(issue: number): string {
+function inlineCommitPrPrompt(issue: number, scratchDirAbs: string): string {
   return [
     `/work issue #${issue} — Step 6 (Commit + PR).`,
     "",
@@ -1020,10 +1141,13 @@ function inlineCommitPrPrompt(issue: number): string {
     "  4. `git push -u origin <feature-branch>`.",
     `  5. \`gh pr create --title \"<title>\" --body \"...\\n\\nFixes #${issue}\"\` — body MUST include \`Fixes #${issue}\` so merge auto-closes the issue.`,
     "  6. End your reply with `pr: <PR-number>` so the driver can capture it.",
+    "",
+    "If you need a longer PR body, write it to a file under the scratch dir and pass via `gh pr create --body-file <path>` — DO NOT write the body file to the repo root.",
+    scratchHygieneSection(scratchDirAbs),
   ].join("\n");
 }
 
-function inlineLensFixPrompt(findings: string): string {
+function inlineLensFixPrompt(findings: string, scratchDirAbs: string): string {
   return [
     "Address the six-pass review findings below against the diff currently on this worktree.",
     "",
@@ -1036,10 +1160,11 @@ function inlineLensFixPrompt(findings: string): string {
     "```json",
     findings,
     "```",
+    scratchHygieneSection(scratchDirAbs),
   ].join("\n");
 }
 
-function inlineStepBackPrompt(issue: number, findings: string): string {
+function inlineStepBackPrompt(issue: number, findings: string, scratchDirAbs: string): string {
   return [
     `Don't review THIS diff. Take a step back and consider whether the SPEC for issue #${issue} has a problem.`,
     "",
@@ -1062,10 +1187,11 @@ function inlineStepBackPrompt(issue: number, findings: string): string {
     "  - `diagnosis:` <one-sentence>",
     "  - `proposedRevision:` <verbatim text to add to the issue body>",
     "  - `alternativeApproach:` <optional>",
+    scratchHygieneSection(scratchDirAbs),
   ].join("\n");
 }
 
-function inlineCiPrompt(issue: number): string {
+function inlineCiPrompt(issue: number, scratchDirAbs: string): string {
   return [
     `/work issue #${issue} — Step 8 (CI monitoring).`,
     "",
@@ -1075,6 +1201,7 @@ function inlineCiPrompt(issue: number): string {
     "  4. On failure: end your reply with `ci-status: failure` AND include the failing-job summary so the developer round that follows has the failure context.",
     "",
     "The driver parses the last line of your reply for the `ci-status:` token — keep it exact.",
+    scratchHygieneSection(scratchDirAbs),
   ].join("\n");
 }
 
@@ -1124,6 +1251,14 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
   // Persist the initial state on first run so the user can see the file
   // appear and PI_ENSEMBLE_WORK_DRIVER=0 fallback knows a cycle exists.
   await writeState(ctx.repoRoot, state);
+
+  // PR2 fold-in (post-#553 cleanup): set up the project-local scratch
+  // dir + ensure tmp/ is in .git/info/exclude so subagents have a known
+  // hygienic place to write diff snapshots, screenshots, capture
+  // scripts, analysis outputs. The inline prompts thread the absolute
+  // path into each subagent's instructions.
+  const tmpDir = await setupWorkspaceTmp(ctx.repoRoot, ctx.issue);
+  trace(`work-driver: scratch dir for issue #${ctx.issue}: ${tmpDir}`);
 
   let safety = 0;
   while (state.pipelineState.status === "running") {
@@ -1261,8 +1396,16 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
   // is still running when it isn't.
   workWidget.clear();
 
-  // Final user-facing line — PM picks it up as a user message and reports.
+  // Cleanup scratch dir on success only — handoff/aborted KEEP the dir
+  // so the user can inspect what the agents produced when something
+  // went wrong. Failure modes (no dir, perm error) log via trace and
+  // continue silently — final user message is the priority.
   const final = state.pipelineState.status;
+  if (final === "merged") {
+    await teardownWorkspaceTmp(ctx.repoRoot, ctx.issue);
+  }
+
+  // Final user-facing line — PM picks it up as a user message and reports.
   if (final === "merged") {
     ctx.pi.sendUserMessage(`pi-ensemble /work for issue #${ctx.issue} — MERGED ✓`);
   } else if (final === "handoff") {

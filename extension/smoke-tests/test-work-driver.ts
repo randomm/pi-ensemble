@@ -28,6 +28,9 @@ import {
   parseAbort,
   parseBranchName,
   runWorkDriver,
+  scratchDir,
+  setupWorkspaceTmp,
+  teardownWorkspaceTmp,
 } from "../src/work-driver.ts";
 import type { DispatchResult } from "../src/types.ts";
 import {
@@ -472,6 +475,65 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
     parseBranchName(realistic) === "feature/issue-553-fix",
     "parseBranchName: end-of-reply marker line",
   );
+}
+
+// 8. setupWorkspaceTmp / teardownWorkspaceTmp / scratchDir (PR2 fold-in).
+// Verifies the post-#553 cleanup wiring: scratch dir created, .git/info/exclude
+// gains the /tmp/ entry (idempotent on subsequent calls), teardown removes it.
+{
+  const dir = mkdtempSync(path.join(tmpdir(), "work-driver-tmp-"));
+  try {
+    const fs = await import("node:fs/promises");
+    // Synthesize a minimal .git dir so .git/info/exclude is a real path.
+    await fs.mkdir(path.join(dir, ".git", "info"), { recursive: true });
+
+    const tmpDirPath = scratchDir(dir, 999);
+    assert(tmpDirPath.endsWith("/tmp/issue-999"), "scratchDir builds <repo>/tmp/issue-<N>");
+
+    const created = await setupWorkspaceTmp(dir, 999);
+    assert(created === tmpDirPath, "setupWorkspaceTmp returns the scratch dir path");
+    // dir exists
+    const stat = await fs.stat(created);
+    assert(stat.isDirectory(), "setupWorkspaceTmp creates the scratch dir");
+    // .git/info/exclude has the /tmp/ line
+    const exclude = await fs.readFile(path.join(dir, ".git", "info", "exclude"), "utf8");
+    assert(/^\/tmp\/?\s*$/m.test(exclude), ".git/info/exclude gains /tmp/ entry");
+    assert(exclude.includes("# pi-ensemble"), "exclude entry carries banner comment");
+
+    // Idempotent: second call doesn't duplicate the entry.
+    await setupWorkspaceTmp(dir, 999);
+    const exclude2 = await fs.readFile(path.join(dir, ".git", "info", "exclude"), "utf8");
+    const occurrences = (exclude2.match(/^\/tmp\/?\s*$/gm) ?? []).length;
+    assert(occurrences === 1, "setupWorkspaceTmp is idempotent (no duplicate /tmp/ lines)");
+
+    // Pre-existing /tmp/ line is preserved untouched.
+    await fs.writeFile(path.join(dir, ".git", "info", "exclude"), "# user-managed\n/tmp/\nfoo.log\n");
+    await setupWorkspaceTmp(dir, 999);
+    const exclude3 = await fs.readFile(path.join(dir, ".git", "info", "exclude"), "utf8");
+    assert(
+      exclude3.includes("# user-managed") && exclude3.includes("foo.log"),
+      "setupWorkspaceTmp preserves pre-existing exclude content",
+    );
+    const reOccurrences = (exclude3.match(/^\/tmp\/?\s*$/gm) ?? []).length;
+    assert(reOccurrences === 1, "setupWorkspaceTmp doesn't add /tmp/ when already present");
+
+    // Teardown removes the dir.
+    await fs.writeFile(path.join(created, "smoke.txt"), "scratch");
+    await teardownWorkspaceTmp(dir, 999);
+    let removed = false;
+    try {
+      await fs.stat(created);
+    } catch {
+      removed = true;
+    }
+    assert(removed, "teardownWorkspaceTmp removes the scratch dir");
+
+    // Teardown on already-removed dir is a no-op (no throw).
+    await teardownWorkspaceTmp(dir, 999);
+    assert(true, "teardownWorkspaceTmp on missing dir is safe (no-op)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 console.log(`\nexit ${exit}`);
