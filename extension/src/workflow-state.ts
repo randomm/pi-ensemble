@@ -186,8 +186,14 @@ export type WorkEvent =
   | {
       kind: "cap-hit";
       at: number;
-      /** Which cap fired. Maps to /work.md Step 7g doctrine. */
-      cap: "adversarial-loop" | "round-cap" | "wall-clock";
+      /**
+       * Which cap fired. Maps to /work.md Step 7g doctrine plus the
+       * "ci-retry" cap added in PR2 after the live-test infinite-loop bug:
+       * ci-status:failure → develop → adversarial → review → ci → ... had no
+       * cap of its own and could spin forever when the branch step silently
+       * ABORTed and no PR ever existed for CI to watch.
+       */
+      cap: "adversarial-loop" | "round-cap" | "wall-clock" | "ci-retry";
       reviewRound: number;
       /** What the driver will do next — either "handoff" (terminal) or "step-back" (Step 7h). */
       nextStep: "handoff" | "step-back";
@@ -278,6 +284,18 @@ export interface PipelineState {
    */
   reviewRound: number;
   /**
+   * Number of times the driver has re-entered `develop` from `ci-status:
+   * failure`. Capped at MAX_CI_RETRIES (2 → up to 3 CI attempts total)
+   * before routing to handoff. Distinct from `reviewRound` which caps the
+   * lens-fix loop; this caps the outer "CI keeps failing" loop that
+   * surfaced on issue #553's live run when no PR existed for CI to watch.
+   *
+   * Optional in the schema so state files written by PR #239 (before this
+   * field existed) still load cleanly under the same `schemaVersion: 1`.
+   * Readers treat absent as 0.
+   */
+  ciRetryCount?: number;
+  /**
    * Epoch ms when the 90-min wall-clock cap was started. Persists across
    * Pi restarts — the cap-state accessor (review-cap.ts) reads this on
    * boot to restore in-memory timers.
@@ -361,6 +379,7 @@ export function initialState(issue: number, now: number = Date.now()): WorkState
       inFlightJobIds: [],
       worktrees: {},
       reviewRound: 0,
+      ciRetryCount: 0,
       plumbReports: [],
       status: "running",
     },

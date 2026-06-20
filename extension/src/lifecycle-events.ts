@@ -28,23 +28,49 @@ import { trace } from "./trace.ts";
 
 const CUSTOM_TYPE = "ensemble:lifecycle";
 
-export type LifecycleKind = "dispatched" | "completed" | "failed" | "errored" | "steered";
+export type LifecycleKind =
+  | "dispatched"
+  | "completed"
+  | "failed"
+  | "errored"
+  | "steered"
+  | "step-started"
+  | "step-completed"
+  | "step-failed";
 
 export interface LifecycleDetails {
   kind: LifecycleKind;
+  /**
+   * For dispatch/steer kinds: the async-jobs jobId. For step-* kinds:
+   * the workflow-driver step name (e.g., "adversarial", "lens-review")
+   * so the scrollback line can carry it directly.
+   */
   jobId: string;
-  /** Display label, e.g. "developer" or "lens_review" or "dispatch_parallel". */
+  /** Display label. For step-* kinds, this is the step name. */
   label: string;
   /** Role for telemetry; same as label for synthetic orchestrator labels. */
   role: string;
-  /** Elapsed ms for completed/failed/errored; omitted for dispatched. */
+  /** Elapsed ms for completed/failed/errored/step-completed/step-failed. */
   elapsedMs?: number;
-  /** Total tokens (input + output + cache); set for completed/errored. */
+  /** Total tokens (input + output + cache); set for completed/errored/step-completed. */
   totalTokens?: number;
   /** Exit code for failed; omitted otherwise. */
   exitCode?: number;
   /** Steer message (truncated for scrollback) — set for kind="steered" only. */
   steerMessage?: string;
+  /**
+   * Step ordinal for step-* kinds (1-indexed). Pair with stepTotal to render
+   * "step 5/9". Plain dispatches omit both.
+   */
+  stepNumber?: number;
+  /** Total step count for step-* kinds. */
+  stepTotal?: number;
+  /**
+   * Failure reason for step-failed (e.g., "subagent ABORT", "cap-hit:
+   * ci-retry"). Shown after the elapsed metric on the scrollback line so
+   * the user knows WHY the step failed without opening the state file.
+   */
+  reason?: string;
 }
 
 let activePi: ExtensionAPI | undefined;
@@ -128,6 +154,60 @@ export function emitSteered(jobId: string, label: string, role: string, message:
   emit({ kind: "steered", jobId, label, role, steerMessage: message });
 }
 
+/**
+ * Step-level lifecycle events for the work-driver (PR2). Distinct from the
+ * per-dispatch events above: the work-driver runs 9 STEPS, each of which
+ * may dispatch one or more subagents. Adversarial and lens-review steps
+ * call into existing orchestrator functions (`runAdversarialLoop` /
+ * `runLensReview`) that bypass startJob → bypass `emitDispatched/Completed`.
+ * The PR #239 live test on issue #553 made those two steps invisible in
+ * scrollback. Step-level emitters surface them uniformly.
+ *
+ * `step` is the step name (e.g. "adversarial"); `stepNumber/stepTotal`
+ * render as "5/9" for at-a-glance progress.
+ */
+export function emitStepStarted(step: string, stepNumber: number, stepTotal: number): void {
+  emit({ kind: "step-started", jobId: step, label: step, role: step, stepNumber, stepTotal });
+}
+
+export function emitStepCompleted(
+  step: string,
+  stepNumber: number,
+  stepTotal: number,
+  elapsedMs: number,
+  totalTokens?: number,
+): void {
+  emit({
+    kind: "step-completed",
+    jobId: step,
+    label: step,
+    role: step,
+    stepNumber,
+    stepTotal,
+    elapsedMs,
+    totalTokens,
+  });
+}
+
+export function emitStepFailed(
+  step: string,
+  stepNumber: number,
+  stepTotal: number,
+  elapsedMs: number,
+  reason?: string,
+): void {
+  emit({
+    kind: "step-failed",
+    jobId: step,
+    label: step,
+    role: step,
+    stepNumber,
+    stepTotal,
+    elapsedMs,
+    reason,
+  });
+}
+
 function emit(details: LifecycleDetails): void {
   if (isQuiet()) return;
   const text = formatLine(details);
@@ -179,6 +259,23 @@ export function formatLine(d: LifecycleDetails): string {
       const truncated = msg.length > 80 ? `${msg.slice(0, 79)}…` : msg;
       return `▸ ensemble: ⤳ steered ${d.label} · "${truncated}"`;
     }
+    case "step-started": {
+      const ordinal = d.stepNumber && d.stepTotal ? `${d.stepNumber}/${d.stepTotal} ` : "";
+      return `▸ ensemble: ▶ step ${ordinal}${d.label} started`;
+    }
+    case "step-completed": {
+      const ordinal = d.stepNumber && d.stepTotal ? `${d.stepNumber}/${d.stepTotal} ` : "";
+      const tokens =
+        d.totalTokens && d.totalTokens > 0 ? ` · ${formatTokens(d.totalTokens)} tokens` : "";
+      const elapsed = d.elapsedMs != null ? ` · ${fmtElapsed(d.elapsedMs)}` : "";
+      return `▸ ensemble: ✓ step ${ordinal}${d.label} finished${elapsed}${tokens}`;
+    }
+    case "step-failed": {
+      const ordinal = d.stepNumber && d.stepTotal ? `${d.stepNumber}/${d.stepTotal} ` : "";
+      const elapsed = d.elapsedMs != null ? ` · ${fmtElapsed(d.elapsedMs)}` : "";
+      const reason = d.reason ? ` · ${d.reason}` : "";
+      return `▸ ensemble: ✗ step ${ordinal}${d.label} failed${elapsed}${reason}`;
+    }
   }
 }
 
@@ -201,5 +298,13 @@ function applyTheme(
       return theme.fg("error", content);
     case "steered":
       return theme.fg("warning", content);
+    case "step-started":
+      // Step-level events use a different visual weight than dispatches —
+      // dim for start to keep the eye drawn to the success/failure line.
+      return theme.fg("dim", content);
+    case "step-completed":
+      return theme.fg("success", content);
+    case "step-failed":
+      return theme.fg("error", content);
   }
 }

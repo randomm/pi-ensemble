@@ -57,14 +57,30 @@
  * commit landing it can grep and find every gap.
  */
 
+import { exec } from "node:child_process";
+import { createHash } from "node:crypto";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { runAdversarialLoop } from "./adversarial.ts";
 import { dispatchCore } from "./dispatch.ts";
 import { runLensReview } from "./lens-review.ts";
+import * as lifecycle from "./lifecycle-events.ts";
 import { makeRunId } from "./spawn.ts";
 import { trace } from "./trace.ts";
 import type { DispatchResult } from "./types.ts";
+import * as workWidget from "./work-widget.ts";
+
+const execp = promisify(exec);
+
+/**
+ * Display ordinal for the user-facing "step N/9" badge in scrollback /
+ * widget output. Matches the numbering in pi-prompts/work.md verbatim.
+ * `plan` collapses without a dispatch but still gets a number for
+ * consistency. Internal-only steps (handoff / merged / step-back) get
+ * sequence numbers past 9 so the badge stays informative without lying
+ * about the doctrine's named 9.
+ */
 import {
   type WorkState,
   type WorkStep,
@@ -76,6 +92,21 @@ import {
   writeDispatchArtifact,
   writeState,
 } from "./workflow-state.ts";
+
+const STEP_ORDINAL: Record<string, { num: number; total: number }> = {
+  explore: { num: 1, total: 9 },
+  plan: { num: 2, total: 9 },
+  branch: { num: 3, total: 9 },
+  develop: { num: 4, total: 9 },
+  adversarial: { num: 5, total: 9 },
+  "commit-pr": { num: 6, total: 9 },
+  "lens-review": { num: 7, total: 9 },
+  "lens-fix": { num: 7, total: 9 }, // sub-step of 7
+  "step-back": { num: 7, total: 9 }, // sub-step of 7
+  ci: { num: 8, total: 9 },
+  merged: { num: 9, total: 9 },
+  handoff: { num: 9, total: 9 }, // terminal alternative to merged
+};
 
 /**
  * Threshold above which a dispatch's text payload moves to a claim-check
@@ -91,6 +122,15 @@ const ARTIFACT_THRESHOLD_BYTES = 4_000;
  * `pi-prompts/work.md` Step 7f.6.
  */
 export const MAX_REVIEW_ROUNDS = 3;
+
+/**
+ * Maximum CI retry attempts before routing to handoff. Counts ci-status:
+ * failure → develop transitions; 2 means up to 3 total CI attempts (the
+ * first attempt + 2 retries). Added in PR2 after issue #553's live cycle
+ * spun forever in ci → develop → adversarial → lens-review → ci when no
+ * PR existed for CI to watch.
+ */
+export const MAX_CI_RETRIES = 2;
 
 /**
  * Wall-clock cap for the entire fix loop (lens-review → developer-fix →
@@ -132,10 +172,15 @@ export function nextStep(state: WorkState): WorkStep | "done" {
 
   // Adversarial verdict routes the next step.
   if (lastEvent?.kind === "adversarial-approved") {
-    // The post-adversarial transition depends on where we came from:
-    //  - From "develop" → go to "commit-pr".
-    //  - From "lens-fix" → re-run "lens-review" (the fix loop).
-    return ps.currentStep === "develop" ? "commit-pr" : "lens-review";
+    // The post-adversarial transition depends on what step we came FROM,
+    // not what step we ARE — by the time this check fires, `currentStep`
+    // has already been clobbered to "adversarial" by runAdversarial. The
+    // original PR #239 read `ps.currentStep === "develop"` which was
+    // always false here and silently routed every adversarial-approved to
+    // lens-review, skipping commit-pr. PR2 routes on lastCompletedStep:
+    //  - From "develop" → "commit-pr" (the happy path after first dev).
+    //  - From "lens-fix" → "lens-review" (re-verify the fix loop).
+    return ps.lastCompletedStep === "develop" ? "commit-pr" : "lens-review";
   }
   if (lastEvent?.kind === "adversarial-rejected") {
     // adversarial_loop already did 3 internal rounds and STILL rejected →
@@ -160,7 +205,15 @@ export function nextStep(state: WorkState): WorkStep | "done" {
   // CI outcomes.
   if (lastEvent?.kind === "ci-status") {
     if (lastEvent.status === "success") return "merged";
-    if (lastEvent.status === "failure") return "develop"; // re-fix loop
+    if (lastEvent.status === "failure") {
+      // The re-fix loop. Cap at MAX_CI_RETRIES so a permanently-failing CI
+      // (e.g., branch step ABORTed and no PR exists for CI to watch — see
+      // issue #553) can't spin develop → adversarial → review → ci forever.
+      // The runCi step body bumps ciRetryCount when it appends the
+      // ci-status event; this check just routes on the post-bump value.
+      if ((ps.ciRetryCount ?? 0) >= MAX_CI_RETRIES) return "handoff";
+      return "develop";
+    }
     // "pending" — caller decides whether to poll again; for v1 we just stay.
     return "ci";
   }
@@ -302,9 +355,19 @@ async function runExplore(ctx: DriverContext, state: WorkState, now: number): Pr
  * @ops can populate pipelineState.branchName explicitly.
  */
 async function runBranch(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
-  return runSingleDispatch(ctx, state, "branch", "ops", "ops", now, () =>
+  const next = await runSingleDispatch(ctx, state, "branch", "ops", "ops", now, () =>
     inlineBranchPrompt(ctx.issue),
   );
+  // Parse the `branch: <name>` line ops's prompt asks for. Stored on
+  // pipelineState so downstream prompts (develop / commit-pr / ci) can
+  // reference it without re-discovering via `git rev-parse`. Skips when
+  // the dispatch failed or ABORTed — only successful branch creation
+  // populates the name.
+  const last = next.eventLog[next.eventLog.length - 1];
+  if (last?.kind !== "dispatch-completed") return next;
+  const branch = parseBranchName(last.summary);
+  if (!branch) return next;
+  return { ...next, pipelineState: { ...next.pipelineState, branchName: branch } };
 }
 
 /**
@@ -590,7 +653,12 @@ async function runCi(ctx: DriverContext, state: WorkState, now: number): Promise
   );
   // Parse the just-appended dispatch-completed event for a structured status
   // line. The ops prompt asks the agent to end with `ci-status: success` or
-  // `ci-status: failure`.
+  // `ci-status: failure`. If parsing fails (no marker line), we treat as
+  // "failure" rather than "pending" — that way the ci-retry cap engages
+  // when the ops agent didn't follow the protocol (the empirical failure
+  // mode on issue #553 was the ops agent reporting "no PR exists" without
+  // emitting the marker, leaving status="pending" → driver stayed at ci
+  // → safety-break would eventually fire).
   const last = next.eventLog[next.eventLog.length - 1];
   if (last?.kind === "dispatch-completed") {
     const text = last.summary ?? "";
@@ -598,33 +666,124 @@ async function runCi(ctx: DriverContext, state: WorkState, now: number): Promise
       ? "success"
       : text.includes("ci-status: failure")
         ? "failure"
-        : "pending";
-    next = appendEvent(next, { kind: "ci-status", at: Date.now(), status });
+        : // No marker line — treat as failure so the retry cap fires.
+          // Logged via the event payload so the user can see this happened
+          // on inspection. ops doctrine should still emit the marker; this
+          // is the safety net.
+          "failure";
+    // Bump ciRetryCount BEFORE appending the event so nextStep's
+    // `ciRetryCount >= MAX_CI_RETRIES` check reflects this attempt.
+    const nextCount = (next.pipelineState.ciRetryCount ?? 0) + (status === "failure" ? 1 : 0);
+    next = {
+      ...next,
+      pipelineState: { ...next.pipelineState, ciRetryCount: nextCount },
+    };
+    if (status === "failure" && nextCount > MAX_CI_RETRIES) {
+      // Cap hit — emit cap-hit AND ci-status (the cap-hit is the routing
+      // signal; ci-status is the audit trail). Driver loop reads the
+      // cap-hit branch in nextStep and routes to handoff.
+      next = appendEvent(
+        next,
+        { kind: "ci-status", at: Date.now(), status },
+        {
+          kind: "cap-hit",
+          at: Date.now(),
+          cap: "ci-retry",
+          reviewRound: next.pipelineState.reviewRound,
+          nextStep: "handoff",
+        },
+      );
+    } else {
+      next = appendEvent(next, { kind: "ci-status", at: Date.now(), status });
+    }
   }
   return next;
 }
 
 /**
- * Resolve a diff for the given working directory. Driver doesn't shell out
- * to git itself — it relies on the subagent it dispatched (developer / ops)
- * to read the diff via its own bash access. For the adversarial / lens-
- * review entry points that need the diff as INPUT to the orchestrator
- * function, this helper shells out best-effort and returns empty on
- * failure (the orchestrator's subagent prompts handle "diff is empty —
- * read it yourself" gracefully).
+ * Resolve a diff for the given working directory.
  *
- * Kept as a small named helper so the inline call sites stay readable.
+ * PR2 (post-#553 live test): the v1 stub returned "" unconditionally,
+ * which meant adversarial-developer reviewed nothing and trivially
+ * approved every cycle ("VERDICT: APPROVED — no code changes to review"
+ * was the literal text from the live transcript). The fix shells out to
+ * `git -C <cwd> diff` for both staged and unstaged changes (`git diff
+ * HEAD` covers both) so the orchestrator's subagents work against the
+ * actual worktree state.
+ *
+ * Failure modes return "":
+ *  - cwd is undefined (no worktree resolved yet — early steps before
+ *    branch creation)
+ *  - cwd isn't a git repo
+ *  - `git diff` returned non-zero or threw (e.g., permissions)
+ *
+ * The subagent prompts already include the cwd; an empty-diff result
+ * lets adversarial / lens-review hint correctly ("nothing changed, no
+ * review needed"). The hard cap on diff size (1 MiB) prevents a runaway
+ * worktree state from bloating the dispatch prompt — pi-ai providers
+ * have their own context limits and a 1 MB diff is already a red flag.
  */
 async function fetchDiff(cwd: string | undefined): Promise<string> {
-  // The driver intentionally returns an empty string in v1 — the orchestrator
-  // subagents (adversarial-developer, code-review-specialist) all have bash
-  // access and the prompts in adversarial.ts / lens-review.ts already
-  // include the cwd. Letting them fetch the diff fresh from the worktree
-  // is safer than passing a possibly-stale diff through the driver.
-  // The helper exists so a future v2 can populate this from a `git -C cwd diff`
-  // exec call if measurement shows it's needed.
-  void cwd;
-  return "";
+  if (!cwd) return "";
+  try {
+    const { stdout } = await execp("git diff HEAD", {
+      cwd,
+      maxBuffer: 1024 * 1024, // 1 MiB cap
+    });
+    return stdout;
+  } catch (err) {
+    trace(`work-driver: fetchDiff(${cwd}) failed: ${(err as Error).message?.slice(0, 200)}`);
+    return "";
+  }
+}
+
+/** Hash a diff for change-detection across rounds. SHA1 is fine — not a security boundary. */
+function hashDiff(diff: string): string {
+  return createHash("sha1").update(diff, "utf8").digest("hex").slice(0, 16);
+}
+
+/**
+ * Detect subagent ABORT markers.
+ *
+ * Ops's branch and commit-pr step prompts instruct the subagent to write
+ * `ABORT: <reason>` (or `**ABORT...**` for markdown emphasis) when a
+ * precondition fails (dirty working tree, --ff-only refusal, etc). The
+ * subagent's PROCESS still exits 0 — it ran successfully, just refused
+ * the requested action — so the driver can't rely on exit code. This
+ * scans the LAST ~800 chars of the reply for the marker; that's the
+ * "verdict zone" where ops doctrine places it.
+ *
+ * Returns the matched abort line trimmed if found, or undefined.
+ *
+ * On issue #553's live cycle: ops's branch step replied with
+ * "**ABORT: Working tree is not clean**" but PR #239 recorded ok:true
+ * and the driver continued develop without a feature branch. The fix:
+ * treat an ABORT marker as a dispatch-failed regardless of exit code.
+ */
+export function parseAbort(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const tail = text.slice(-800);
+  // Multiline scan — markers may be in their own paragraph or inside a
+  // markdown ** bold ** wrapper. Match conservative: must START with the
+  // word "ABORT" (or **ABORT) and be a fresh line, to avoid false
+  // positives on prose discussing aborts.
+  const m = tail.match(/^[ \t]*\*{0,2}ABORT[:\s].*$/m);
+  return m ? m[0].replace(/^\*+|\*+$/g, "").trim() : undefined;
+}
+
+/**
+ * Parse a `branch: <name>` line from an ops reply (Step 3 doctrine asks
+ * for this verbatim). Used by runBranch to capture the feature branch
+ * into pipelineState.branchName so downstream step prompts can reference
+ * it without re-discovering via `git rev-parse`.
+ *
+ * Lenient: accepts surrounding whitespace, optional backticks, optional
+ * `**branch**` markdown emphasis. Returns undefined if no marker line.
+ */
+export function parseBranchName(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const m = text.match(/^[ \t]*\*{0,2}branch\*{0,2}\s*:\s*`?([^\s`]+)`?\s*$/m);
+  return m?.[1]?.trim();
 }
 
 /**
@@ -715,6 +874,27 @@ async function buildCompletionEvent(
       at,
       exitCode: result.exitCode ?? null,
       errorTail: result.text?.slice(-200),
+    };
+  }
+
+  // ABORT detection (PR2): the subagent's PROCESS exited 0 but it
+  // refused the requested action (dirty worktree, --ff-only refusal, etc).
+  // Without this check, branch step's "**ABORT: Working tree is not
+  // clean**" on issue #553 was recorded as success and the driver
+  // continued develop on main with 41 untracked files. Treat the abort
+  // as dispatch-failed so the driver's existing fail-path halts cleanly.
+  const abortLine = parseAbort(result.text);
+  if (abortLine) {
+    return {
+      kind: "dispatch-failed",
+      step,
+      role,
+      jobId,
+      label,
+      ms: result.ms,
+      at,
+      exitCode: result.exitCode ?? null,
+      errorTail: abortLine.slice(0, 500),
     };
   }
 
@@ -966,6 +1146,17 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
       return;
     }
     const step = state.pipelineState.currentStep;
+    // Step-level lifecycle event (PR2 O1): emits "▶ step N/9 X started"
+    // to scrollback BEFORE the step body runs. Adversarial and lens-
+    // review steps that bypass dispatchCore (and therefore don't fire
+    // per-dispatch lifecycle events) become visible here.
+    const stepOrd = STEP_ORDINAL[step] ?? { num: 0, total: 9 };
+    const stepStartedAt = Date.now();
+    lifecycle.emitStepStarted(step, stepOrd.num, stepOrd.total);
+    // PR2 O2: update the footer status cursor — distinct from the deck,
+    // which shows individual subagent children. The cursor shows the
+    // driver's step-level position with live-tick elapsed.
+    workWidget.update(state, stepStartedAt);
     try {
       state = await runStep(ctx, state, step);
     } catch (err) {
@@ -978,6 +1169,13 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
           pipelineState: { ...state.pipelineState, status: "aborted" },
         };
         await writeState(ctx.repoRoot, state);
+        lifecycle.emitStepFailed(
+          step,
+          stepOrd.num,
+          stepOrd.total,
+          Date.now() - stepStartedAt,
+          "step not implemented",
+        );
         ctx.pi.sendUserMessage(
           `pi-ensemble /work driver halted: step "${err.step}" not yet implemented in this build. Run with PI_ENSEMBLE_WORK_DRIVER=0 to use the legacy PM-driven flow.`,
         );
@@ -990,24 +1188,78 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
         pipelineState: { ...state.pipelineState, status: "aborted" },
       };
       await writeState(ctx.repoRoot, state);
+      lifecycle.emitStepFailed(
+        step,
+        stepOrd.num,
+        stepOrd.total,
+        Date.now() - stepStartedAt,
+        (err as Error).message?.slice(0, 80),
+      );
       ctx.pi.sendUserMessage(
         `pi-ensemble /work driver aborted on step "${step}" for issue #${ctx.issue}: ` +
           `${(err as Error).message}`,
       );
       return;
     }
+    // Step completed — figure out if it ended in a step-failure-shaped
+    // event so the lifecycle line marks failure even though runStep
+    // didn't throw. Most-recent event drives the decision.
+    {
+      const lastEvent = state.eventLog[state.eventLog.length - 1];
+      const elapsed = Date.now() - stepStartedAt;
+      if (lastEvent?.kind === "dispatch-failed" || lastEvent?.kind === "dispatch-failed-provider") {
+        const reason =
+          lastEvent.kind === "dispatch-failed-provider"
+            ? "provider error"
+            : (lastEvent.errorTail?.slice(0, 60) ?? "subagent failed");
+        lifecycle.emitStepFailed(step, stepOrd.num, stepOrd.total, elapsed, reason);
+      } else if (lastEvent?.kind === "cap-hit") {
+        lifecycle.emitStepFailed(
+          step,
+          stepOrd.num,
+          stepOrd.total,
+          elapsed,
+          `cap-hit: ${lastEvent.cap}`,
+        );
+      } else {
+        // Sum tokens from any dispatch-completed events that fired during
+        // this step. Approximate but useful — exact accounting per step
+        // would require time-window filtering of usage events.
+        let totalTokens: number | undefined;
+        if (lastEvent?.kind === "dispatch-completed" && lastEvent.summary !== undefined) {
+          // Driver-owned dispatches don't surface usage on the completion
+          // event; leave undefined and let the per-dispatch line carry it.
+          totalTokens = undefined;
+        }
+        lifecycle.emitStepCompleted(step, stepOrd.num, stepOrd.total, elapsed, totalTokens);
+      }
+    }
     await writeState(ctx.repoRoot, state);
 
+    // Capture which step just completed BEFORE the nextStep transition
+    // clobbers currentStep. This is the routing input the adversarial-
+    // approved branch needs to distinguish "from develop" vs "from
+    // lens-fix" (PR #239 routed on currentStep which was already wrong).
+    const completedStep = state.pipelineState.currentStep;
     const decision = nextStep(state);
     if (decision === "done") break;
     if (decision !== state.pipelineState.currentStep) {
       state = {
         ...state,
-        pipelineState: { ...state.pipelineState, currentStep: decision },
+        pipelineState: {
+          ...state.pipelineState,
+          lastCompletedStep: completedStep,
+          currentStep: decision,
+        },
       };
       await writeState(ctx.repoRoot, state);
     }
   }
+
+  // Clear the footer status cursor (PR2 O2). Stale cursors after a
+  // cycle ends are worse than no cursor — the user might think a /work
+  // is still running when it isn't.
+  workWidget.clear();
 
   // Final user-facing line — PM picks it up as a user message and reports.
   const final = state.pipelineState.status;

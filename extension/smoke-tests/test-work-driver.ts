@@ -25,6 +25,8 @@ import {
   DriverNotImplementedError,
   type DriverContext,
   nextStep,
+  parseAbort,
+  parseBranchName,
   runWorkDriver,
 } from "../src/work-driver.ts";
 import type { DispatchResult } from "../src/types.ts";
@@ -141,21 +143,39 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
   // events, the linear table for explore is plan.
   assert(nextStep(base) === "plan", "fresh state at explore advances to plan");
 
-  // Adversarial-approved from develop → commit-pr.
+  // Adversarial-approved with lastCompletedStep="develop" → commit-pr.
+  // PR2: routing reads `lastCompletedStep` instead of `currentStep` (which
+  // was clobbered to "adversarial" by runAdversarial). PR #239's check on
+  // currentStep was always false and silently routed every adversarial-
+  // approved to lens-review, skipping commit-pr. Confirmed live on #553.
   let s: WorkState = {
     ...base,
-    pipelineState: { ...base.pipelineState, currentStep: "develop" },
+    pipelineState: {
+      ...base.pipelineState,
+      currentStep: "adversarial",
+      lastCompletedStep: "develop",
+    },
   };
   s = appendEvent(s, { kind: "adversarial-approved", at: 2000, jobId: "j1", rounds: 1 });
-  assert(nextStep(s) === "commit-pr", "adversarial-approved from develop routes to commit-pr");
+  assert(
+    nextStep(s) === "commit-pr",
+    "adversarial-approved with lastCompletedStep=develop routes to commit-pr",
+  );
 
-  // Adversarial-approved from lens-fix → re-run lens-review.
+  // Adversarial-approved with lastCompletedStep="lens-fix" → re-run lens-review.
   s = {
     ...base,
-    pipelineState: { ...base.pipelineState, currentStep: "lens-fix" },
+    pipelineState: {
+      ...base.pipelineState,
+      currentStep: "adversarial",
+      lastCompletedStep: "lens-fix",
+    },
     eventLog: [{ kind: "adversarial-approved", at: 2000, jobId: "j2", rounds: 1 }],
   };
-  assert(nextStep(s) === "lens-review", "adversarial-approved from lens-fix re-enters lens-review");
+  assert(
+    nextStep(s) === "lens-review",
+    "adversarial-approved with lastCompletedStep=lens-fix re-enters lens-review",
+  );
 
   // lens-issues-found, round 1 → lens-fix.
   s = {
@@ -237,13 +257,29 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
   };
   assert(nextStep(s) === "merged", "ci-status success routes to merged");
 
-  // CI failure → develop (re-fix).
+  // CI failure with ciRetryCount under cap → develop (re-fix).
   s = {
     ...base,
-    pipelineState: { ...base.pipelineState, currentStep: "ci" },
+    pipelineState: { ...base.pipelineState, currentStep: "ci", ciRetryCount: 1 },
     eventLog: [{ kind: "ci-status", at: 5000, status: "failure" }],
   };
-  assert(nextStep(s) === "develop", "ci-status failure routes back to develop");
+  assert(
+    nextStep(s) === "develop",
+    "ci-status failure with ciRetryCount=1 (<MAX_CI_RETRIES) routes to develop",
+  );
+
+  // CI failure with ciRetryCount at cap → handoff. PR2 B5: prevents the
+  // infinite ci → develop → adversarial → lens-review → ci loop that
+  // surfaced on issue #553's live cycle when no PR existed for CI to watch.
+  s = {
+    ...base,
+    pipelineState: { ...base.pipelineState, currentStep: "ci", ciRetryCount: 3 },
+    eventLog: [{ kind: "ci-status", at: 5000, status: "failure" }],
+  };
+  assert(
+    nextStep(s) === "handoff",
+    "ci-status failure with ciRetryCount>=MAX_CI_RETRIES routes to handoff",
+  );
 
   // Terminal status → "done".
   s = {
@@ -354,6 +390,88 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
   const err = new DriverNotImplementedError("develop");
   assert(err.step === "develop", "DriverNotImplementedError carries the step");
   assert(err.message.includes("develop"), "error message names the step");
+}
+
+// 6. parseAbort detects the ops/dev refusal markers.
+{
+  // Verbatim shape from issue #553's branch step ops reply (the `\n\n` before
+  // `**ABORT` is load-bearing — markers must be on their own line so prose
+  // discussing aborts elsewhere doesn't false-positive).
+  const realAbort =
+    "I'll create the feature branch following the safety preconditions. " +
+    "First, let me check the issue #553 content to create an appropriate " +
+    "branch description, then verify the preconditions.\n\n" +
+    "**ABORT: Working tree is not clean**\n\n" +
+    "Mainline identified: `main`\n\nHowever, the working tree has uncommitted changes (41 untracked files)";
+  assert(parseAbort(realAbort) !== undefined, "parseAbort detects the real #553 ABORT message");
+  assert(parseAbort("ABORT: --ff-only refused")?.startsWith("ABORT:") === true, "parseAbort: plain marker");
+  assert(parseAbort(undefined) === undefined, "parseAbort: undefined input is undefined");
+  assert(parseAbort("") === undefined, "parseAbort: empty input is undefined");
+  assert(
+    parseAbort("This text discusses an abort but the marker isn't on its own line") === undefined,
+    "parseAbort: false-positive guard (prose mentioning abort, no marker line)",
+  );
+}
+
+// 6b. work-widget renderStatus (PR2 O2) — pure-function check.
+{
+  const { renderStatus } = await import("../src/work-widget.ts");
+  let state = initialState(553, 1_000_000);
+  // Place the cycle mid-flight at lens-fix, step started 1m45s ago.
+  state = {
+    ...state,
+    pipelineState: {
+      ...state.pipelineState,
+      currentStep: "adversarial",
+      reviewRound: 1,
+      reviewCapStartedAt: 2_000_000,
+      ciRetryCount: 1,
+    },
+  };
+  const stepStartedAt = 5_000_000;
+  const now = stepStartedAt + 105_000; // 1m45s
+  const out = renderStatus(state, stepStartedAt, now);
+  assert(out.includes("/work #553"), "widget renders issue number");
+  assert(out.includes("step 5/9 adversarial"), "widget renders step ordinal + name");
+  assert(out.includes("1m45s"), "widget renders step elapsed");
+  assert(out.includes("round 1/3"), "widget renders review round cap");
+  assert(out.includes("cap "), "widget renders wall-clock cap when timer is set");
+  assert(out.includes("ci-retry 1/2"), "widget renders ci-retry counter when nonzero");
+}
+
+// 6c. Widget omits cap line when caps are inactive.
+{
+  const { renderStatus } = await import("../src/work-widget.ts");
+  const state = initialState(42, 1_000_000); // reviewRound=0, ciRetryCount=0
+  const out = renderStatus(state, 1_000_000, 1_005_000);
+  assert(out.includes("step 1/9 explore"), "fresh widget renders step explore");
+  assert(!out.includes("round"), "fresh widget does NOT render review-round cap");
+  assert(!out.includes("ci-retry"), "fresh widget does NOT render ci-retry");
+}
+
+// 7. parseBranchName extracts the branch name ops emits.
+{
+  assert(
+    parseBranchName("branch: feature/issue-553-cron-catchup") === "feature/issue-553-cron-catchup",
+    "parseBranchName: plain marker",
+  );
+  assert(
+    parseBranchName("**branch**: `feature/issue-547-x`") === "feature/issue-547-x",
+    "parseBranchName: markdown bold + backticks",
+  );
+  assert(parseBranchName(undefined) === undefined, "parseBranchName: undefined input");
+  assert(parseBranchName("Some prose about a branch") === undefined, "parseBranchName: no marker line");
+  // Multi-line reply ending with the marker — the realistic shape from ops.
+  const realistic = [
+    "Branch created successfully.",
+    "Mainline: main (fast-forwarded)",
+    "",
+    "branch: feature/issue-553-fix",
+  ].join("\n");
+  assert(
+    parseBranchName(realistic) === "feature/issue-553-fix",
+    "parseBranchName: end-of-reply marker line",
+  );
 }
 
 console.log(`\nexit ${exit}`);

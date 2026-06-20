@@ -44,6 +44,7 @@ import { modelConfigSnapshot } from "./models.ts";
 import { transcriptsSummary } from "./runs.ts";
 import { trace } from "./trace.ts";
 import { runWorkDriver } from "./work-driver.ts";
+import { registerWorkStatusCommand } from "./work-status.ts";
 
 const execp = promisify(exec);
 
@@ -264,6 +265,12 @@ export function registerCommands(pi: ExtensionAPI) {
       ctx.ui.notify(lines.join("\n"), "info");
     },
   });
+
+  // /work-status — inspect work-driver state for a given (or auto-resolved)
+  // issue. PR2 O4: gives the user a "where are we" snapshot without having
+  // to open the .pi/work-state/<issue>.json file. Restate-style "no progress
+  // in last hour" query semantics scoped to a single session.
+  registerWorkStatusCommand(pi);
 
   pi.on(
     "before_agent_start",
