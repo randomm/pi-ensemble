@@ -135,6 +135,14 @@ function fmtEvent(e: WorkEvent): string {
       return `  ci-status · ${e.status}${e.runUrl ? ` · ${e.runUrl}` : ""}`;
     case "merged":
       return `  merged · PR #${e.prNumber}`;
+    case "branches-fanned-out":
+      return `  branches-fanned-out · ${e.step} · ${e.workstreams.length} branches: ${e.workstreams.join(", ")}`;
+    case "branch-completed":
+      return `  branch-completed · ${e.step}[${e.workstreamId}] · ${e.ok ? "ok" : "FAIL"} · ${fmtElapsed(e.ms)}${e.error ? ` · ${e.error.slice(0, 40)}` : ""}`;
+    case "branches-converged": {
+      const okN = e.verdicts.filter((v) => v.ok).length;
+      return `  branches-converged · ${e.step} · ${okN}/${e.verdicts.length} ok`;
+    }
   }
 }
 

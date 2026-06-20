@@ -344,15 +344,7 @@ async function runStep(ctx: DriverContext, state: WorkState, step: WorkStep): Pr
     case "explore":
       return runExplore(ctx, state, now);
     case "plan":
-      // PM-judgment step — collapses to a no-op event for v1. The "plan"
-      // step exists in the state machine so the next-step transition can
-      // route through it, but there is no dispatch. Future versions may
-      // turn this into a structured-output PM call when decomposition
-      // becomes load-bearing.
-      return appendEvent(
-        { ...state, pipelineState: { ...state.pipelineState, currentStep: "plan" } },
-        { kind: "step-started", step: "plan", at: now, note: "no dispatch — PM judgment" },
-      );
+      return runPlan(ctx, state, now);
     case "branch":
       return runBranch(ctx, state, now);
     case "develop":
@@ -397,19 +389,48 @@ async function runExplore(ctx: DriverContext, state: WorkState, now: number): Pr
   );
 
   const dispatch = ctx.dispatchFn ?? dispatchCore;
-  // TODO(work-driver-pr1): load `pi-prompts/work/explore.md` template once
-  // the step-template commit lands. Inline fallback preserves the v1
-  // contract until then.
   const prompt = inlineExplorePrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue));
   const startedAt = Date.now();
 
-  let result: DispatchResult;
-  try {
-    result = await dispatch(ctx.pi, { role: "explore", prompt }, { label: "explore" });
-  } catch (err) {
-    // Spawn-level failure (transport error before any DispatchResult).
-    // Append a synthetic dispatch-failed event so resume can see what
-    // happened.
+  // PR3 Pattern 1 (intra-step fanout): the driver runs `gh issue view N`
+  // itself concurrently with the explore dispatch. Previously the explore
+  // prompt began with "Run gh issue view N first and report verbatim" —
+  // serialising the two streams inside one subagent turn. With this
+  // change both run in parallel: driver caches the issue body to a
+  // claim-check artifact (so Step 2 plan and others can reference it
+  // without re-fetching), explore does its semantic search work
+  // simultaneously. Old /work.md Step 1 doctrine restored.
+  const [issueBodyResult, dispatchResult] = await Promise.allSettled([
+    execp(`gh issue view ${ctx.issue}`, { cwd: ctx.repoRoot, maxBuffer: 256 * 1024 }),
+    (async () => dispatch(ctx.pi, { role: "explore", prompt }, { label: "explore" }))(),
+  ]);
+
+  // Persist the issue body as a claim-check artifact (best-effort). On
+  // failure (gh not on PATH, no auth, network) the prompt the explore
+  // subagent received still asks it for context, so the cycle can
+  // continue — Step 2 just won't have the cached body to reference.
+  if (issueBodyResult.status === "fulfilled") {
+    const body = issueBodyResult.value.stdout;
+    try {
+      const artifactPath = await writeDispatchArtifact(ctx.repoRoot, ctx.issue, "issue-body", body);
+      next = {
+        ...next,
+        pipelineState: { ...next.pipelineState, issueBodyArtifact: artifactPath },
+      };
+    } catch (err) {
+      trace(`work-driver: failed to persist issue-body artifact: ${(err as Error).message}`);
+    }
+  } else {
+    trace(
+      `work-driver: gh issue view ${ctx.issue} failed: ${(issueBodyResult.reason as Error).message?.slice(0, 200)}`,
+    );
+  }
+
+  if (dispatchResult.status === "rejected") {
+    // Spawn-level failure on the explore dispatch (transport error
+    // before any DispatchResult). The gh-side outcome is captured
+    // already above; explore failure halts the cycle via the existing
+    // dispatch-failed → aborted path.
     return appendEvent(next, {
       kind: "dispatch-failed",
       step: "explore",
@@ -418,13 +439,177 @@ async function runExplore(ctx: DriverContext, state: WorkState, now: number): Pr
       label: "explore",
       ms: Date.now() - startedAt,
       at: Date.now(),
-      errorTail: (err as Error).message?.slice(-200),
+      errorTail: (dispatchResult.reason as Error).message?.slice(-200),
     });
   }
 
-  const event = await buildCompletionEvent(ctx, "explore", "explore", "explore", result);
+  const event = await buildCompletionEvent(
+    ctx,
+    "explore",
+    "explore",
+    "explore",
+    dispatchResult.value,
+  );
   next = appendEvent(next, event);
   return next;
+}
+
+/**
+ * Step 2 — Plan / decompose into workstreams.
+ *
+ * PR3 restores the parallelism doctrine the PR #239 driver silently
+ * dropped: the user's /work command treated "default to parallel" as a
+ * first principle, exploiting up to 10 parallel slots for multi-
+ * workstream issues (e.g., "fix bug X in frontend AND update docs"
+ * would dispatch two developers in two worktrees concurrently).
+ *
+ * The decomposition prompt is cribbed from `pi-prompts/plan.md` Phase 2
+ * — explore-shaped, structured output. The subagent reads the cached
+ * issue body (from Step 1's `issueBodyArtifact`) plus the explore
+ * report and decides whether the issue contains 1, 2, or N+
+ * independent workstreams. Returns a fenced `## Workstreams` block
+ * the driver parses.
+ *
+ * Single-workstream is `N=1` of the same code path (not a separate
+ * branch): a `default` workstream is always written so downstream
+ * code can iterate `Object.keys(workstreams)` uniformly.
+ *
+ * Failure modes:
+ *  - parsing returns 0 workstreams → write the synthetic `default`
+ *  - dispatch fails → treat as halt (the cycle can't proceed without
+ *    knowing what to develop); event is `dispatch-failed`
+ */
+async function runPlan(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
+  let next = appendEvent(
+    { ...state, pipelineState: { ...state.pipelineState, currentStep: "plan" } },
+    { kind: "step-started", step: "plan", at: now },
+  );
+  const dispatch = ctx.dispatchFn ?? dispatchCore;
+  const startedAt = Date.now();
+  const prompt = inlinePlanPrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue));
+  let result: DispatchResult;
+  try {
+    result = await dispatch(ctx.pi, { role: "explore", prompt }, { label: "plan" });
+  } catch (err) {
+    return appendEvent(next, {
+      kind: "dispatch-failed",
+      step: "plan",
+      role: "explore",
+      jobId: "unknown",
+      label: "plan",
+      ms: Date.now() - startedAt,
+      at: Date.now(),
+      errorTail: (err as Error).message?.slice(-200),
+    });
+  }
+  const event = await buildCompletionEvent(ctx, "plan", "explore", "plan", result);
+  next = appendEvent(next, event);
+  // Parse workstreams out of the reply. Failure or N=0 collapses to
+  // `default` — never blocks the cycle.
+  const workstreams = parseWorkstreams(result.text ?? "");
+  if (Object.keys(workstreams).length === 0) {
+    workstreams.default = {
+      id: "default",
+      scope: `Issue #${ctx.issue}`,
+      paths: [],
+      outOfScope: [],
+    };
+  }
+  return {
+    ...next,
+    pipelineState: { ...next.pipelineState, workstreams },
+  };
+}
+
+/**
+ * Parse the explore-style reply for a fenced `## Workstreams` block.
+ * Expected format (lenient — agents drift; only the keys matter):
+ *
+ *   ## Workstreams
+ *
+ *   ### task-a — short scope label
+ *   - paths: src/foo.ts, src/bar.ts
+ *   - out-of-scope: docs/, infrastructure
+ *
+ *   ### task-b — second scope label
+ *   ...
+ *
+ * No `## Workstreams` heading present → returns `{}` (caller fills in
+ * the synthetic `default` workstream). Designed to never throw: a
+ * malformed reply collapses to single-workstream rather than aborting
+ * the cycle.
+ */
+export function parseWorkstreams(
+  text: string,
+): Record<string, { id: string; scope: string; paths: string[]; outOfScope: string[] }> {
+  const out: Record<string, { id: string; scope: string; paths: string[]; outOfScope: string[] }> =
+    {};
+  const section = sliceMarkdownSection(text, "Workstreams");
+  if (section === undefined) return out;
+  // Each workstream begins with a ### subheading. Slice between consecutive
+  // ### lines (or to end of section). Heading shape: `### <id> — <scope>` or
+  // `### <id>` (scope optional; em/en/hyphen all accepted as the separator).
+  // The id matches `[a-z0-9][a-z0-9_-]*` so hyphens inside an id like
+  // `task-a` work; the separator is SPACE-DASH-SPACE so we don't ambiguate.
+  const headingRe = /^###\s+([a-z0-9][a-z0-9_-]*)(?:\s+[—–-]\s+(.+?))?\s*$/gim;
+  const headings: Array<{ index: number; length: number; id: string; scope: string }> = [];
+  let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: regex iteration idiom
+  while ((m = headingRe.exec(section))) {
+    const id = (m[1] ?? "").trim().toLowerCase().replace(/\s+/g, "-");
+    if (!id) continue;
+    headings.push({
+      index: m.index,
+      length: m[0].length,
+      id,
+      scope: (m[2] ?? "").trim() || id,
+    });
+  }
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i];
+    if (!h) continue;
+    const bodyStart = h.index + h.length;
+    const bodyEnd = headings[i + 1]?.index ?? section.length;
+    const body = section.slice(bodyStart, bodyEnd);
+    out[h.id] = {
+      id: h.id,
+      scope: h.scope,
+      paths: extractListField(body, "paths"),
+      outOfScope: extractListField(body, "out[- ]of[- ]scope"),
+    };
+  }
+  return out;
+}
+
+/**
+ * Slice the markdown subsection following a given `## <name>` heading.
+ * Returns text from the line after the heading up to (but not including)
+ * the next top-level `## ` heading or end of input. Returns `undefined`
+ * when the heading isn't present. JS regex has no `\Z`; this helper
+ * gives the same effect with explicit string operations.
+ */
+function sliceMarkdownSection(text: string, name: string): string | undefined {
+  const headingRe = new RegExp(`^##\\s+${name}\\s*$`, "m");
+  const m = text.match(headingRe);
+  if (!m || m.index === undefined) return undefined;
+  const start = m.index + m[0].length;
+  const after = text.slice(start);
+  const nextMatch = after.match(/^##\s/m);
+  if (nextMatch && nextMatch.index !== undefined) {
+    return after.slice(0, nextMatch.index);
+  }
+  return after;
+}
+
+/** Extract `- key: a, b, c` or `- key: a` from a markdown sub-section. */
+function extractListField(body: string, keyPattern: string): string[] {
+  const re = new RegExp(`^\\s*[-*]\\s*${keyPattern}\\s*:\\s*(.+?)\\s*$`, "im");
+  const m = body.match(re);
+  if (!m) return [];
+  return (m[1] ?? "")
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -444,31 +629,163 @@ async function runExplore(ctx: DriverContext, state: WorkState, now: number): Pr
  * @ops can populate pipelineState.branchName explicitly.
  */
 async function runBranch(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
+  const workstreamIds = Object.keys(state.pipelineState.workstreams ?? {});
   const next = await runSingleDispatch(ctx, state, "branch", "ops", "ops", now, () =>
-    inlineBranchPrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue)),
+    inlineBranchPrompt(ctx.issue, workstreamIds, scratchDir(ctx.repoRoot, ctx.issue)),
   );
-  // Parse the `branch: <name>` line ops's prompt asks for. Stored on
-  // pipelineState so downstream prompts (develop / commit-pr / ci) can
-  // reference it without re-discovering via `git rev-parse`. Skips when
-  // the dispatch failed or ABORTed — only successful branch creation
-  // populates the name.
   const last = next.eventLog[next.eventLog.length - 1];
   if (last?.kind !== "dispatch-completed") return next;
   const branch = parseBranchName(last.summary);
-  if (!branch) return next;
-  return { ...next, pipelineState: { ...next.pipelineState, branchName: branch } };
+  // Parse worktree assignments (PR3 multi-workstream). For N=1 default
+  // workstream, ops doesn't create an actual worktree — driver records
+  // `{default: ctx.repoRoot}` so downstream Steps 4/5/7 use the same
+  // map-iteration code path uniformly. For N>1, ops returns a fenced
+  // `## Worktrees` block mapping workstream id → absolute path.
+  const worktrees =
+    workstreamIds.length > 1
+      ? parseWorktreesBlock(last.summary ?? "", ctx.repoRoot)
+      : { default: ctx.repoRoot };
+  const ps: typeof next.pipelineState = { ...next.pipelineState, worktrees };
+  if (branch) ps.branchName = branch;
+  return { ...next, pipelineState: ps };
 }
 
 /**
- * Step 4 — Implementation. Dispatches @developer in the worktree (or repo
- * root for single-task /work). v1 does not parallelise — one developer
- * dispatch per /work cycle. Multi-workstream parallelisation is a follow-up
- * once the driver has structured-output decomposition from step "plan".
+ * Parse a fenced `## Worktrees` block from ops's branch reply.
+ *
+ * Expected format:
+ *
+ *   ## Worktrees
+ *
+ *   - task-a: /Users/janni/projects/foo/.worktrees/issue-553-task-a
+ *   - task-b: /Users/janni/projects/foo/.worktrees/issue-553-task-b
+ *
+ * Lenient: accepts hyphens, asterisks, optional backticks around the
+ * path. Returns `{}` if no block present — caller falls back to repo
+ * root for the `default` workstream.
+ */
+export function parseWorktreesBlock(text: string, repoRoot: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const section = sliceMarkdownSection(text, "Worktrees");
+  if (section === undefined) return out;
+  const lineRe = /^\s*[-*]\s*([a-z0-9][a-z0-9_-]*)\s*:\s*`?([^\s`]+)`?\s*$/gim;
+  let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: regex iteration idiom
+  while ((m = lineRe.exec(section))) {
+    const id = (m[1] ?? "").trim();
+    let p = (m[2] ?? "").trim();
+    if (!path.isAbsolute(p)) p = path.resolve(repoRoot, p);
+    if (id) out[id] = p;
+  }
+  return out;
+}
+
+/**
+ * Step 4 — Implementation.
+ *
+ * PR3 restored multi-workstream parallelism (the original /work.md
+ * "default to parallel" doctrine PR #239 silently dropped). When Step 2
+ * decomposed the issue into N>1 workstreams, this step fans out N
+ * developers in parallel — each in its own worktree — via Promise.all
+ * over driver-owned `dispatchCore` calls (the same pattern that
+ * `runLensReview` uses for its 6 lens children).
+ *
+ * For N=1 (the `default` workstream synthesised by Step 2), the existing
+ * `runSingleDispatch` path runs unchanged — N=1 isn't a special case,
+ * just the degenerate one. Both paths populate the SAME event log shape;
+ * downstream Steps 5 (adversarial) and 7 (lens-review) see a single
+ * coherent diff via `fetchDiff` whether N=1 or N>1.
+ *
+ * Partial failures don't abort the join: each branch is try/catch'd
+ * inside the `Promise.all`. Adversarial sees the aggregate; the
+ * `branches-converged` event records which branches succeeded.
  */
 async function runDevelop(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
-  return runSingleDispatch(ctx, state, "develop", "developer", "developer", now, () =>
-    inlineDevelopPrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue)),
+  const ids = Object.keys(state.pipelineState.workstreams ?? {});
+  if (ids.length <= 1) {
+    // N=1 (or 0 — defensive: Step 2 always writes at least the default).
+    // Existing single-dispatch path; same prompt as PR #239's runDevelop.
+    return runSingleDispatch(ctx, state, "develop", "developer", "developer", now, () =>
+      inlineDevelopPrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue)),
+    );
+  }
+
+  // N>1: parallel fanout. Mark the step start + record which branches we're
+  // about to fire so `detectInconsistencies` on resume sees the orphan
+  // signal if we crash mid-fanout.
+  let next: WorkState = {
+    ...state,
+    pipelineState: { ...state.pipelineState, currentStep: "develop" },
+  };
+  next = appendEvent(
+    next,
+    { kind: "step-started", step: "develop", at: now },
+    { kind: "branches-fanned-out", step: "develop", workstreams: ids, at: now },
   );
+
+  const dispatch = ctx.dispatchFn ?? dispatchCore;
+  const scratchAbs = scratchDir(ctx.repoRoot, ctx.issue);
+  const verdicts: Array<{ id: string; ok: boolean }> = [];
+  const branchEvents: typeof next.eventLog = [];
+  const results = await Promise.all(
+    ids.map(async (id) => {
+      const ws = state.pipelineState.workstreams?.[id];
+      const cwd = state.pipelineState.worktrees?.[id] ?? ctx.repoRoot;
+      const startedAt = Date.now();
+      const label = `developer[${id}]`;
+      try {
+        const res = await dispatch(
+          ctx.pi,
+          { role: "developer", prompt: inlineDevelopPrompt(ctx.issue, scratchAbs, ws, id), cwd },
+          { label },
+        );
+        const ok = res.ok && !res.errorStop;
+        const completionEvent = await buildCompletionEvent(ctx, "develop", "developer", label, res);
+        branchEvents.push(completionEvent);
+        branchEvents.push({
+          kind: "branch-completed",
+          step: "develop",
+          workstreamId: id,
+          ok,
+          ms: Date.now() - startedAt,
+          at: Date.now(),
+        });
+        verdicts.push({ id, ok });
+        return { id, ok };
+      } catch (err) {
+        const errMsg = (err as Error).message?.slice(0, 200);
+        branchEvents.push({
+          kind: "dispatch-failed",
+          step: "develop",
+          role: "developer",
+          jobId: "unknown",
+          label,
+          ms: Date.now() - startedAt,
+          at: Date.now(),
+          errorTail: errMsg,
+        });
+        branchEvents.push({
+          kind: "branch-completed",
+          step: "develop",
+          workstreamId: id,
+          ok: false,
+          ms: Date.now() - startedAt,
+          at: Date.now(),
+          error: errMsg,
+        });
+        verdicts.push({ id, ok: false });
+        return { id, ok: false };
+      }
+    }),
+  );
+  void results; // verdicts captures what we need; the array exists for ordering parity
+  next = appendEvent(next, ...branchEvents, {
+    kind: "branches-converged",
+    step: "develop",
+    verdicts,
+    at: Date.now(),
+  });
+  return next;
 }
 
 /**
@@ -494,15 +811,22 @@ async function runAdversarial(
     { kind: "step-started", step: "adversarial", at: now },
   );
 
-  // The diff comes from the worktree or repo wd. v1: rely on the developer
-  // having left the diff in the cwd; the @developer dispatched in runDevelop
-  // returned with uncommitted changes per doctrine. The driver does not run
-  // git directly — it asks the adversarial-developer to read the diff itself
-  // via its bash access. Pass an empty diff and a context that names the
-  // issue + cwd; adversarial.ts's prompt threads the cwd through to the
-  // child via spec.cwd.
-  const cwd = state.pipelineState.worktrees[Object.keys(state.pipelineState.worktrees)[0] ?? ""];
-  const diff = await fetchDiff(cwd);
+  // PR3: diff resolution via the multi-worktree-aware `fetchAllDiffs`. For
+  // single-workstream cycles (N=1, the default), this collapses to a single
+  // `git diff HEAD` from the recorded worktree path (which Step 3 sets to
+  // `ctx.repoRoot` when ops didn't create a worktree). For multi-workstream
+  // cycles, all N worktree diffs are merged with `## workstream: <id>`
+  // headers so the adversarial-developer sees one coherent document.
+  // This is the structural fix for the PR2 B2 "empty diff" bug.
+  const diff = await fetchAllDiffs(state.pipelineState.worktrees ?? {}, ctx.repoRoot);
+  // Working cwd for runAdversarialLoop's internal subagent spawn. Default
+  // worktree path (or first worktree for N>1) — the loop only needs ONE
+  // cwd to dispatch its internal adversarial-developer; the diff input
+  // captures the cross-worktree state for the multi-worktree case.
+  const cwd =
+    state.pipelineState.worktrees?.default ??
+    state.pipelineState.worktrees?.[Object.keys(state.pipelineState.worktrees ?? {})[0] ?? ""] ??
+    ctx.repoRoot;
   const startedAt = Date.now();
   const orchestratorJobId = makeRunId();
 
@@ -619,8 +943,14 @@ async function runLens(ctx: DriverContext, state: WorkState, now: number): Promi
   };
   next = appendEvent(next, { kind: "step-started", step: "lens-review", at: now });
 
-  const cwd = ps.worktrees[Object.keys(ps.worktrees)[0] ?? ""];
-  const diff = await fetchDiff(cwd);
+  // PR3: multi-worktree diff with provenance headers (or single diff for
+  // N=1). Replaces the PR2 broken-fallback path that returned empty diff
+  // when worktrees was {}, making lens-review review nothing.
+  const diff = await fetchAllDiffs(ps.worktrees ?? {}, ctx.repoRoot);
+  const cwd =
+    ps.worktrees?.default ??
+    ps.worktrees?.[Object.keys(ps.worktrees ?? {})[0] ?? ""] ??
+    ctx.repoRoot;
   const startedAt = Date.now();
   const jobId = makeRunId();
   let summary: import("./lens-review.ts").LensReviewSummary;
@@ -824,6 +1154,59 @@ async function fetchDiff(cwd: string | undefined): Promise<string> {
     trace(`work-driver: fetchDiff(${cwd}) failed: ${(err as Error).message?.slice(0, 200)}`);
     return "";
   }
+}
+
+/**
+ * PR3 multi-worktree variant of `fetchDiff`. Resolves the diff(s) for
+ * the current /work cycle's workstreams:
+ *
+ *  - N=1 (default workstream): single `git diff HEAD` from the recorded
+ *    worktree path, OR `ctx.repoRoot` as fallback when the worktrees
+ *    map is empty (the B2 cwd-fallback, restored to working order by
+ *    populating the map in Step 3 — single-task /work writes
+ *    `{default: ctx.repoRoot}`).
+ *
+ *  - N>1: one diff per worktree, concatenated with `## workstream: <id>`
+ *    headers so reviewers (adversarial-developer + lens code-review-
+ *    specialists) see one merged document with provenance. Per-branch
+ *    fetch failures contribute an empty section rather than aborting
+ *    the whole gather.
+ *
+ * Total budget capped at 1 MiB cumulative; once exceeded the function
+ * returns what it has plus a `[... truncated for size]` marker so
+ * downstream prompts don't silently lose context.
+ */
+async function fetchAllDiffs(worktrees: Record<string, string>, repoRoot: string): Promise<string> {
+  const ids = Object.keys(worktrees);
+  // N=1 path — the structural fix for B2. With Step 3 populating the
+  // worktrees map (default → repoRoot for single-task), `worktrees[id]`
+  // is always a string, never undefined.
+  if (ids.length <= 1) {
+    const cwd = ids.length === 1 ? worktrees[ids[0] ?? ""] : repoRoot;
+    return fetchDiff(cwd ?? repoRoot);
+  }
+  // N>1: gather + merge with provenance headers.
+  const TOTAL_CAP = 1024 * 1024;
+  const sections: string[] = [];
+  let totalBytes = 0;
+  let truncated = false;
+  for (const id of ids) {
+    if (truncated) break;
+    const wt = worktrees[id];
+    if (!wt) continue;
+    const piece = await fetchDiff(wt);
+    const header = `## workstream: ${id}\n`;
+    const remaining = TOTAL_CAP - totalBytes - header.length;
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    const body = piece.length > remaining ? `${piece.slice(0, remaining)}\n[... truncated]` : piece;
+    sections.push(header + body);
+    totalBytes += header.length + body.length;
+  }
+  if (truncated) sections.push("\n[... merged diff truncated at 1 MiB total]");
+  return sections.join("\n");
 }
 
 /** Hash a diff for change-detection across rounds. SHA1 is fine — not a security boundary. */
@@ -1083,18 +1466,24 @@ function scratchHygieneSection(scratchDirAbs: string): string {
   ].join("\n");
 }
 
-/** Inline explore prompt used until the step-template commit lands. */
+/**
+ * Step 1 explore prompt. PR3 Pattern 1 (intra-step fanout): the driver
+ * runs `gh issue view N` ITSELF in parallel with this dispatch and
+ * persists the body to a claim-check artifact. The explore agent no
+ * longer needs to fetch the issue body — it goes straight to semantic
+ * context-gathering. Old `## Issue` heading dropped from the return
+ * shape since the driver already has the body cached.
+ */
 function inlineExplorePrompt(issue: number, scratchDirAbs: string): string {
   return [
-    `Run \`gh issue view ${issue}\` first and report the issue body verbatim.`,
+    `/work issue #${issue} — Step 1 (Reconnaissance). The driver is fetching the issue body in parallel with your dispatch; do NOT run \`gh issue view\` yourself.`,
     "",
-    "Then gather context relevant to executing this issue:",
+    "Gather context relevant to executing this issue:",
     "  1. `vipune list --json | jq -r '.[] | .memory_type' | sort -u` to discover project memory types,",
-    "  2. `vipune search '<keywords-from-issue>' --hybrid --recency 0.3 --limit 8` for prior decisions,",
+    "  2. `vipune search '<keywords-from-issue-title>' --hybrid --recency 0.3 --limit 8` for prior decisions,",
     "  3. `codebase_memory_search_code({query: '<concept>'})` for existing relevant code.",
     "",
     "Return a STRUCTURED summary the work-driver can route on:",
-    "  - issue body verbatim (heading: `## Issue`),",
     "  - parallel-workstream candidates (heading: `## Workstreams`),",
     "  - relevant prior decisions (heading: `## Prior decisions`),",
     "  - touchpoint files (heading: `## Touchpoints`).",
@@ -1102,8 +1491,43 @@ function inlineExplorePrompt(issue: number, scratchDirAbs: string): string {
   ].join("\n");
 }
 
-function inlineBranchPrompt(issue: number, scratchDirAbs: string): string {
+/**
+ * Step 2 (plan) prompt. PR3: explicitly asks for `## Workstreams` —
+ * matches the parser in `parseWorkstreams`. Single-workstream issues
+ * return one `### default` entry (or zero, which the driver synthesises).
+ * Cribbed from `pi-prompts/plan.md` Phase 2's type-conditional
+ * decomposition philosophy.
+ */
+function inlinePlanPrompt(issue: number, scratchDirAbs: string): string {
   return [
+    `/work issue #${issue} — Step 2 (Decomposition).`,
+    "",
+    "The driver has already cached the issue body and Step 1's explore report. Read both, then decide:",
+    "",
+    "  1. Does this issue decompose into 2+ INDEPENDENT workstreams that could run in parallel worktrees?",
+    "  2. Workstreams are independent when they touch DISJOINT files / subsystems / concerns. A frontend fix + a docs update = independent. Two changes to the same module = NOT independent.",
+    "  3. Bias toward SINGLE-WORKSTREAM when in doubt. Parallelism is for genuinely separable work; over-decomposition compounds review cost.",
+    "",
+    "Return your reasoning, then a fenced workstreams block. Format MUST match exactly:",
+    "",
+    "```markdown",
+    "## Workstreams",
+    "",
+    "### default — <one-line scope label>",
+    "- paths: <comma-separated touchpoint files>",
+    "- out-of-scope: <comma-separated explicit exclusions — what NOT to touch>",
+    "```",
+    "",
+    "For N>1 workstreams, repeat the `###` subheading per workstream (use short ids like `task-a`, `task-b`). The `out-of-scope` line is LOAD-BEARING — issue #553 polluted PR #556 with off-scope files because nothing told the developer what was OUT. Fence the scope explicitly even when you think it's obvious.",
+    "",
+    "If single-workstream, ALWAYS use `### default` so the driver routes through the same code path uniformly.",
+    scratchHygieneSection(scratchDirAbs),
+  ].join("\n");
+}
+
+function inlineBranchPrompt(issue: number, workstreamIds: string[], scratchDirAbs: string): string {
+  const multi = workstreamIds.length > 1;
+  const lines = [
     `/work issue #${issue} — Step 3 (Setup). Create the feature branch under the safety preconditions below.`,
     "",
     "  1. Identify the mainline branch (default `main`; detect via `git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@'`).",
@@ -1111,24 +1535,70 @@ function inlineBranchPrompt(issue: number, scratchDirAbs: string): string {
     "  3. Fetch + fast-forward mainline (`git fetch origin && git checkout <mainline> && git pull --ff-only origin <mainline>`). If --ff-only fails, ABORT.",
     `  4. Create branch \`feature/issue-${issue}-<brief-description>\` from the fresh mainline tip.`,
     "  5. End your reply with a single line `branch: <branch-name>` so the driver can capture it.",
-    "",
-    "Do NOT create worktrees in v1 (the driver currently does single-task /work).",
-    scratchHygieneSection(scratchDirAbs),
-  ].join("\n");
+  ];
+  if (multi) {
+    lines.push(
+      "",
+      `  6. **Multi-workstream cycle** — Step 2 decomposed this issue into ${workstreamIds.length} workstreams (${workstreamIds.join(", ")}). Create one git worktree per workstream off the feature branch:`,
+      "",
+      ...workstreamIds.map(
+        (id) =>
+          `       git worktree add .worktrees/issue-${issue}-${id} feature/issue-${issue}-<brief>`,
+      ),
+      "",
+      "  7. End your reply with an additional fenced `## Worktrees` block mapping each workstream id to its absolute path:",
+      "",
+      "       ```markdown",
+      "       ## Worktrees",
+      "",
+      ...workstreamIds.map((id) => `       - ${id}: <absolute-path-to-worktree>`),
+      "       ```",
+      "",
+      "       Use `git rev-parse --show-toplevel` from inside each worktree to get the absolute path. The driver parses this block to wire up Step 4's per-workstream developer dispatches.",
+    );
+  } else {
+    lines.push(
+      "",
+      "Single-workstream cycle — do NOT create worktrees. The driver records the repo root as the `default` workstream's path automatically.",
+    );
+  }
+  lines.push(scratchHygieneSection(scratchDirAbs));
+  return lines.join("\n");
 }
 
-function inlineDevelopPrompt(issue: number, scratchDirAbs: string): string {
-  return [
-    `/work issue #${issue} — Step 4 (Implementation).`,
-    "",
+function inlineDevelopPrompt(
+  issue: number,
+  scratchDirAbs: string,
+  workstream?: { id: string; scope: string; paths: string[]; outOfScope: string[] },
+  workstreamId?: string,
+): string {
+  const lines = [`/work issue #${issue} — Step 4 (Implementation).`, ""];
+  if (workstream && workstreamId && workstreamId !== "default") {
+    // Multi-workstream branch — anchor scope explicitly so this developer
+    // doesn't drift into another workstream's territory. The out-of-scope
+    // fence addresses the issue #553 scope-contamination pattern.
+    lines.push(
+      `**Workstream: \`${workstream.id}\`** — one of multiple developers running in parallel for this issue.`,
+      `Scope: ${workstream.scope}`,
+      workstream.paths.length > 0
+        ? `In-scope files: ${workstream.paths.join(", ")}`
+        : "In-scope files: derive from the scope description above.",
+      workstream.outOfScope.length > 0
+        ? `**OUT OF SCOPE — do NOT touch**: ${workstream.outOfScope.join(", ")}`
+        : "Stay tightly focused on the scope; other workstreams handle the rest.",
+      "",
+    );
+  }
+  lines.push(
     `  1. \`gh issue view ${issue}\` to re-fetch the issue body (acceptance criteria, DoD).`,
     "  2. Implement the change end-to-end in the current branch. Run local quality gates (typecheck, lint, tests as the project defines them).",
     "  3. Do NOT commit. Do NOT push. Leave the changes uncommitted in the working directory — ops commits in Step 6 after the adversarial gate.",
     "  4. End your reply with a `## Touched files` section listing every file you changed and a one-line `## Summary`.",
     "",
-    "Discourage drive-by edits; only touch files in scope for the issue.",
+    "Discourage drive-by edits; only touch files in scope.",
     scratchHygieneSection(scratchDirAbs),
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 function inlineCommitPrPrompt(issue: number, scratchDirAbs: string): string {

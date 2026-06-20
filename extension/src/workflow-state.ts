@@ -241,6 +241,46 @@ export type WorkEvent =
       at: number;
       prNumber: number;
       mergeCommit?: string;
+    }
+  | {
+      /**
+       * Driver fanned out a step into N parallel branches (PR3 multi-
+       * workstream support). Emitted before the Promise.all that
+       * dispatches the N children. Pairs with `branches-converged` —
+       * if the converged event is missing on resume, the driver crashed
+       * mid-fanout (resume-hazard signal via `detectInconsistencies`).
+       */
+      kind: "branches-fanned-out";
+      step: WorkStep;
+      workstreams: string[];
+      at: number;
+    }
+  | {
+      /**
+       * One branch of a fanned-out step completed (PR3). Recorded
+       * per-branch so `/work-status` can surface partial progress
+       * ("2 of 3 branches done") and the user can see which specific
+       * workstream id failed when one does.
+       */
+      kind: "branch-completed";
+      step: WorkStep;
+      workstreamId: string;
+      ok: boolean;
+      ms: number;
+      at: number;
+      /** Failure tail (truncated) when ok=false. */
+      error?: string;
+    }
+  | {
+      /**
+       * Fanned-out step's `Promise.all` resolved (PR3). Carries the
+       * per-branch verdicts so the driver's next-step decision can
+       * route on the aggregate (e.g., "any branch failed" → halt).
+       */
+      kind: "branches-converged";
+      step: WorkStep;
+      verdicts: Array<{ id: string; ok: boolean }>;
+      at: number;
     };
 
 /** Discriminator union of event kinds — useful for callers that switch on it. */
@@ -270,7 +310,41 @@ export interface PipelineState {
   inFlightJobIds: string[];
   /** Feature branch name once Step 3 completes. */
   branchName?: string;
-  /** Map of worktree label → absolute path; empty for single-task /work. */
+  /**
+   * Workstreams decomposed by Step 2 (plan). Single-task /work writes
+   * `{default: {id:"default", scope, paths, outOfScope}}` so downstream
+   * code paths can treat `N=1` and `N>1` uniformly — they iterate
+   * `Object.keys(workstreams)` either way.
+   *
+   * - `id` matches the key (e.g., "default", "task-a", "task-b")
+   * - `scope` is a one-line brief; passed into the developer prompt
+   * - `paths` lists touchpoint files; helps developer stay in scope
+   * - `outOfScope` is the explicit fence — addresses the issue #553
+   *   scope-contamination empirical pattern (developer pulled off-scope
+   *   e2e files into a UX-fix PR because nothing told them what was OUT)
+   *
+   * Optional in the schema so state files written before PR3 still load
+   * cleanly under the same `schemaVersion: 1`. Readers treat absent as
+   * `{default: ...}` synthesised from the issue title.
+   */
+  workstreams?: Record<
+    string,
+    { id: string; scope: string; paths: string[]; outOfScope: string[] }
+  >;
+  /**
+   * Path to a claim-check artifact holding the cached `gh issue view`
+   * body fetched driver-side in Step 1 (Pattern 1 intra-step fanout).
+   * Downstream steps reference this instead of re-fetching the body
+   * from GitHub.
+   */
+  issueBodyArtifact?: string;
+  /**
+   * Map of workstream id → absolute path of its worktree (or repo root
+   * for the `default` single-task case). Populated by Step 3 (branch);
+   * consumed by Steps 4 (develop), 5 (adversarial), 7 (lens-review),
+   * 8 (ci). Empty map = pre-PR3 state file; readers fall back to
+   * `repoRoot` for the `default` workstream.
+   */
   worktrees: Record<string, string>;
   /**
    * Last fetched diff hash — set after Step 5 / Step 7 fix passes. Lets the

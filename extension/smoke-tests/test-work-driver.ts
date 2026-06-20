@@ -27,6 +27,8 @@ import {
   nextStep,
   parseAbort,
   parseBranchName,
+  parseWorkstreams,
+  parseWorktreesBlock,
   runWorkDriver,
   scratchDir,
   setupWorkspaceTmp,
@@ -298,28 +300,31 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
   assert(nextStep(s) === "done", "handoff status returns done");
 }
 
-// 3. runWorkDriver — explore + plan + branch happy path with mock dispatch.
+// 3. runWorkDriver — happy path (single-workstream) with mock dispatch.
 //
-// Steps 5 (adversarial) and 7 (lens-review) call into adversarial.ts and
-// lens-review.ts directly (NOT through dispatchFn) and would try to spawn
-// real Pi children if exercised. The smoke covers the dispatchCore-based
-// steps only; live lens-review / adversarial paths are covered by the
-// existing test-lens-review and adversarial-loop live smokes.
+// PR3 sequence: explore → plan (decomposes) → branch (ops) → develop
+// (developer). Plan returns no `## Workstreams` block, so the driver
+// synthesises the `default` workstream and the cycle stays single-task.
+// Steps 5/7 (adversarial / lens-review) call orchestrator functions
+// directly (NOT through dispatchFn); we throw on dispatch #5 to halt
+// cleanly before those live paths fire.
 {
   const dir = mkdtempSync(path.join(tmpdir(), "work-driver-loop-"));
   try {
     const { pi, sent } = makeFakePi();
+    void sent;
     const rolesDispatched: string[] = [];
+    const labelsDispatched: string[] = [];
     const ctx: DriverContext = {
       pi,
       repoRoot: dir,
       issue: 600,
-      dispatchFn: async (_pi, spec) => {
+      dispatchFn: async (_pi, spec, opts) => {
         rolesDispatched.push(spec.role);
-        // Throw on the first step that would land in adversarial / lens-review
-        // to keep the smoke offline. The driver records dispatch-failed and
-        // halts cleanly.
-        if (rolesDispatched.length >= 4) {
+        labelsDispatched.push(opts?.label ?? spec.role);
+        // explore (Step 1) → plan (Step 2) → ops branch (Step 3) → developer (Step 4)
+        // Halt before adversarial would fire (dispatch #5+).
+        if (rolesDispatched.length >= 5) {
           throw new Error("smoke: halting before adversarial step (would call live runAdversarialLoop)");
         }
         return mkResult({
@@ -330,22 +335,34 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
     };
     await runWorkDriver(ctx);
 
-    assert(rolesDispatched[0] === "explore", "runWorkDriver dispatches @explore first");
-    assert(rolesDispatched[1] === "ops", "runWorkDriver dispatches @ops for branch creation");
-    assert(rolesDispatched[2] === "developer", "runWorkDriver dispatches @developer for implementation");
+    // Roles by dispatch order: explore (Step 1) + explore (Step 2 plan,
+    // explore-role dispatch with label "plan") + ops (Step 3 branch) + developer (Step 4).
+    assert(rolesDispatched[0] === "explore", "Step 1: dispatches @explore (reconnaissance)");
+    assert(
+      rolesDispatched[1] === "explore" && labelsDispatched[1] === "plan",
+      "Step 2: dispatches @explore with label 'plan' (workstream decomposition)",
+    );
+    assert(rolesDispatched[2] === "ops", "Step 3: dispatches @ops for branch creation");
+    assert(rolesDispatched[3] === "developer", "Step 4: dispatches @developer for implementation");
     const after = await readState(dir, 600);
     assert(after !== undefined, "state file persists after the loop halts");
-    // Event log should include step-started for explore, plan, branch, develop
-    // and dispatch-completed for the dispatched ones.
-    const kinds = after?.eventLog.map((e) => e.kind) ?? [];
-    assert(kinds.includes("step-started"), "event log has step-started");
-    assert(kinds.includes("dispatch-completed"), "event log has dispatch-completed");
+    // Plan-step output had no `## Workstreams` block → driver synthesises default.
+    assert(
+      after?.pipelineState.workstreams?.default !== undefined,
+      "single-workstream cycle synthesises pipelineState.workstreams.default",
+    );
+    // Step 3 (branch) populates worktrees with default → repoRoot.
+    assert(
+      after?.pipelineState.worktrees?.default === dir,
+      "Step 3 populates worktrees.default = repoRoot for single-workstream cycle",
+    );
     const stepsStarted = (after?.eventLog ?? [])
       .filter((e): e is Extract<typeof e, { kind: "step-started" }> => e.kind === "step-started")
       .map((e) => e.step);
     assert(stepsStarted.includes("explore"), "explore step-started recorded");
-    assert(stepsStarted.includes("plan"), "plan step-started recorded (collapsed dispatch)");
+    assert(stepsStarted.includes("plan"), "plan step-started recorded");
     assert(stepsStarted.includes("branch"), "branch step-started recorded");
+    assert(stepsStarted.includes("develop"), "develop step-started recorded");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -531,6 +548,255 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
     // Teardown on already-removed dir is a no-op (no throw).
     await teardownWorkspaceTmp(dir, 999);
     assert(true, "teardownWorkspaceTmp on missing dir is safe (no-op)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// 9. PR3 parsers: parseWorkstreams + parseWorktreesBlock.
+//
+// These are the lenient regex parsers the driver uses on Step 2 (plan)
+// and Step 3 (branch) replies to populate pipelineState.workstreams and
+// pipelineState.worktrees respectively. They must never throw; malformed
+// input collapses to the empty result and the caller falls back to the
+// synthesised `default` workstream.
+{
+  // Single workstream: just one ### default block.
+  const single = `
+Some prose before the block.
+
+## Workstreams
+
+### default — fix the WikiView error UX
+- paths: frontend/src/components/WikiView.tsx, frontend/src/__tests__/WikiView.test.tsx
+- out-of-scope: backend, docs, build config
+
+Trailing prose.
+`;
+  const singleResult = parseWorkstreams(single);
+  assert(
+    Object.keys(singleResult).length === 1 && singleResult.default !== undefined,
+    "parseWorkstreams: single default workstream parsed",
+  );
+  assert(
+    singleResult.default?.scope === "fix the WikiView error UX",
+    "parseWorkstreams: scope captured from heading dash",
+  );
+  assert(
+    singleResult.default?.paths.includes("frontend/src/components/WikiView.tsx"),
+    "parseWorkstreams: paths captured from `- paths:` line",
+  );
+  assert(
+    singleResult.default?.outOfScope.includes("backend"),
+    "parseWorkstreams: out-of-scope captured (LOAD-BEARING for issue #553 scope-contamination prevention)",
+  );
+
+  // Multi-workstream: 3 ### entries.
+  const multi = `
+## Workstreams
+
+### task-a — frontend UI cleanup
+- paths: frontend/src/components/Foo.tsx
+- out-of-scope: backend
+
+### task-b — backend API fix
+- paths: src/api/handlers.rs
+- out-of-scope: frontend
+
+### task-c — docs update
+- paths: docs/api.md
+- out-of-scope: code
+`;
+  const multiResult = parseWorkstreams(multi);
+  assert(Object.keys(multiResult).length === 3, "parseWorkstreams: 3 workstreams parsed");
+  assert(
+    multiResult["task-a"]?.scope === "frontend UI cleanup",
+    "parseWorkstreams: first multi-workstream scope captured",
+  );
+  assert(
+    multiResult["task-b"]?.paths.includes("src/api/handlers.rs"),
+    "parseWorkstreams: second multi-workstream paths captured",
+  );
+
+  // No block → empty result (caller synthesises default).
+  const noBlock = "Just some prose with no Workstreams heading anywhere.";
+  assert(
+    Object.keys(parseWorkstreams(noBlock)).length === 0,
+    "parseWorkstreams: missing block returns {} (caller synthesises default)",
+  );
+
+  // Malformed block → empty result (never throws).
+  const malformed = "## Workstreams\n\nnot a ### subheading just prose\n";
+  assert(
+    Object.keys(parseWorkstreams(malformed)).length === 0,
+    "parseWorkstreams: malformed block returns {} (no throw)",
+  );
+
+  // parseWorktreesBlock: 2-worktree block.
+  const wtText = `
+Branch created.
+
+## Worktrees
+
+- task-a: /Users/janni/projects/foo/.worktrees/issue-553-task-a
+- task-b: /Users/janni/projects/foo/.worktrees/issue-553-task-b
+
+branch: feature/issue-553-fix
+`;
+  const wtResult = parseWorktreesBlock(wtText, "/Users/janni/projects/foo");
+  assert(
+    wtResult["task-a"] === "/Users/janni/projects/foo/.worktrees/issue-553-task-a",
+    "parseWorktreesBlock: absolute path captured",
+  );
+  assert(
+    Object.keys(wtResult).length === 2,
+    "parseWorktreesBlock: 2 entries from ## Worktrees block",
+  );
+
+  // Missing block → empty (single-workstream fallback path in runBranch).
+  assert(
+    Object.keys(parseWorktreesBlock("no block here", "/repo")).length === 0,
+    "parseWorktreesBlock: missing block returns {} (caller falls back to {default: repoRoot})",
+  );
+}
+
+// 10. Multi-workstream develop fanout via mock dispatchFn.
+//
+// Asserts:
+//  - N>1 workstreams trigger Promise.all of N developer dispatches
+//  - branches-fanned-out → N × branch-completed → branches-converged events
+//  - partial failure (one branch throws) records ok:false WITHOUT aborting
+//    the other branches' completion
+{
+  const dir = mkdtempSync(path.join(tmpdir(), "work-driver-fanout-"));
+  try {
+    const fs = await import("node:fs/promises");
+    // Pre-seed state at the "develop" step with 3 workstreams + worktrees
+    // so we can exercise runDevelop's fanout path directly without running
+    // Steps 1-3 (which would need mocked plan output).
+    const state = {
+      schemaVersion: 1 as const,
+      resumable: false as const,
+      issue: 700,
+      startedAt: 1_000_000,
+      updatedAt: 1_000_000,
+      pipelineState: {
+        currentStep: "develop" as const,
+        lastCompletedStep: "branch" as const,
+        inFlightJobIds: [],
+        worktrees: {
+          "task-a": `${dir}/.worktrees/task-a`,
+          "task-b": `${dir}/.worktrees/task-b`,
+          "task-c": `${dir}/.worktrees/task-c`,
+        },
+        workstreams: {
+          "task-a": { id: "task-a", scope: "frontend", paths: ["frontend/foo.ts"], outOfScope: [] },
+          "task-b": { id: "task-b", scope: "backend", paths: ["src/api.rs"], outOfScope: [] },
+          "task-c": { id: "task-c", scope: "docs", paths: ["docs/api.md"], outOfScope: [] },
+        },
+        reviewRound: 0,
+        ciRetryCount: 0,
+        plumbReports: [],
+        status: "running" as const,
+        branchName: "feature/issue-700-multi",
+      },
+      eventLog: [
+        // Minimum prior events so the loop doesn't trip on inconsistency
+        // detection (no orphan inFlightJobIds expected).
+      ],
+    };
+    await fs.mkdir(path.join(dir, ".git", "info"), { recursive: true });
+    await writeState(dir, state);
+
+    const seenCwds: string[] = [];
+    const seenLabels: string[] = [];
+    let throwOnce = false;
+    const ctx: DriverContext = {
+      pi: makeFakePi().pi,
+      repoRoot: dir,
+      issue: 700,
+      dispatchFn: async (_pi, spec, opts) => {
+        seenCwds.push(spec.cwd ?? "<no cwd>");
+        seenLabels.push(opts?.label ?? spec.role);
+        // Throw on task-b ONLY to exercise partial-failure handling.
+        if (opts?.label === "developer[task-b]" && !throwOnce) {
+          throwOnce = true;
+          throw new Error("mock: simulated provider error for task-b");
+        }
+        // Other dispatches halt the cycle right after develop (we don't
+        // want to drive into adversarial). Return ok=true; the loop will
+        // then attempt adversarial via the live orchestrator path. We
+        // detect that by throwing on any non-develop dispatch role.
+        if (spec.role !== "developer") {
+          throw new Error("smoke: halting after develop fanout");
+        }
+        return mkResult({
+          role: "developer",
+          text: `mock developer output for ${opts?.label}`,
+        });
+      },
+    };
+    await runWorkDriver(ctx);
+
+    // Three developer dispatches fired, one per workstream, each with the
+    // correct per-worktree cwd.
+    const developerLabels = seenLabels.filter((l) => l.startsWith("developer["));
+    assert(developerLabels.length === 3, "multi-workstream: 3 developer dispatches fired");
+    assert(
+      developerLabels.includes("developer[task-a]") &&
+        developerLabels.includes("developer[task-b]") &&
+        developerLabels.includes("developer[task-c]"),
+      "multi-workstream: each workstream id appears in a developer dispatch label",
+    );
+
+    // Each developer's cwd is its workstream's worktree.
+    const cwdsByLabel = Object.fromEntries(
+      seenLabels.map((l, i) => [l, seenCwds[i]]).filter(([l]) => l?.startsWith("developer[")),
+    );
+    assert(
+      cwdsByLabel["developer[task-a]"] === `${dir}/.worktrees/task-a`,
+      "multi-workstream: developer[task-a] dispatches with task-a's worktree cwd",
+    );
+    assert(
+      cwdsByLabel["developer[task-c]"] === `${dir}/.worktrees/task-c`,
+      "multi-workstream: developer[task-c] dispatches with task-c's worktree cwd",
+    );
+
+    // Event sequence: branches-fanned-out → 3 × (dispatch-completed or
+    // dispatch-failed) + 3 × branch-completed → branches-converged.
+    const after = await readState(dir, 700);
+    const kinds = (after?.eventLog ?? []).map((e) => e.kind);
+    assert(kinds.includes("branches-fanned-out"), "multi-workstream: branches-fanned-out emitted");
+    const branchCompletions = (after?.eventLog ?? []).filter((e) => e.kind === "branch-completed");
+    assert(
+      branchCompletions.length === 3,
+      "multi-workstream: 3 branch-completed events (one per branch)",
+    );
+    assert(
+      kinds.includes("branches-converged"),
+      "multi-workstream: branches-converged emitted after all branches resolve",
+    );
+
+    // Partial failure: task-b's branch-completed has ok=false, others ok=true.
+    const verdictsByWorkstream = Object.fromEntries(
+      branchCompletions.map((e) => [
+        (e as Extract<typeof e, { kind: "branch-completed" }>).workstreamId,
+        (e as Extract<typeof e, { kind: "branch-completed" }>).ok,
+      ]),
+    );
+    assert(verdictsByWorkstream["task-a"] === true, "task-a: success recorded");
+    assert(verdictsByWorkstream["task-b"] === false, "task-b: failure recorded (partial-failure aggregate)");
+    assert(verdictsByWorkstream["task-c"] === true, "task-c: success recorded (NOT aborted by task-b failure)");
+
+    // branches-converged carries the per-branch verdict aggregate.
+    const converged = (after?.eventLog ?? []).find((e) => e.kind === "branches-converged");
+    assert(converged !== undefined, "branches-converged is present");
+    if (converged?.kind === "branches-converged") {
+      assert(
+        converged.verdicts.filter((v) => v.ok).length === 2,
+        "branches-converged verdicts: 2 of 3 ok (partial failure aggregate)",
+      );
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
