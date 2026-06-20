@@ -414,18 +414,21 @@ export async function spawnSpecialist(
     "--append-system-prompt",
     tmpPromptFile,
   ];
-  // Per-role tool gating (PR #238 — Option A in determinism plan). Strips
-  // tools the role should not have at the boundary, regardless of what the
-  // doctrine prompt says. PM loses write/edit/multiedit so under-pressure
-  // role-drift ("PM forgets and tries to code itself") becomes physically
-  // impossible. Reviewer roles lose the same — silent edit + approve is a
-  // catastrophic regression the doctrine prompts have historically warned
-  // against but couldn't enforce post-#215 trust-mode. Empty list (developer,
-  // ops) → flag omitted entirely. See role-tools.ts for the per-role table.
-  const excludeTools = excludeToolsFor(spec.role);
-  if (excludeTools) {
-    childArgs.push("--exclude-tools", excludeTools);
-  }
+  // Per-role tool gating (PR #238 — Option A in determinism plan) was
+  // designed to call `pi --exclude-tools <csv>` here so reader roles
+  // (explore, adversarial-developer, code-review-specialist) physically
+  // could not invoke write/edit/multiedit regardless of doctrine. Pi
+  // 0.75.3 (the pinned version, see package.json) does NOT support that
+  // flag — passing it makes the child exit immediately with
+  // `Error: Unknown option: --exclude-tools`, killing every subagent
+  // dispatch. Until Pi grows a compatible exclude-flag (or we switch to
+  // `--tools` as an exhaustive allowlist — currently brittle because it
+  // also gates extension tools like codebase_memory_*, ctx7, dispatch_*),
+  // we keep the role-tools.ts table as documentation of intent but do NOT
+  // pass the flag to Pi. Reader-role containment regresses to doctrine
+  // only, matching the pre-#238 posture. Tracked in the determinism plan;
+  // re-enable when the pin moves to a Pi version that supports it.
+  void excludeToolsFor;
   // `--provider` must precede `--model` so Pi disambiguates the model ID
   // against the named provider's catalog. Required for custom OpenAI-
   // compatible endpoints whose model IDs are upstream-vendor strings

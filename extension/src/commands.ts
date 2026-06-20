@@ -28,9 +28,11 @@
  * `pi -p "/cmd …"` invocations — see earendil-works/pi#5423.
  */
 
+import { exec } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import type {
   BeforeAgentStartEvent,
   BeforeAgentStartEventResult,
@@ -41,6 +43,44 @@ import { GLOBAL_KEY, getAllOverrides } from "./model-config.ts";
 import { modelConfigSnapshot } from "./models.ts";
 import { transcriptsSummary } from "./runs.ts";
 import { trace } from "./trace.ts";
+import { runWorkDriver } from "./work-driver.ts";
+
+const execp = promisify(exec);
+
+/**
+ * /work driver feature flag. Default ON in v1 — the compiled state-machine
+ * driver owns /work transitions. Set PI_ENSEMBLE_WORK_DRIVER=0 to bypass
+ * the driver and fall back to the legacy PM-driven flow (`sendUserMessage(work.md)`).
+ *
+ * Fallback is essential for two reasons:
+ *  1. In-flight /work cycles started under older versions don't have a
+ *     state file; the driver halts on missing schema vs. attempting to
+ *     fabricate one.
+ *  2. If a driver step body throws unexpectedly, the user can flip the
+ *     env var and keep working without waiting for a fix.
+ */
+function isWorkDriverEnabled(): boolean {
+  const v = process.env.PI_ENSEMBLE_WORK_DRIVER;
+  // Default ON. Explicit "0" / "false" disables; everything else (including
+  // unset) is on.
+  return v !== "0" && v !== "false";
+}
+
+/**
+ * Resolve the project repo root (the worktree containing the `.git` dir or
+ * gitlink). The driver state file lives here so it survives `git worktree
+ * remove` against any sub-worktree. Falls back to process.cwd() when not
+ * inside a git repo (which would mean /work is being run in a non-git
+ * directory — surface clearly rather than fabricate a path).
+ */
+async function resolveRepoRoot(cwd: string): Promise<string> {
+  try {
+    const { stdout } = await execp("git rev-parse --show-toplevel", { cwd });
+    return stdout.trim();
+  } catch {
+    return cwd;
+  }
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -97,6 +137,60 @@ export function registerCommands(pi: ExtensionAPI) {
           : undefined,
       handler: async (args: string, ctx: ExtensionCommandContext) => {
         trace(`/${name} fired (args: ${args ? `"${args.slice(0, 40)}"` : "<none>"})`);
+
+        // /work has a code-driven execution path (work-driver.ts) when the
+        // PI_ENSEMBLE_WORK_DRIVER flag is on (default). The driver runs in
+        // the background — the handler kicks it off and returns immediately
+        // so the user can interact with the chat while it works. Other
+        // commands stay on the legacy sendUserMessage(prompt-body) path.
+        if (name === "work" && isWorkDriverEnabled()) {
+          const issueArg = args.trim().split(/\s+/)[0] ?? "";
+          const issue = Number.parseInt(issueArg, 10);
+          if (!issueArg || !Number.isFinite(issue) || issue <= 0) {
+            ctx.ui.notify(
+              "pi-ensemble: /work needs an issue number (e.g., /work 547). " +
+                "Set PI_ENSEMBLE_WORK_DRIVER=0 to use the legacy PM-driven flow.",
+              "warning",
+            );
+            return;
+          }
+          if (!ctx.isIdle()) {
+            ctx.ui.notify(
+              "pi-ensemble: agent is busy — try /work again when idle, or use /steer for an inline nudge",
+              "warning",
+            );
+            return;
+          }
+          const cwd = process.cwd();
+          const repoRoot = await resolveRepoRoot(cwd);
+          trace(`/work → driver loop for issue #${issue} (repoRoot=${repoRoot})`);
+          // PM stays in reporter mode so user-visible progress messages
+          // emitted by the driver via sendUserMessage land cleanly.
+          pmDoctrineFirstTurnPending = true;
+          pmModeActive = true;
+          ctx.ui.notify(
+            `pi-ensemble: /work driver running for issue #${issue}. ` +
+              `State in .pi/work-state/${issue}.json. Set PI_ENSEMBLE_WORK_DRIVER=0 to use legacy PM flow.`,
+            "info",
+          );
+          // Fire-and-forget. The driver awaits its own dispatch promises
+          // and surfaces final outcome via pi.sendUserMessage. We catch
+          // unexpected throws so the background promise doesn't trip
+          // Node's unhandled-rejection warning.
+          void runWorkDriver({ pi, repoRoot, issue }).catch((err) => {
+            trace(`work-driver: unexpected throw for issue #${issue}: ${(err as Error).message}`);
+            try {
+              pi.sendUserMessage(
+                `pi-ensemble: /work driver crashed for issue #${issue}: ${(err as Error).message}. ` +
+                  `Inspect .pi/work-state/${issue}.json or run with PI_ENSEMBLE_WORK_DRIVER=0 to use the legacy flow.`,
+              );
+            } catch {
+              /* nothing we can do */
+            }
+          });
+          return;
+        }
+
         let body: string;
         try {
           body = await loadPromptBody(name);

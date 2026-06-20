@@ -120,14 +120,24 @@ assert(
   "/start: queued message equals start.md body (no $ARGUMENTS in start.md, so no expansion)",
 );
 
-// Fire /work 42 (with arg expansion)
-const { ctx: ctx2 } = makeCtx();
-await handlers.work!("42", ctx2);
-assert(rec.sentMessages.length === 2, "/work 42 → second message queued");
-assert(
-  rec.sentMessages[1].includes("**Issue**: 42"),
-  "/work 42: $ARGUMENTS expanded to '42' in workflow body",
-);
+// Fire /work 42 — under PI_ENSEMBLE_WORK_DRIVER=0 this exercises the
+// legacy PM-driven path: handler reads pi-prompts/work.md and sends it.
+// (PR1 of workflow-graph compilation introduced the driver-based path; the
+// legacy path stays available as a fallback.)
+const prevFlag = process.env.PI_ENSEMBLE_WORK_DRIVER;
+process.env.PI_ENSEMBLE_WORK_DRIVER = "0";
+try {
+  const { ctx: ctx2 } = makeCtx();
+  await handlers.work!("42", ctx2);
+  assert(rec.sentMessages.length === 2, "/work 42 (legacy flag=0) → second message queued");
+  assert(
+    rec.sentMessages[1].includes("**Issue**: 42"),
+    "/work 42 (legacy flag=0): $ARGUMENTS expanded to '42' in workflow body",
+  );
+} finally {
+  if (prevFlag === undefined) delete process.env.PI_ENSEMBLE_WORK_DRIVER;
+  else process.env.PI_ENSEMBLE_WORK_DRIVER = prevFlag;
+}
 
 // Fire /review #456 (with arg expansion)
 const { ctx: ctxR } = makeCtx();
@@ -137,6 +147,53 @@ assert(
   rec.sentMessages[2].includes("**Scope**: #456"),
   "/review #456: $ARGUMENTS expanded to '#456' in workflow body",
 );
+
+// /work under PI_ENSEMBLE_WORK_DRIVER=1 (default) should NOT send a user
+// message — it spins up the driver via notify() instead. We can't actually
+// run the driver here (it would spawn real Pi children) but we can verify:
+//  - no new sendUserMessage is queued (count stays at 3),
+//  - a notify of kind "info" fires naming the work-state path.
+{
+  const prevFlag = process.env.PI_ENSEMBLE_WORK_DRIVER;
+  delete process.env.PI_ENSEMBLE_WORK_DRIVER; // default = ON
+  try {
+    const { ctx: ctxW, notifies: notifW } = makeCtx();
+    await handlers.work!("789", ctxW);
+    assert(
+      rec.sentMessages.length === 3,
+      "/work 789 (driver default-ON): does NOT call sendUserMessage",
+    );
+    assert(
+      notifW.some((n) => n.kind === "info" && /work-state\/789\.json/.test(n.msg)),
+      "/work 789 (driver default-ON): info notify names the work-state file path",
+    );
+  } finally {
+    if (prevFlag === undefined) delete process.env.PI_ENSEMBLE_WORK_DRIVER;
+    else process.env.PI_ENSEMBLE_WORK_DRIVER = prevFlag;
+  }
+}
+
+// /work without an issue number under driver mode should reject cleanly
+// (warning notify, no sendUserMessage).
+{
+  const prevFlag = process.env.PI_ENSEMBLE_WORK_DRIVER;
+  delete process.env.PI_ENSEMBLE_WORK_DRIVER;
+  try {
+    const { ctx: ctxWE, notifies: notifWE } = makeCtx();
+    await handlers.work!("", ctxWE);
+    assert(
+      rec.sentMessages.length === 3,
+      "/work (driver default-ON, no args): does NOT send a message",
+    );
+    assert(
+      notifWE.some((n) => n.kind === "warning" && /issue number/.test(n.msg)),
+      "/work (driver default-ON, no args): warning notify mentions missing issue number",
+    );
+  } finally {
+    if (prevFlag === undefined) delete process.env.PI_ENSEMBLE_WORK_DRIVER;
+    else process.env.PI_ENSEMBLE_WORK_DRIVER = prevFlag;
+  }
+}
 
 // Fire before_agent_start with doctrine armed (set by the most recent /work call)
 const hook = rec.beforeAgentStartHandlers[0]!;

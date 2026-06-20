@@ -511,3 +511,72 @@ If after `./install.sh` something still doesn't work, capture:
 2. `docker images randomm/pi-ensemble --format '{{.Repository}}:{{.Tag}} {{.CreatedSince}} {{.Size}}'`
 3. The exact failing command + error message
 4. Open an issue at <https://github.com/randomm/pi-ensemble/issues>.
+
+## `/work` driver state recovery
+
+### Symptom
+
+`/work N` says it can't start, or halts immediately with a message like:
+
+```
+pi-ensemble /work driver halted on issue #N: state-file inconsistencies detected.
+  - pipelineState.inFlightJobIds includes <jobId> but log has no record of it
+Inspect <project>/.pi/work-state/N.json or rm to start fresh (your git work is unaffected; only the workflow tracker state is removed).
+```
+
+Or you get a loud schema-version error when re-invoking `/work` after upgrading pi-ensemble:
+
+```
+work-state: <path> has schemaVersion=2 but this build expects 1. This /work cycle was started under a different driver version. …
+```
+
+### Cause
+
+Since this PR, `/work` runs through a compiled state-machine driver (`extension/src/work-driver.ts`). Workflow state persists at `<project>/.pi/work-state/<issue>.json` so the user can intervene surgically when subagent providers degrade and the driver can resume cleanly after restart.
+
+The state file is the durable contract that lets the driver know which step is current, what dispatches have completed, and which caps have already fired. Two situations can leave it in a state the driver refuses to run against:
+
+1. **Mid-flight crash**: Pi got killed (process exit, machine reboot, OOM) while a dispatch was in flight. The eventLog has a `dispatch-started` without a matching `dispatch-completed`. The driver detects the orphan jobId on resume and halts rather than fabricating a result.
+2. **Schema version mismatch**: you upgraded pi-ensemble between `/work` invocations, and the saved state-file's `schemaVersion` no longer matches what the new driver expects. We never auto-migrate state silently.
+
+### Fix
+
+Pick the option that matches your context:
+
+**A. Resume manually (preferred for valuable in-flight work).** Open `<project>/.pi/work-state/<issue>.json` in your editor. The `eventLog` array shows every step the driver completed and every dispatch's outcome. Worktree path, branch name, PR number (if any), and last review round are all in `pipelineState`. Use that to decide what to do next yourself: finish the work in the worktree manually, or push the PR if the branch is ready, or rm the state file and start fresh.
+
+**B. Start fresh.** `rm <project>/.pi/work-state/<issue>.json` — only the workflow-tracker state goes; your git work (worktree, branch, commits, PR) is unaffected. Then re-run `/work N` to begin a new cycle. The driver will detect that no PR / branch / worktree exists yet for this issue and run Steps 1-3 from scratch — for issues where the developer already pushed a PR, you may want to skip that path and resume manually instead.
+
+**C. Bypass the driver entirely.** `PI_ENSEMBLE_WORK_DRIVER=0 /work N` falls back to the legacy PM-driven flow (`pi.sendUserMessage(work.md)`) — the same flow used before this PR. The driver's state file is left untouched. Use this when you need to debug a driver issue or you want the older PM-orchestrated path for any reason.
+
+### Inspecting the state file directly
+
+The state file shape (schema v1) is:
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "resumable": false,          // v1 is observational; user intervenes, no auto-replay
+  "issue": 547,
+  "startedAt": <epoch-ms>,
+  "updatedAt": <epoch-ms>,
+  "pipelineState": {
+    "currentStep": "lens-review",   // explore | plan | branch | develop | adversarial | commit-pr | lens-review | lens-fix | step-back | handoff | ci | merged
+    "lastCompletedStep": "commit-pr",
+    "inFlightJobIds": [],
+    "branchName": "feature/issue-547-fix-thing",
+    "worktrees": {},
+    "reviewRound": 2,
+    "reviewCapStartedAt": <epoch-ms>,
+    "plumbReports": [],
+    "status": "running"             // running | merged | handoff | aborted
+  },
+  "eventLog": [
+    { "kind": "step-started", "step": "explore", "at": <epoch-ms> },
+    { "kind": "dispatch-completed", "step": "explore", "role": "explore", "ok": true, ... },
+    ...
+  ]
+}
+```
+
+The `eventLog` is append-only and authoritative; `pipelineState` is a derived snapshot for O(1) "where are we" reads. Large subagent outputs go to claim-check artifacts under `.pi/work-state/<issue>/<jobId>.txt` and are referenced from the corresponding `dispatch-completed` event's `artifactPath`.

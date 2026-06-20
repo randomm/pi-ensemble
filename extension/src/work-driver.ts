@@ -59,7 +59,10 @@
 
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { runAdversarialLoop } from "./adversarial.ts";
 import { dispatchCore } from "./dispatch.ts";
+import { runLensReview } from "./lens-review.ts";
+import { makeRunId } from "./spawn.ts";
 import { trace } from "./trace.ts";
 import type { DispatchResult } from "./types.ts";
 import {
@@ -209,20 +212,21 @@ async function runStep(ctx: DriverContext, state: WorkState, step: WorkStep): Pr
         { kind: "step-started", step: "plan", at: now, note: "no dispatch — PM judgment" },
       );
     case "branch":
+      return runBranch(ctx, state, now);
     case "develop":
+      return runDevelop(ctx, state, now);
     case "adversarial":
+      return runAdversarial(ctx, state, now);
     case "commit-pr":
+      return runCommitPr(ctx, state, now);
     case "lens-review":
+      return runLens(ctx, state, now);
     case "lens-fix":
+      return runLensFix(ctx, state, now);
     case "step-back":
+      return runStepBack(ctx, state, now);
     case "ci":
-      // TODO(work-driver-pr1): implement remaining step bodies. Each follows
-      // the same shape as runExplore — load template, build prompt with
-      // state context, dispatchCore, append events, update pipelineState.
-      // Skeleton intentionally surfaces a clean error so the smoke test
-      // can assert these are not yet wired (and the live /work fallback
-      // path applies until they land).
-      throw new DriverNotImplementedError(step);
+      return runCi(ctx, state, now);
     case "handoff":
       return runHandoff(ctx, state, now);
     case "merged":
@@ -279,6 +283,348 @@ async function runExplore(ctx: DriverContext, state: WorkState, now: number): Pr
   const event = await buildCompletionEvent(ctx, "explore", "explore", "explore", result);
   next = appendEvent(next, event);
   return next;
+}
+
+/**
+ * Step 3 — Setup: ops creates the feature branch + worktrees.
+ *
+ * The ops subagent enforces the safety preconditions in /work.md Step 3:
+ * clean working tree, fast-forward mainline, then create
+ * `feature/issue-N-<brief>` branch. The driver stores the branch name in
+ * pipelineState once the dispatch returns so subsequent steps can compose
+ * worktree paths and the PR URL.
+ *
+ * v1 simplification: the driver does not parse the branch name out of the
+ * ops reply — it leaves pipelineState.branchName undefined and lets the
+ * subsequent steps include the issue number in their prompts, asking the
+ * @developer / @ops to discover the branch via `git rev-parse --abbrev-ref HEAD`
+ * in the worktree. A future version with a structured-output schema on
+ * @ops can populate pipelineState.branchName explicitly.
+ */
+async function runBranch(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
+  return runSingleDispatch(ctx, state, "branch", "ops", "ops", now, () =>
+    inlineBranchPrompt(ctx.issue),
+  );
+}
+
+/**
+ * Step 4 — Implementation. Dispatches @developer in the worktree (or repo
+ * root for single-task /work). v1 does not parallelise — one developer
+ * dispatch per /work cycle. Multi-workstream parallelisation is a follow-up
+ * once the driver has structured-output decomposition from step "plan".
+ */
+async function runDevelop(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
+  return runSingleDispatch(ctx, state, "develop", "developer", "developer", now, () =>
+    inlineDevelopPrompt(ctx.issue),
+  );
+}
+
+/**
+ * Step 5 — Adversarial gate.
+ *
+ * Calls `runAdversarialLoop` directly (exported from adversarial.ts). The
+ * loop does its own 3-round internal cycle; the driver wraps the whole
+ * thing in one dispatch event and routes on the synthesized verdict in the
+ * result text.
+ *
+ * The driver-owned adversarial dispatch goes through async-jobs's startJob
+ * with `ownerKind:"driver"` + `skipDeck:true` so the per-round dispatch
+ * deck entries owned by `runAdversarialLoop` remain the user-visible UI.
+ * No double-deck.
+ */
+async function runAdversarial(
+  ctx: DriverContext,
+  state: WorkState,
+  now: number,
+): Promise<WorkState> {
+  let next = appendEvent(
+    { ...state, pipelineState: { ...state.pipelineState, currentStep: "adversarial" } },
+    { kind: "step-started", step: "adversarial", at: now },
+  );
+
+  // The diff comes from the worktree or repo wd. v1: rely on the developer
+  // having left the diff in the cwd; the @developer dispatched in runDevelop
+  // returned with uncommitted changes per doctrine. The driver does not run
+  // git directly — it asks the adversarial-developer to read the diff itself
+  // via its bash access. Pass an empty diff and a context that names the
+  // issue + cwd; adversarial.ts's prompt threads the cwd through to the
+  // child via spec.cwd.
+  const cwd = state.pipelineState.worktrees[Object.keys(state.pipelineState.worktrees)[0] ?? ""];
+  const diff = await fetchDiff(cwd);
+  const startedAt = Date.now();
+  const orchestratorJobId = makeRunId();
+
+  let result: DispatchResult;
+  try {
+    result = await runAdversarialLoop(
+      {
+        diff,
+        context: `/work issue #${ctx.issue}: gating diff before commit (Step 5).`,
+        workCwd: cwd,
+      },
+      // Driver does not propagate an AbortController for v1 — the spawn-
+      // level timeouts in spawn.ts (30 min default) bound the work. A
+      // future version can plumb pi.signal or similar.
+      new AbortController().signal,
+      orchestratorJobId,
+    );
+  } catch (err) {
+    return appendEvent(next, {
+      kind: "dispatch-failed",
+      step: "adversarial",
+      role: "adversarial-loop",
+      jobId: orchestratorJobId,
+      label: "adversarial_loop",
+      ms: Date.now() - startedAt,
+      at: Date.now(),
+      errorTail: (err as Error).message?.slice(-200),
+    });
+  }
+
+  // Append the dispatch-completed event so the audit trail stays uniform
+  // across steps that go through dispatchCore vs. ones (like adversarial /
+  // lens-review) that call orchestrator functions directly.
+  const evt = await buildCompletionEvent(
+    ctx,
+    "adversarial",
+    "adversarial-loop",
+    "adversarial_loop",
+    result,
+  );
+  next = appendEvent(next, evt);
+
+  // Parse the verdict from the result text. `runAdversarialLoop` returns
+  // `ok: true` for APPROVED and `ok: false` for the final-rejection case
+  // after 3 rounds. The verdict text contains either "Adversarial APPROVED"
+  // or "Adversarial REJECTED after 3 rounds".
+  const rounds = result.text.includes("after round 1")
+    ? 1
+    : result.text.includes("after round 2")
+      ? 2
+      : 3;
+  if (result.ok) {
+    next = appendEvent(next, {
+      kind: "adversarial-approved",
+      at: Date.now(),
+      jobId: orchestratorJobId,
+      rounds,
+    });
+  } else {
+    next = appendEvent(
+      next,
+      {
+        kind: "adversarial-rejected",
+        at: Date.now(),
+        jobId: orchestratorJobId,
+        rounds: 3,
+        findings: result.text,
+      },
+      // adversarial_loop exhausted its 3 internal rounds → driver routes to
+      // handoff per /work.md Step 7f.3 doctrine (cap-hit, NOT user-block).
+      {
+        kind: "cap-hit",
+        at: Date.now(),
+        cap: "adversarial-loop",
+        reviewRound: state.pipelineState.reviewRound,
+        nextStep: "handoff",
+      },
+    );
+  }
+
+  return next;
+}
+
+/**
+ * Step 6 — Commit + PR. ops commits the diff, pushes, opens a PR with
+ * `Fixes #N` in the body. v1 does not extract the PR number from the ops
+ * reply; pipelineState.prNumber stays unset and downstream steps include
+ * the issue number for `gh` lookups instead.
+ */
+async function runCommitPr(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
+  return runSingleDispatch(ctx, state, "commit-pr", "ops", "ops:commit-pr", now, () =>
+    inlineCommitPrPrompt(ctx.issue),
+  );
+}
+
+/**
+ * Step 7 — Six-pass lens review.
+ *
+ * Calls `runLensReview` (exported from lens-review.ts) directly. The
+ * function returns a structured LensReviewSummary with `verdict` we route
+ * on. Bumps `reviewRound` and seeds `reviewCapStartedAt` on first entry.
+ */
+async function runLens(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
+  const ps = state.pipelineState;
+  const round = ps.reviewRound + 1;
+  let next: WorkState = {
+    ...state,
+    pipelineState: {
+      ...ps,
+      currentStep: "lens-review",
+      reviewRound: round,
+      reviewCapStartedAt: ps.reviewCapStartedAt ?? now,
+    },
+  };
+  next = appendEvent(next, { kind: "step-started", step: "lens-review", at: now });
+
+  const cwd = ps.worktrees[Object.keys(ps.worktrees)[0] ?? ""];
+  const diff = await fetchDiff(cwd);
+  const startedAt = Date.now();
+  const jobId = makeRunId();
+  let summary: import("./lens-review.ts").LensReviewSummary;
+  try {
+    summary = await runLensReview({
+      diff,
+      context: `/work issue #${ctx.issue}, lens-review round ${round}`,
+      cwd,
+    });
+  } catch (err) {
+    return appendEvent(next, {
+      kind: "dispatch-failed",
+      step: "lens-review",
+      role: "code-review-specialist",
+      jobId,
+      label: `lens-review×6 (round ${round})`,
+      ms: Date.now() - startedAt,
+      at: Date.now(),
+      errorTail: (err as Error).message?.slice(-200),
+    });
+  }
+
+  next = appendEvent(next, {
+    kind: "dispatch-completed",
+    step: "lens-review",
+    role: "code-review-specialist",
+    jobId,
+    label: `lens-review×6 (round ${round})`,
+    ok: true,
+    ms: Date.now() - startedAt,
+    at: Date.now(),
+    summary: `verdict=${summary.verdict}; findings=${summary.totalFindings}`,
+  });
+
+  if (summary.verdict === "APPROVED") {
+    next = appendEvent(next, { kind: "lens-approved", at: Date.now(), jobId, round });
+  } else if (summary.verdict === "ISSUES_FOUND" || summary.verdict === "CRITICAL_ISSUES_FOUND") {
+    next = appendEvent(next, {
+      kind: "lens-issues-found",
+      at: Date.now(),
+      jobId,
+      round,
+      findings: JSON.stringify(summary.findings.slice(0, 50)),
+      verdict: summary.verdict,
+    });
+  } else {
+    // REVIEW_INCOMPLETE — at least one lens failed all retries. Treat as a
+    // halt that needs human attention rather than continuing the fix loop
+    // against a partial review. /work.md doctrine: never silently downgrade
+    // a six-pass to a five-pass.
+    next = appendEvent(next, {
+      kind: "cap-hit",
+      at: Date.now(),
+      cap: "adversarial-loop",
+      reviewRound: round,
+      nextStep: "handoff",
+    });
+  }
+
+  return next;
+}
+
+/**
+ * Step 7f — Lens fix loop iteration. Dispatches @developer with the
+ * findings from the last lens-issues-found event. The driver's transition
+ * table routes lens-fix → adversarial → lens-review (or to handoff on cap-
+ * hit per nextStep()).
+ */
+async function runLensFix(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
+  // Find the most recent lens-issues-found in the log to extract findings.
+  const lastFinding = [...state.eventLog]
+    .reverse()
+    .find(
+      (e): e is Extract<(typeof state.eventLog)[number], { kind: "lens-issues-found" }> =>
+        e.kind === "lens-issues-found",
+    );
+  const findings = lastFinding?.findings ?? "(no prior findings recorded)";
+  return runSingleDispatch(
+    ctx,
+    state,
+    "lens-fix",
+    "developer",
+    `developer:lens-fix-${state.pipelineState.reviewRound}`,
+    now,
+    () => inlineLensFixPrompt(findings),
+  );
+}
+
+/**
+ * Step 7h — Step-back when findings cluster around a theme. Dispatches
+ * @explore with the SDD-six-element step-back prompt from /work.md Step 7h.
+ *
+ * v1: the driver does NOT cluster findings itself (that's fuzzy judgement).
+ * It dispatches step-back unconditionally when the cap-hit nextStep routes
+ * here, includes the prior lens-findings as input, and lets @explore
+ * decide which SDD element is underspecified.
+ */
+async function runStepBack(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
+  const allFindings = state.eventLog
+    .filter(
+      (e): e is Extract<(typeof state.eventLog)[number], { kind: "lens-issues-found" }> =>
+        e.kind === "lens-issues-found",
+    )
+    .map((e) => e.findings)
+    .join("\n---\n");
+  return runSingleDispatch(ctx, state, "step-back", "explore", "explore:step-back", now, () =>
+    inlineStepBackPrompt(ctx.issue, allFindings),
+  );
+}
+
+/**
+ * Step 8 — CI monitoring. ops runs `gh run watch` and reports the outcome.
+ * The driver parses the result text for "ci-status: success/failure" so
+ * routing is deterministic.
+ */
+async function runCi(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
+  let next = await runSingleDispatch(ctx, state, "ci", "ops", "ops:ci", now, () =>
+    inlineCiPrompt(ctx.issue),
+  );
+  // Parse the just-appended dispatch-completed event for a structured status
+  // line. The ops prompt asks the agent to end with `ci-status: success` or
+  // `ci-status: failure`.
+  const last = next.eventLog[next.eventLog.length - 1];
+  if (last?.kind === "dispatch-completed") {
+    const text = last.summary ?? "";
+    const status: "success" | "failure" | "pending" = text.includes("ci-status: success")
+      ? "success"
+      : text.includes("ci-status: failure")
+        ? "failure"
+        : "pending";
+    next = appendEvent(next, { kind: "ci-status", at: Date.now(), status });
+  }
+  return next;
+}
+
+/**
+ * Resolve a diff for the given working directory. Driver doesn't shell out
+ * to git itself — it relies on the subagent it dispatched (developer / ops)
+ * to read the diff via its own bash access. For the adversarial / lens-
+ * review entry points that need the diff as INPUT to the orchestrator
+ * function, this helper shells out best-effort and returns empty on
+ * failure (the orchestrator's subagent prompts handle "diff is empty —
+ * read it yourself" gracefully).
+ *
+ * Kept as a small named helper so the inline call sites stay readable.
+ */
+async function fetchDiff(cwd: string | undefined): Promise<string> {
+  // The driver intentionally returns an empty string in v1 — the orchestrator
+  // subagents (adversarial-developer, code-review-specialist) all have bash
+  // access and the prompts in adversarial.ts / lens-review.ts already
+  // include the cwd. Letting them fetch the diff fresh from the worktree
+  // is safer than passing a possibly-stale diff through the driver.
+  // The helper exists so a future v2 can populate this from a `git -C cwd diff`
+  // exec call if measurement shows it's needed.
+  void cwd;
+  return "";
 }
 
 /**
@@ -398,6 +744,47 @@ async function buildCompletionEvent(
   };
 }
 
+/**
+ * Generic single-dispatch helper used by every step body whose shape is
+ * "append step-started → dispatch one subagent → append completion event".
+ * Steps that need to emit additional events (adversarial verdicts, lens
+ * verdicts, CI status) implement their own runX and call dispatchCore
+ * directly.
+ */
+async function runSingleDispatch(
+  ctx: DriverContext,
+  state: WorkState,
+  step: WorkStep,
+  role: string,
+  label: string,
+  now: number,
+  buildPrompt: () => string,
+): Promise<WorkState> {
+  const next = appendEvent(
+    { ...state, pipelineState: { ...state.pipelineState, currentStep: step } },
+    { kind: "step-started", step, at: now },
+  );
+  const dispatch = ctx.dispatchFn ?? dispatchCore;
+  const startedAt = Date.now();
+  let result: DispatchResult;
+  try {
+    result = await dispatch(ctx.pi, { role, prompt: buildPrompt() }, { label });
+  } catch (err) {
+    return appendEvent(next, {
+      kind: "dispatch-failed",
+      step,
+      role,
+      jobId: "unknown",
+      label,
+      ms: Date.now() - startedAt,
+      at: Date.now(),
+      errorTail: (err as Error).message?.slice(-200),
+    });
+  }
+  const event = await buildCompletionEvent(ctx, step, role, label, result);
+  return appendEvent(next, event);
+}
+
 /** Inline explore prompt used until the step-template commit lands. */
 function inlineExplorePrompt(issue: number): string {
   return [
@@ -413,6 +800,101 @@ function inlineExplorePrompt(issue: number): string {
     "  - parallel-workstream candidates (heading: `## Workstreams`),",
     "  - relevant prior decisions (heading: `## Prior decisions`),",
     "  - touchpoint files (heading: `## Touchpoints`).",
+  ].join("\n");
+}
+
+function inlineBranchPrompt(issue: number): string {
+  return [
+    `/work issue #${issue} — Step 3 (Setup). Create the feature branch under the safety preconditions below.`,
+    "",
+    "  1. Identify the mainline branch (default `main`; detect via `git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@'`).",
+    "  2. Verify clean working tree (`git status --porcelain` must be empty). If dirty, ABORT and surface the failure verbatim — do NOT branch off uncommitted work.",
+    "  3. Fetch + fast-forward mainline (`git fetch origin && git checkout <mainline> && git pull --ff-only origin <mainline>`). If --ff-only fails, ABORT.",
+    `  4. Create branch \`feature/issue-${issue}-<brief-description>\` from the fresh mainline tip.`,
+    "  5. End your reply with a single line `branch: <branch-name>` so the driver can capture it.",
+    "",
+    "Do NOT create worktrees in v1 (the driver currently does single-task /work).",
+  ].join("\n");
+}
+
+function inlineDevelopPrompt(issue: number): string {
+  return [
+    `/work issue #${issue} — Step 4 (Implementation).`,
+    "",
+    `  1. \`gh issue view ${issue}\` to re-fetch the issue body (acceptance criteria, DoD).`,
+    "  2. Implement the change end-to-end in the current branch. Run local quality gates (typecheck, lint, tests as the project defines them).",
+    "  3. Do NOT commit. Do NOT push. Leave the changes uncommitted in the working directory — ops commits in Step 6 after the adversarial gate.",
+    "  4. End your reply with a `## Touched files` section listing every file you changed and a one-line `## Summary`.",
+    "",
+    "Discourage drive-by edits; only touch files in scope for the issue.",
+  ].join("\n");
+}
+
+function inlineCommitPrPrompt(issue: number): string {
+  return [
+    `/work issue #${issue} — Step 6 (Commit + PR).`,
+    "",
+    "  1. `git status --porcelain` to confirm the developer left uncommitted changes.",
+    "  2. `git add` the changed files (avoid `git add -A` — keep the staged set explicit).",
+    '  3. `git commit -m "<concise subject>"` with a meaningful message. Body should reference the issue.',
+    "  4. `git push -u origin <feature-branch>`.",
+    `  5. \`gh pr create --title \"<title>\" --body \"...\\n\\nFixes #${issue}\"\` — body MUST include \`Fixes #${issue}\` so merge auto-closes the issue.`,
+    "  6. End your reply with `pr: <PR-number>` so the driver can capture it.",
+  ].join("\n");
+}
+
+function inlineLensFixPrompt(findings: string): string {
+  return [
+    "Address the six-pass review findings below against the diff currently on this worktree.",
+    "",
+    "  - Make the minimal change per finding. Group by file.",
+    "  - Run local quality gates before declaring complete.",
+    "  - Do NOT touch unrelated code.",
+    "  - Do NOT commit. Leave the changes uncommitted.",
+    "",
+    "Findings (JSON-encoded array of {path, line, severity, title, suggestion}):",
+    "```json",
+    findings,
+    "```",
+  ].join("\n");
+}
+
+function inlineStepBackPrompt(issue: number, findings: string): string {
+  return [
+    `Don't review THIS diff. Take a step back and consider whether the SPEC for issue #${issue} has a problem.`,
+    "",
+    `Original issue: gh issue view ${issue} (read it).`,
+    "Recurring rejection pattern across multiple lens-review rounds:",
+    "```",
+    findings.slice(0, 4000),
+    "```",
+    "",
+    "Which of these six SDD spec elements appears underspecified?",
+    '  1. Outcomes — acceptance criteria, what "done" looks like',
+    "  2. Scope boundaries — what's in / out of scope",
+    "  3. Constraints — technical / system / invariants",
+    "  4. Prior decisions — why X was chosen over Y; what previous decisions this depends on",
+    "  5. Task breakdown — sub-task structure, ordering, dependencies",
+    "  6. Verification criteria — what proves it's done",
+    "",
+    "Return:",
+    "  - `sddElement:` <one of the six>",
+    "  - `diagnosis:` <one-sentence>",
+    "  - `proposedRevision:` <verbatim text to add to the issue body>",
+    "  - `alternativeApproach:` <optional>",
+  ].join("\n");
+}
+
+function inlineCiPrompt(issue: number): string {
+  return [
+    `/work issue #${issue} — Step 8 (CI monitoring).`,
+    "",
+    "  1. Find the latest workflow run for the feature branch — `gh run list --branch <branch> --limit 1 --json status,conclusion,databaseId,url`.",
+    "  2. If the run is still in progress: `gh run watch <id>` (or poll `gh run view <id> --json status,conclusion` until done).",
+    "  3. On success: end your reply with the line `ci-status: success` (driver routes to merge).",
+    "  4. On failure: end your reply with `ci-status: failure` AND include the failing-job summary so the developer round that follows has the failure context.",
+    "",
+    "The driver parses the last line of your reply for the `ci-status:` token — keep it exact.",
   ].join("\n");
 }
 

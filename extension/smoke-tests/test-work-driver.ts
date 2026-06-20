@@ -259,49 +259,54 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
   assert(nextStep(s) === "done", "handoff status returns done");
 }
 
-// 3. runWorkDriver — full loop with mock dispatch.
+// 3. runWorkDriver — explore + plan + branch happy path with mock dispatch.
+//
+// Steps 5 (adversarial) and 7 (lens-review) call into adversarial.ts and
+// lens-review.ts directly (NOT through dispatchFn) and would try to spawn
+// real Pi children if exercised. The smoke covers the dispatchCore-based
+// steps only; live lens-review / adversarial paths are covered by the
+// existing test-lens-review and adversarial-loop live smokes.
 {
   const dir = mkdtempSync(path.join(tmpdir(), "work-driver-loop-"));
   try {
     const { pi, sent } = makeFakePi();
-    let exploreCalled = false;
+    const rolesDispatched: string[] = [];
     const ctx: DriverContext = {
       pi,
       repoRoot: dir,
       issue: 600,
       dispatchFn: async (_pi, spec) => {
-        if (spec.role === "explore") {
-          exploreCalled = true;
-          return mkResult({ role: "explore", text: "explored issue #600" });
+        rolesDispatched.push(spec.role);
+        // Throw on the first step that would land in adversarial / lens-review
+        // to keep the smoke offline. The driver records dispatch-failed and
+        // halts cleanly.
+        if (rolesDispatched.length >= 4) {
+          throw new Error("smoke: halting before adversarial step (would call live runAdversarialLoop)");
         }
-        // Any other role: caller shouldn't reach this in the skeleton.
-        throw new Error(`unexpected dispatch role: ${spec.role}`);
+        return mkResult({
+          role: spec.role,
+          text: `mock ${spec.role} output for issue #600`,
+        });
       },
     };
     await runWorkDriver(ctx);
 
-    assert(exploreCalled, "runWorkDriver dispatches @explore for step 1");
+    assert(rolesDispatched[0] === "explore", "runWorkDriver dispatches @explore first");
+    assert(rolesDispatched[1] === "ops", "runWorkDriver dispatches @ops for branch creation");
+    assert(rolesDispatched[2] === "developer", "runWorkDriver dispatches @developer for implementation");
     const after = await readState(dir, 600);
     assert(after !== undefined, "state file persists after the loop halts");
-    assert(after?.pipelineState.status === "aborted", "loop halts in aborted state on first unimplemented step");
-    assert(
-      sent.some((m) => m.includes("not yet implemented")),
-      "user sees a friendly message naming the unimplemented step",
-    );
-    assert(
-      sent.some((m) => m.includes("PI_ENSEMBLE_WORK_DRIVER=0")),
-      "halt message points at the legacy-flow fallback flag",
-    );
-    // Event log should record step-started + dispatch-completed for explore,
-    // plus the plan step-started (collapsed), but nothing more.
+    // Event log should include step-started for explore, plan, branch, develop
+    // and dispatch-completed for the dispatched ones.
     const kinds = after?.eventLog.map((e) => e.kind) ?? [];
     assert(kinds.includes("step-started"), "event log has step-started");
     assert(kinds.includes("dispatch-completed"), "event log has dispatch-completed");
-    // The PM-judgment "plan" step appends a step-started note; verify it.
-    const planEvt = after?.eventLog.find(
-      (e) => e.kind === "step-started" && e.step === "plan",
-    );
-    assert(planEvt !== undefined, "plan step records a step-started event even without dispatch");
+    const stepsStarted = (after?.eventLog ?? [])
+      .filter((e): e is Extract<typeof e, { kind: "step-started" }> => e.kind === "step-started")
+      .map((e) => e.step);
+    assert(stepsStarted.includes("explore"), "explore step-started recorded");
+    assert(stepsStarted.includes("plan"), "plan step-started recorded (collapsed dispatch)");
+    assert(stepsStarted.includes("branch"), "branch step-started recorded");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
