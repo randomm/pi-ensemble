@@ -83,6 +83,7 @@ const execp = promisify(exec);
  * about the doctrine's named 9.
  */
 import {
+  type WorkEvent,
   type WorkState,
   type WorkStep,
   appendEvent,
@@ -701,30 +702,33 @@ export function parseWorktreesBlock(text: string, repoRoot: string): Record<stri
  * `branches-converged` event records which branches succeeded.
  */
 async function runDevelop(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
-  const ids = Object.keys(state.pipelineState.workstreams ?? {});
-  if (ids.length <= 1) {
-    // N=1 (or 0 — defensive: Step 2 always writes at least the default).
-    // Existing single-dispatch path; same prompt as PR #239's runDevelop.
-    return runSingleDispatch(ctx, state, "develop", "developer", "developer", now, () =>
-      inlineDevelopPrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue)),
-    );
-  }
+  const ids =
+    Object.keys(state.pipelineState.workstreams ?? {}).length > 0
+      ? Object.keys(state.pipelineState.workstreams ?? {})
+      : ["default"];
 
-  // N>1: parallel fanout. Mark the step start + record which branches we're
-  // about to fire so `detectInconsistencies` on resume sees the orphan
-  // signal if we crash mid-fanout.
   let next: WorkState = {
     ...state,
     pipelineState: { ...state.pipelineState, currentStep: "develop" },
   };
-  next = appendEvent(
-    next,
-    { kind: "step-started", step: "develop", at: now },
-    { kind: "branches-fanned-out", step: "develop", workstreams: ids, at: now },
-  );
+  next = appendEvent(next, { kind: "step-started", step: "develop", at: now });
+  // Only emit branches-fanned-out for N>1 (N=1 stays terse in scrollback).
+  if (ids.length > 1) {
+    next = appendEvent(next, {
+      kind: "branches-fanned-out",
+      step: "develop",
+      workstreams: ids,
+      at: now,
+    });
+  }
 
   const dispatch = ctx.dispatchFn ?? dispatchCore;
   const scratchAbs = scratchDir(ctx.repoRoot, ctx.issue);
+  // PR4 Pattern 3: speculative just-in-time explore alongside each developer.
+  // Wall-clock cost is the developer's elapsed (always longer than explore);
+  // token cost is one extra explore per workstream. Opt-out via env var for
+  // budget-sensitive users.
+  const speculativeOn = process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE !== "1";
   const verdicts: Array<{ id: string; ok: boolean }> = [];
   const branchEvents: typeof next.eventLog = [];
   const results = await Promise.all(
@@ -732,24 +736,87 @@ async function runDevelop(ctx: DriverContext, state: WorkState, now: number): Pr
       const ws = state.pipelineState.workstreams?.[id];
       const cwd = state.pipelineState.worktrees?.[id] ?? ctx.repoRoot;
       const startedAt = Date.now();
-      const label = `developer[${id}]`;
+      const developerLabel = ids.length > 1 ? `developer[${id}]` : "developer";
+      const speculativeContextPath = path.join(scratchAbs, `speculative-${id}.md`);
       try {
-        const res = await dispatch(
-          ctx.pi,
-          { role: "developer", prompt: inlineDevelopPrompt(ctx.issue, scratchAbs, ws, id), cwd },
-          { label },
-        );
+        // Fire developer + (optional) speculative explore CONCURRENTLY.
+        // The explore writes its findings to a scratch file before
+        // returning so the developer can consult it mid-flight (the
+        // developer prompt names the path explicitly). Promise.allSettled
+        // ensures one failing doesn't abort the other.
+        const [developerSettled, speculativeSettled] = await Promise.allSettled([
+          dispatch(
+            ctx.pi,
+            {
+              role: "developer",
+              prompt: inlineDevelopPrompt(
+                ctx.issue,
+                scratchAbs,
+                ws,
+                ids.length > 1 ? id : undefined,
+                speculativeOn ? speculativeContextPath : undefined,
+              ),
+              cwd,
+            },
+            { label: developerLabel },
+          ),
+          speculativeOn
+            ? dispatch(
+                ctx.pi,
+                {
+                  role: "explore",
+                  prompt: inlineSpeculativeExplorePrompt(
+                    ctx.issue,
+                    ws,
+                    speculativeContextPath,
+                    scratchAbs,
+                  ),
+                  cwd,
+                },
+                { label: ids.length > 1 ? `explore:speculative[${id}]` : "explore:speculative" },
+              )
+            : Promise.resolve(null),
+        ]);
+        // Record the speculative outcome (best-effort observability;
+        // failure is non-fatal — the developer ran on whatever context
+        // Step 1's explore + the scratch file provided).
+        if (speculativeSettled.status === "fulfilled" && speculativeSettled.value !== null) {
+          const specEvent = await buildCompletionEvent(
+            ctx,
+            "develop",
+            "explore",
+            ids.length > 1 ? `explore:speculative[${id}]` : "explore:speculative",
+            speculativeSettled.value,
+          );
+          branchEvents.push(specEvent);
+        } else if (speculativeSettled.status === "rejected") {
+          trace(
+            `work-driver: speculative explore for workstream ${id} threw: ${(speculativeSettled.reason as Error).message?.slice(-200)}`,
+          );
+        }
+        if (developerSettled.status === "rejected") {
+          throw developerSettled.reason;
+        }
+        const res = developerSettled.value;
         const ok = res.ok && !res.errorStop;
-        const completionEvent = await buildCompletionEvent(ctx, "develop", "developer", label, res);
+        const completionEvent = await buildCompletionEvent(
+          ctx,
+          "develop",
+          "developer",
+          developerLabel,
+          res,
+        );
         branchEvents.push(completionEvent);
-        branchEvents.push({
-          kind: "branch-completed",
-          step: "develop",
-          workstreamId: id,
-          ok,
-          ms: Date.now() - startedAt,
-          at: Date.now(),
-        });
+        if (ids.length > 1) {
+          branchEvents.push({
+            kind: "branch-completed",
+            step: "develop",
+            workstreamId: id,
+            ok,
+            ms: Date.now() - startedAt,
+            at: Date.now(),
+          });
+        }
         verdicts.push({ id, ok });
         return { id, ok };
       } catch (err) {
@@ -759,32 +826,37 @@ async function runDevelop(ctx: DriverContext, state: WorkState, now: number): Pr
           step: "develop",
           role: "developer",
           jobId: "unknown",
-          label,
+          label: developerLabel,
           ms: Date.now() - startedAt,
           at: Date.now(),
           errorTail: errMsg,
         });
-        branchEvents.push({
-          kind: "branch-completed",
-          step: "develop",
-          workstreamId: id,
-          ok: false,
-          ms: Date.now() - startedAt,
-          at: Date.now(),
-          error: errMsg,
-        });
+        if (ids.length > 1) {
+          branchEvents.push({
+            kind: "branch-completed",
+            step: "develop",
+            workstreamId: id,
+            ok: false,
+            ms: Date.now() - startedAt,
+            at: Date.now(),
+            error: errMsg,
+          });
+        }
         verdicts.push({ id, ok: false });
         return { id, ok: false };
       }
     }),
   );
-  void results; // verdicts captures what we need; the array exists for ordering parity
-  next = appendEvent(next, ...branchEvents, {
-    kind: "branches-converged",
-    step: "develop",
-    verdicts,
-    at: Date.now(),
-  });
+  void results;
+  next = appendEvent(next, ...branchEvents);
+  if (ids.length > 1) {
+    next = appendEvent(next, {
+      kind: "branches-converged",
+      step: "develop",
+      verdicts,
+      at: Date.now(),
+    });
+  }
   return next;
 }
 
@@ -912,14 +984,39 @@ async function runAdversarial(
 
 /**
  * Step 6 — Commit + PR. ops commits the diff, pushes, opens a PR with
- * `Fixes #N` in the body. v1 does not extract the PR number from the ops
- * reply; pipelineState.prNumber stays unset and downstream steps include
- * the issue number for `gh` lookups instead.
+ * `Fixes #N` in the body. PR4 captures the `pr: <N>` line ops's prompt
+ * asks for into pipelineState.prNumber so the handoff step (7g) can
+ * target the right PR for `gh pr comment` instead of falling back to
+ * `gh issue comment`.
  */
 async function runCommitPr(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
-  return runSingleDispatch(ctx, state, "commit-pr", "ops", "ops:commit-pr", now, () =>
+  const next = await runSingleDispatch(ctx, state, "commit-pr", "ops", "ops:commit-pr", now, () =>
     inlineCommitPrPrompt(ctx.issue, scratchDir(ctx.repoRoot, ctx.issue)),
   );
+  const last = next.eventLog[next.eventLog.length - 1];
+  if (last?.kind !== "dispatch-completed") return next;
+  const prNumber = parsePrNumber(last.summary);
+  if (prNumber === undefined) return next;
+  return {
+    ...next,
+    pipelineState: { ...next.pipelineState, prNumber },
+  };
+}
+
+/**
+ * Parse `pr: <N>` from an ops commit-pr reply. Lenient — accepts
+ * surrounding markdown emphasis (`**pr**: 556`), backticks (`pr: #556`,
+ * `pr: \`#556\``), and the bare-or-`#`-prefixed number. Returns
+ * `undefined` when no marker line is present (the dispatch may have
+ * succeeded but ops forgot the marker — that's fine, runHandoff will
+ * fall back to `gh issue comment`).
+ */
+export function parsePrNumber(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  const m = text.match(/^[ \t]*\*{0,2}pr\*{0,2}\s*:\s*`?#?(\d+)`?\s*$/im);
+  if (!m) return undefined;
+  const n = Number.parseInt(m[1] ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 /**
@@ -1209,6 +1306,23 @@ async function fetchAllDiffs(worktrees: Record<string, string>, repoRoot: string
   return sections.join("\n");
 }
 
+/**
+ * Count prior `step-started` events for this step in the event log.
+ * Used by the driver loop (PR4) to compute a `(round N)` suffix for the
+ * scrollback lifecycle line on steps that iterate during a fix loop
+ * (adversarial / lens-review / lens-fix / re-entered develop). First
+ * entry returns 0 — the emit sites add 1 and pass `round` to lifecycle;
+ * `formatLine` suppresses the suffix for `round <= 1` so single-entry
+ * steps stay terse.
+ */
+function countPriorStepStarts(state: WorkState, step: WorkStep): number {
+  let n = 0;
+  for (const e of state.eventLog) {
+    if (e.kind === "step-started" && e.step === step) n++;
+  }
+  return n;
+}
+
 /** Hash a diff for change-detection across rounds. SHA1 is fine — not a security boundary. */
 function hashDiff(diff: string): string {
   return createHash("sha1").update(diff, "utf8").digest("hex").slice(0, 16);
@@ -1269,19 +1383,179 @@ export function parseBranchName(text: string | undefined): string | undefined {
  * After the dispatch, set status=handoff to terminate the loop.
  */
 async function runHandoff(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
-  // For v1 skeleton: just emit the event and terminate. The actual `gh pr
-  // comment` dispatch lands with the rest of the step bodies (TODO above).
-  return appendEvent(
-    {
-      ...state,
-      pipelineState: {
-        ...state.pipelineState,
-        currentStep: "handoff",
-        status: "handoff",
-      },
-    },
-    { kind: "handoff-emitted", at: now, labelApplied: false },
+  let next: WorkState = {
+    ...state,
+    pipelineState: { ...state.pipelineState, currentStep: "handoff" },
+  };
+  next = appendEvent(next, { kind: "step-started", step: "handoff", at: now });
+
+  // Build the handoff markdown from state. /work.md Step 7g specifies the
+  // body shape: which cap fired, rounds attempted, recurring finding
+  // pattern (or "orthogonal local bugs"), suggested next steps, transcripts.
+  const handoffMd = renderHandoffMarkdown(state);
+  const handoffBodyPath = path.join(scratchDir(ctx.repoRoot, ctx.issue), "handoff-comment.md");
+  try {
+    await fs.mkdir(path.dirname(handoffBodyPath), { recursive: true });
+    await fs.writeFile(handoffBodyPath, handoffMd, "utf8");
+  } catch (err) {
+    trace(`work-driver: failed to write handoff body file: ${(err as Error).message}`);
+  }
+
+  // Dispatch @ops to post the comment + apply the label. Falls back to
+  // `gh issue comment` when no PR was created (commit-pr was skipped or
+  // failed). Driver provides the body file path; ops invokes gh + reports
+  // back the comment URL.
+  const dispatch = ctx.dispatchFn ?? dispatchCore;
+  const startedAt = Date.now();
+  const prNumber = state.pipelineState.prNumber;
+  const target = prNumber ? `pr #${prNumber}` : `issue #${ctx.issue}`;
+  const prompt = inlineHandoffOpsPrompt(
+    ctx.issue,
+    prNumber,
+    handoffBodyPath,
+    scratchDir(ctx.repoRoot, ctx.issue),
   );
+  let opsReplyText = "";
+  let dispatchOk = false;
+  try {
+    const res = await dispatch(ctx.pi, { role: "ops", prompt }, { label: "ops:handoff" });
+    opsReplyText = res.text ?? "";
+    dispatchOk = res.ok && !res.errorStop;
+    const completionEvent = await buildCompletionEvent(ctx, "handoff", "ops", "ops:handoff", res);
+    next = appendEvent(next, completionEvent);
+  } catch (err) {
+    trace(`work-driver: handoff ops dispatch threw: ${(err as Error).message}`);
+    next = appendEvent(next, {
+      kind: "dispatch-failed",
+      step: "handoff",
+      role: "ops",
+      jobId: "unknown",
+      label: "ops:handoff",
+      ms: Date.now() - startedAt,
+      at: Date.now(),
+      errorTail: (err as Error).message?.slice(-200),
+    });
+  }
+
+  const commentUrl = parseHandoffCommentUrl(opsReplyText);
+  const labelApplied = dispatchOk && /label.*needs-human-attention/i.test(opsReplyText);
+  next = appendEvent(next, {
+    kind: "handoff-emitted",
+    at: Date.now(),
+    commentUrl,
+    labelApplied,
+  });
+  // Set terminal status AFTER all events for this step are appended.
+  next = {
+    ...next,
+    pipelineState: { ...next.pipelineState, status: "handoff" },
+  };
+  trace(
+    `work-driver: handoff for issue #${ctx.issue} (${target}) — commentUrl=${commentUrl ?? "?"} label=${labelApplied}`,
+  );
+  return next;
+}
+
+/**
+ * Build the cap-hit handoff markdown body per /work.md Step 7g shape.
+ * Walks state.eventLog for: which cap fired (cap-hit event's `cap` field),
+ * how many lens-review rounds ran, last lens-issues-found findings (for
+ * the recurring-pattern paragraph), any plumb-reports, transcript paths
+ * the user can grep through.
+ *
+ * Pure function — no I/O, no Pi calls — so it's testable from a smoke
+ * with a synthetic state file.
+ */
+export function renderHandoffMarkdown(state: WorkState): string {
+  const ps = state.pipelineState;
+  const issue = state.issue;
+  const capHit = [...state.eventLog].reverse().find((e) => e.kind === "cap-hit");
+  const capDescription = capHit
+    ? (capHit as Extract<WorkEvent, { kind: "cap-hit" }>).cap
+    : "review-round (3 of 3)";
+  const lastFindings = [...state.eventLog]
+    .reverse()
+    .find(
+      (e): e is Extract<WorkEvent, { kind: "lens-issues-found" }> => e.kind === "lens-issues-found",
+    );
+  const reviewRound = ps.reviewRound;
+  const branch = ps.branchName ?? "(branch not captured)";
+  // Pull transcript paths from the most recent dispatch-completed events
+  // (last 5) so the user can drill into specific subagent runs.
+  const transcripts = [...state.eventLog]
+    .reverse()
+    .filter(
+      (e): e is Extract<WorkEvent, { kind: "dispatch-completed" }> =>
+        e.kind === "dispatch-completed" && Boolean(e.transcriptPath),
+    )
+    .slice(0, 5)
+    .map((e) => `- \`${e.label}\` — \`${e.transcriptPath}\``);
+  const stepDurations = state.eventLog
+    .filter(
+      (e): e is Extract<WorkEvent, { kind: "dispatch-completed" }> =>
+        e.kind === "dispatch-completed",
+    )
+    .map((e) => `- ${e.step.padEnd(14)} ${(e.ms / 1000).toFixed(1)}s · ${e.label}`);
+  const branches = state.eventLog
+    .filter(
+      (e): e is Extract<WorkEvent, { kind: "branch-completed" }> => e.kind === "branch-completed",
+    )
+    .map((e) => `- ${e.workstreamId}: ${e.ok ? "ok" : "FAIL"}`);
+
+  const lines: string[] = [
+    "## ⏸ Cap hit — needs human attention",
+    "",
+    `**Cap**: ${capDescription}`,
+    `**Rounds**: ${reviewRound} of 3 review rounds`,
+    `**Branch**: \`${branch}\``,
+    `**State file**: \`.pi/work-state/${issue}.json\``,
+    "",
+    "### What was attempted",
+    ...stepDurations.map((s) => s),
+    "",
+  ];
+  if (branches.length > 0) {
+    lines.push("### Workstream verdicts (Step 4 fanout)", ...branches, "");
+  }
+  if (lastFindings) {
+    const verdict = lastFindings.verdict;
+    lines.push(
+      `### Recurring finding pattern (last round: ${verdict})`,
+      "",
+      "Review the JSON findings in the state file's most recent `lens-issues-found` event.",
+      "Patterns to look for:",
+      "  - Same lens flagging the same shape across rounds → spec-level problem (MAST 41.77%)",
+      "  - Orthogonal local bugs → genuine work remains, not a doctrine failure",
+      "",
+    );
+  }
+  lines.push(
+    "### Suggested next steps",
+    "",
+    "1. Review the findings in the state file — the most recent `lens-issues-found` event has the full JSON.",
+    "2. Decide whether to:",
+    "   - Approve the override (record in vipune): the change is acceptable as-is.",
+    "   - Re-enter /work after fixing the spec (update issue body, then re-run).",
+    "   - Take over manually — work the diff yourself, push, merge.",
+    "3. Rate-limit re-entry: spinning /work without addressing the root pattern wastes tokens.",
+    "",
+  );
+  if (transcripts.length > 0) {
+    lines.push("### Transcripts (last 5)", ...transcripts, "");
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Parse the GitHub comment URL the @ops handoff agent should have
+ * surfaced in its reply. Looks for any github.com URL matching the
+ * `*#issuecomment-<id>` shape (the canonical PR/issue comment URL).
+ * Returns the first hit, or undefined when ops failed / didn't surface it.
+ */
+export function parseHandoffCommentUrl(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const m = text.match(/https:\/\/github\.com\/[^\s)>]+#issuecomment-\d+/);
+  return m?.[0];
 }
 
 /**
@@ -1571,6 +1845,7 @@ function inlineDevelopPrompt(
   scratchDirAbs: string,
   workstream?: { id: string; scope: string; paths: string[]; outOfScope: string[] },
   workstreamId?: string,
+  speculativeContextPath?: string,
 ): string {
   const lines = [`/work issue #${issue} — Step 4 (Implementation).`, ""];
   if (workstream && workstreamId && workstreamId !== "default") {
@@ -1596,9 +1871,58 @@ function inlineDevelopPrompt(
     "  4. End your reply with a `## Touched files` section listing every file you changed and a one-line `## Summary`.",
     "",
     "Discourage drive-by edits; only touch files in scope.",
-    scratchHygieneSection(scratchDirAbs),
   );
+  if (speculativeContextPath) {
+    lines.push(
+      "",
+      "## Speculative context — read when you reach a decision point",
+      "",
+      "An explore subagent ran in parallel with this dispatch to surface context Step 1 may have missed (test patterns at the touchpoints, related API surface, similar prior fixes). When it lands it writes to:",
+      "",
+      `  ${speculativeContextPath}`,
+      "",
+      "Consult this file when you hit a decision point you're unsure about (test framework conventions, API shape, prior-art patterns). It's CONTEXT, not instructions — your scope is unchanged. Absent or empty file = the parallel explore had nothing new to surface; proceed without it.",
+    );
+  }
+  lines.push(scratchHygieneSection(scratchDirAbs));
   return lines.join("\n");
+}
+
+/**
+ * Step 4 speculative explore prompt (PR4 Pattern 3 restoration). Runs in
+ * Promise.all alongside the developer; writes its findings to a scratch
+ * file the developer's prompt names. Returns a brief one-liner so the
+ * dispatch event has a useful summary; the heavy content goes to the
+ * scratch file so the dispatch report stays small.
+ */
+function inlineSpeculativeExplorePrompt(
+  issue: number,
+  workstream: { id: string; scope: string; paths: string[]; outOfScope: string[] } | undefined,
+  contextPath: string,
+  scratchDirAbs: string,
+): string {
+  const scopeBlurb = workstream
+    ? `Workstream \`${workstream.id}\` scope: ${workstream.scope}. In-scope files: ${workstream.paths.join(", ") || "(derive from scope)"}.`
+    : `Issue #${issue}.`;
+  return [
+    `/work issue #${issue} — Step 4 speculative context.`,
+    "",
+    "You are running IN PARALLEL with a developer working on the change. Your job is to surface context the developer may benefit from:",
+    "  - test patterns at the touchpoints (how does the project structure its tests for this area?)",
+    "  - related API surface (what functions/types nearby will the change interact with?)",
+    "  - similar prior fixes (vipune / git log for the same module — what did past changes look like?)",
+    "  - non-obvious constraints (rate limits, perf budgets, doctrine notes)",
+    "",
+    scopeBlurb,
+    "",
+    `Write your findings to: \`${contextPath}\` (overwrite if it exists).`,
+    "Keep it under 200 lines — terse, actionable, with file:line references. NOT a tutorial; the developer is competent.",
+    "",
+    "End your reply with a one-line summary (e.g., `wrote 14 KB of context covering test fixtures + auth flow`). Do NOT include the full content in your reply — it goes to the file.",
+    "",
+    "Speculative: if there's genuinely nothing useful to surface (the developer already has full context from Step 1), write a one-line `(no additional context worth surfacing)` to the file and return.",
+    scratchHygieneSection(scratchDirAbs),
+  ].join("\n");
 }
 
 function inlineCommitPrPrompt(issue: number, scratchDirAbs: string): string {
@@ -1657,6 +1981,48 @@ function inlineStepBackPrompt(issue: number, findings: string, scratchDirAbs: st
     "  - `diagnosis:` <one-sentence>",
     "  - `proposedRevision:` <verbatim text to add to the issue body>",
     "  - `alternativeApproach:` <optional>",
+    scratchHygieneSection(scratchDirAbs),
+  ].join("\n");
+}
+
+/**
+ * Step 7g handoff dispatch prompt. PR4 completes the v1 skeleton: the
+ * driver builds the handoff markdown body (renderHandoffMarkdown) and
+ * writes it to a scratch file; ops invokes `gh pr comment` / `gh issue
+ * comment` against that file, applies the `needs-human-attention` label
+ * (creating it if absent), and returns the comment URL.
+ */
+function inlineHandoffOpsPrompt(
+  issue: number,
+  prNumber: number | undefined,
+  bodyPath: string,
+  scratchDirAbs: string,
+): string {
+  const target = prNumber ? `pr ${prNumber}` : `issue ${issue}`;
+  const commentCmd = prNumber
+    ? `gh pr comment ${prNumber} --body-file ${bodyPath}`
+    : `gh issue comment ${issue} --body-file ${bodyPath}`;
+  const editCmd = prNumber
+    ? `gh pr edit ${prNumber} --add-label needs-human-attention`
+    : `gh issue edit ${issue} --add-label needs-human-attention`;
+  return [
+    `/work issue #${issue} — Step 7g (Cap-hit handoff). The driver hit a deterministic loop cap and is handing off to the user. Post the structured comment + apply the label.`,
+    "",
+    "  1. Ensure the `needs-human-attention` label exists in this repo. If not, create it:",
+    '     `gh label create needs-human-attention --color FFAA00 --description "Agent loop hit a cap; human review required"`',
+    '     (skip if already exists; ignore the "already exists" error)',
+    "",
+    `  2. Post the handoff comment on ${target}:`,
+    `     \`${commentCmd}\``,
+    "",
+    "  3. Apply the label:",
+    `     \`${editCmd}\``,
+    "",
+    `  4. The body file is at: \`${bodyPath}\` (already populated by the driver — DO NOT modify or regenerate).`,
+    "",
+    "  5. End your reply with the GitHub URL of the comment you just created (the canonical `…#issuecomment-<id>` form `gh` prints when posting succeeds). The driver parses this to surface it in the final scrollback line.",
+    "",
+    "On any failure (gh auth, network, label-create), surface the error verbatim and continue with whatever steps are still possible.",
     scratchHygieneSection(scratchDirAbs),
   ].join("\n");
 }
@@ -1757,7 +2123,12 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
     // per-dispatch lifecycle events) become visible here.
     const stepOrd = STEP_ORDINAL[step] ?? { num: 0, total: 9 };
     const stepStartedAt = Date.now();
-    lifecycle.emitStepStarted(step, stepOrd.num, stepOrd.total);
+    // PR4 sub-round labels: steps that iterate (adversarial / lens-review /
+    // lens-fix / re-entered develop) get a `(round N)` suffix in scrollback
+    // so the user can distinguish first-pass from third-pass at a glance.
+    // First entry (round=1) shows no suffix — formatLine suppresses it.
+    const stepRound = countPriorStepStarts(state, step) + 1;
+    lifecycle.emitStepStarted(step, stepOrd.num, stepOrd.total, stepRound);
     // PR2 O2: update the footer status cursor — distinct from the deck,
     // which shows individual subagent children. The cursor shows the
     // driver's step-level position with live-tick elapsed.
@@ -1780,6 +2151,7 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
           stepOrd.total,
           Date.now() - stepStartedAt,
           "step not implemented",
+          stepRound,
         );
         ctx.pi.sendUserMessage(
           `pi-ensemble /work driver halted: step "${err.step}" not yet implemented in this build. Run with PI_ENSEMBLE_WORK_DRIVER=0 to use the legacy PM-driven flow.`,
@@ -1799,6 +2171,7 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
         stepOrd.total,
         Date.now() - stepStartedAt,
         (err as Error).message?.slice(0, 80),
+        stepRound,
       );
       ctx.pi.sendUserMessage(
         `pi-ensemble /work driver aborted on step "${step}" for issue #${ctx.issue}: ` +
@@ -1817,7 +2190,7 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
           lastEvent.kind === "dispatch-failed-provider"
             ? "provider error"
             : (lastEvent.errorTail?.slice(0, 60) ?? "subagent failed");
-        lifecycle.emitStepFailed(step, stepOrd.num, stepOrd.total, elapsed, reason);
+        lifecycle.emitStepFailed(step, stepOrd.num, stepOrd.total, elapsed, reason, stepRound);
       } else if (lastEvent?.kind === "cap-hit") {
         lifecycle.emitStepFailed(
           step,
@@ -1825,6 +2198,7 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
           stepOrd.total,
           elapsed,
           `cap-hit: ${lastEvent.cap}`,
+          stepRound,
         );
       } else {
         // Sum tokens from any dispatch-completed events that fired during
@@ -1836,7 +2210,14 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
           // event; leave undefined and let the per-dispatch line carry it.
           totalTokens = undefined;
         }
-        lifecycle.emitStepCompleted(step, stepOrd.num, stepOrd.total, elapsed, totalTokens);
+        lifecycle.emitStepCompleted(
+          step,
+          stepOrd.num,
+          stepOrd.total,
+          elapsed,
+          totalTokens,
+          stepRound,
+        );
       }
     }
     await writeState(ctx.repoRoot, state);

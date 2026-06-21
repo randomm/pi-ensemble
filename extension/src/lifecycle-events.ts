@@ -71,6 +71,17 @@ export interface LifecycleDetails {
    * the user knows WHY the step failed without opening the state file.
    */
   reason?: string;
+  /**
+   * Sub-round counter for steps that iterate within a cycle (PR4 label
+   * polish). adversarial / lens-review / lens-fix all run multiple times
+   * during a fix loop, and `develop` re-enters on ci-status:failure.
+   * `(round N)` is appended to the scrollback line when set so the user
+   * can tell apart "first adversarial gate" from "third adversarial
+   * gate" without checking the state file. Omitted on first entry of a
+   * step (round 1 — no suffix needed) and on steps that never iterate
+   * (explore, plan, branch, commit-pr, step-back, ci, handoff, merged).
+   */
+  round?: number;
 }
 
 let activePi: ExtensionAPI | undefined;
@@ -166,8 +177,21 @@ export function emitSteered(jobId: string, label: string, role: string, message:
  * `step` is the step name (e.g. "adversarial"); `stepNumber/stepTotal`
  * render as "5/9" for at-a-glance progress.
  */
-export function emitStepStarted(step: string, stepNumber: number, stepTotal: number): void {
-  emit({ kind: "step-started", jobId: step, label: step, role: step, stepNumber, stepTotal });
+export function emitStepStarted(
+  step: string,
+  stepNumber: number,
+  stepTotal: number,
+  round?: number,
+): void {
+  emit({
+    kind: "step-started",
+    jobId: step,
+    label: step,
+    role: step,
+    stepNumber,
+    stepTotal,
+    round,
+  });
 }
 
 export function emitStepCompleted(
@@ -176,6 +200,7 @@ export function emitStepCompleted(
   stepTotal: number,
   elapsedMs: number,
   totalTokens?: number,
+  round?: number,
 ): void {
   emit({
     kind: "step-completed",
@@ -186,6 +211,7 @@ export function emitStepCompleted(
     stepTotal,
     elapsedMs,
     totalTokens,
+    round,
   });
 }
 
@@ -195,6 +221,7 @@ export function emitStepFailed(
   stepTotal: number,
   elapsedMs: number,
   reason?: string,
+  round?: number,
 ): void {
   emit({
     kind: "step-failed",
@@ -205,6 +232,7 @@ export function emitStepFailed(
     stepTotal,
     elapsedMs,
     reason,
+    round,
   });
 }
 
@@ -261,20 +289,23 @@ export function formatLine(d: LifecycleDetails): string {
     }
     case "step-started": {
       const ordinal = d.stepNumber && d.stepTotal ? `${d.stepNumber}/${d.stepTotal} ` : "";
-      return `▸ ensemble: ▶ step ${ordinal}${d.label} started`;
+      const round = d.round && d.round > 1 ? ` (round ${d.round})` : "";
+      return `▸ ensemble: ▶ step ${ordinal}${d.label}${round} started`;
     }
     case "step-completed": {
       const ordinal = d.stepNumber && d.stepTotal ? `${d.stepNumber}/${d.stepTotal} ` : "";
+      const round = d.round && d.round > 1 ? ` (round ${d.round})` : "";
       const tokens =
         d.totalTokens && d.totalTokens > 0 ? ` · ${formatTokens(d.totalTokens)} tokens` : "";
       const elapsed = d.elapsedMs != null ? ` · ${fmtElapsed(d.elapsedMs)}` : "";
-      return `▸ ensemble: ✓ step ${ordinal}${d.label} finished${elapsed}${tokens}`;
+      return `▸ ensemble: ✓ step ${ordinal}${d.label}${round} finished${elapsed}${tokens}`;
     }
     case "step-failed": {
       const ordinal = d.stepNumber && d.stepTotal ? `${d.stepNumber}/${d.stepTotal} ` : "";
+      const round = d.round && d.round > 1 ? ` (round ${d.round})` : "";
       const elapsed = d.elapsedMs != null ? ` · ${fmtElapsed(d.elapsedMs)}` : "";
       const reason = d.reason ? ` · ${d.reason}` : "";
-      return `▸ ensemble: ✗ step ${ordinal}${d.label} failed${elapsed}${reason}`;
+      return `▸ ensemble: ✗ step ${ordinal}${d.label}${round} failed${elapsed}${reason}`;
     }
   }
 }
