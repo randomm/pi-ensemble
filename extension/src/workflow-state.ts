@@ -184,6 +184,20 @@ export type WorkEvent =
       verdict: "ISSUES_FOUND" | "CRITICAL_ISSUES_FOUND";
     }
   | {
+      /**
+       * PR6 — runLens skipped child dispatch because the diff was empty.
+       * Lens children hallucinate findings against unrelated files when
+       * given empty context (#533 PERFORMANCE findings in
+       * src/web/sweep_stats.rs on an empty diff for a devDep bump that
+       * was already merged). Paired with a synthesised `lens-approved`
+       * so the driver's nextStep advances normally; the standalone event
+       * preserves the audit trail.
+       */
+      kind: "lens-skipped-empty-diff";
+      at: number;
+      round: number;
+    }
+  | {
       kind: "cap-hit";
       at: number;
       /**
@@ -210,6 +224,8 @@ export type WorkEvent =
         | "wall-clock"
         | "ci-retry"
         | "developer-timeout"
+        | "explore-already-complete"
+        | "explore-needs-clarification"
         | `step-failed:${WorkStep}`;
       reviewRound: number;
       /** What the driver will do next — either "handoff" (terminal) or "step-back" (Step 7h). */
@@ -395,6 +411,19 @@ export interface PipelineState {
    * Readers treat absent as 0.
    */
   ciRetryCount?: number;
+  /**
+   * PR6 — explore's structured verdict, persisted so handoff renderers
+   * (renderHandoffUserMessage, renderHandoffMarkdown, renderTerminalStatus)
+   * can quote it directly without re-parsing the dispatch-completed
+   * event's summary. Set by `runExplore` after `parseExploreVerdict`
+   * returns a non-null value; absent when the explore agent skipped the
+   * `## Verdict` heading (older runs / agent ignored prompt).
+   *
+   * When set to ALREADY_COMPLETE or NEEDS_CLARIFICATION, runExplore also
+   * synthesises a `cap-hit` and sets `currentStep='handoff'` — the field
+   * is observational rather than load-bearing for routing.
+   */
+  exploreVerdict?: "NEEDS_WORK" | "ALREADY_COMPLETE" | "NEEDS_CLARIFICATION";
   /**
    * PR5 — per-step retry budget for RETRY_ONCE-classified steps
    * (adversarial, lens-review). Driver's halt-cascade router increments

@@ -148,6 +148,8 @@ function fmtEvent(e: WorkEvent): string {
       const okN = e.verdicts.filter((v) => v.ok).length;
       return `  branches-converged · ${e.step} · ${okN}/${e.verdicts.length} ok`;
     }
+    case "lens-skipped-empty-diff":
+      return `  lens-skipped-empty-diff · round ${e.round}`;
   }
 }
 

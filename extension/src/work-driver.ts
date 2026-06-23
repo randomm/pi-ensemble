@@ -525,6 +525,39 @@ async function runExplore(ctx: DriverContext, state: WorkState, now: number): Pr
     dispatchResult.value,
   );
   next = appendEvent(next, event);
+
+  // PR6 — verdict router. Explore's structured `## Verdict` decides
+  // whether the cycle proceeds (NEEDS_WORK) or halts immediately
+  // (ALREADY_COMPLETE / NEEDS_CLARIFICATION). The #533 cascade
+  // happened because explore correctly identified ALREADY_COMPLETED
+  // in prose but the driver had no parseable signal to route on; it
+  // ran every step to lens-fix before the user killed it. Null
+  // verdict (agent ignored the prompt) falls through to NEEDS_WORK
+  // — same shape as today, no contract break.
+  const verdict = parseExploreVerdict(dispatchResult.value.text ?? "");
+  if (verdict) {
+    next = {
+      ...next,
+      pipelineState: { ...next.pipelineState, exploreVerdict: verdict },
+    };
+  }
+  if (verdict === "ALREADY_COMPLETE" || verdict === "NEEDS_CLARIFICATION") {
+    const cap =
+      verdict === "ALREADY_COMPLETE" ? "explore-already-complete" : "explore-needs-clarification";
+    // Synthesise the cap-hit but leave currentStep='explore'. The driver
+    // loop's nextStep() reads the tail cap-hit, returns 'handoff', and
+    // the next iteration runs runHandoff. Setting currentStep='handoff'
+    // here would trip nextStep's terminal short-circuit (line 329) and
+    // exit the loop BEFORE runHandoff fires — same hazard PR5's
+    // halt-cascade router avoids by `continue`ing.
+    next = appendEvent(next, {
+      kind: "cap-hit",
+      at: Date.now(),
+      cap,
+      reviewRound: next.pipelineState.reviewRound,
+      nextStep: "handoff",
+    });
+  }
   return next;
 }
 
@@ -593,6 +626,31 @@ async function runPlan(ctx: DriverContext, state: WorkState, now: number): Promi
     ...next,
     pipelineState: { ...next.pipelineState, workstreams },
   };
+}
+
+/**
+ * PR6 — Parse the explore reply for a `VERDICT: <kind>` token.
+ *
+ * Lenient on shape: tolerates `VERDICT: X`, `**VERDICT:** X`, leading
+ * whitespace, any case. First match wins so a verbatim quote of the
+ * prompt text further down in the reply doesn't override the verdict
+ * declared at the top. Returns null on missing or unknown verdicts —
+ * `runExplore` treats null as "agent skipped the heading, proceed as
+ * NEEDS_WORK" rather than halting. The structural fix is opt-in
+ * robustness, not a hard contract break.
+ *
+ * Empirical case (#533 cascade): explore declared "Task complete:
+ * Issue #533 — ALREADY COMPLETED" in prose at the top of its reply
+ * but lacked the `VERDICT:` heading, so the driver had nothing to
+ * route on. With this parser + the prompt update, future already-
+ * complete declarations carry a parseable token.
+ */
+export type ExploreVerdict = "NEEDS_WORK" | "ALREADY_COMPLETE" | "NEEDS_CLARIFICATION";
+
+export function parseExploreVerdict(text: string): ExploreVerdict | null {
+  const m = text.match(/VERDICT:\s*\**\s*(NEEDS_WORK|ALREADY_COMPLETE|NEEDS_CLARIFICATION)\b/i);
+  const tok = m?.[1];
+  return tok ? (tok.toUpperCase() as ExploreVerdict) : null;
 }
 
 /**
@@ -1117,6 +1175,24 @@ async function runLens(ctx: DriverContext, state: WorkState, now: number): Promi
   // N=1). Replaces the PR2 broken-fallback path that returned empty diff
   // when worktrees was {}, making lens-review review nothing.
   const diff = await fetchAllDiffs(ps.worktrees ?? {}, ctx.repoRoot);
+
+  // PR6 — empty-diff guard. Lens children hallucinate findings against
+  // unrelated files when given empty context: on #533 (a devDep bump
+  // already merged 5 days earlier) develop committed nothing, then
+  // lens-review found PERFORMANCE issues in `src/web/sweep_stats.rs`.
+  // Skip the dispatch and synthesise an `lens-approved` so nextStep
+  // advances normally — catches the failure mode independently of any
+  // upstream short-circuit (cherry-pick reverted, manual takeover that
+  // reset HEAD, future paths that yield empty diff for any reason).
+  if (!diff.trim()) {
+    next = appendEvent(
+      next,
+      { kind: "lens-skipped-empty-diff", at: Date.now(), round },
+      { kind: "lens-approved", at: Date.now(), jobId: makeRunId(), round },
+    );
+    return next;
+  }
+
   const cwd =
     ps.worktrees?.default ??
     ps.worktrees?.[Object.keys(ps.worktrees ?? {})[0] ?? ""] ??
@@ -1706,27 +1782,56 @@ export function renderHandoffMarkdown(state: WorkState): string {
   // The four named shell commands map to the four decisions an operator
   // faces at handoff time — same shape as renderHandoffUserMessage's
   // in-chat list, so the GitHub body and the chat agree on next actions.
+  // PR6: explore-* caps halt before any branch/develop ran; surface
+  // cap-shaped recovery commands rather than the wrong "git push what's
+  // there" / "longer cap" set.
   const branchForCmd = ps.branchName ?? "<branch>";
-  lines.push(
-    "### Concrete recovery commands",
-    "",
-    "Pick one — these are the four decisions an operator faces at this handoff:",
-    "",
-    "```bash",
-    "# 1. Inspect what survived before deciding:",
-    "git status && git diff --stat",
-    "",
-    "# 2. Retry with a longer per-spawn cap (use if dispatches kept timing out):",
-    `export PI_ENSEMBLE_SPAWN_TIMEOUT_MS_DEVELOPER=5400000 && rm .pi/work-state/${issue}.json && pi`,
-    "",
-    "# 3. Abandon the cycle, keep the worktree changes for manual takeover:",
-    `rm .pi/work-state/${issue}.json`,
-    "",
-    "# 4. Take over manually — commit + push what's there, open the PR yourself:",
-    `git add -p && git commit && git push -u origin ${branchForCmd}`,
-    "```",
-    "",
-  );
+  lines.push("### Concrete recovery commands", "", "Pick one:", "", "```bash");
+  if (capForExplain === "explore-already-complete") {
+    lines.push(
+      "# 1. Verify by reading the issue + the explore report:",
+      `gh issue view ${issue} && cat tmp/issue-${issue}/handoff-comment.md`,
+      "",
+      "# 2. If you agree the issue is done, close it:",
+      `gh issue close ${issue} --comment "Verified complete by /work — see prior PR"`,
+      "",
+      "# 3. If you disagree, add context and re-run /work:",
+      `gh issue comment ${issue} --body "Additional context: <what /work missed>"`,
+      `rm .pi/work-state/${issue}.json && pi`,
+      "",
+      "# 4. Abandon the handoff entry (no code was written; safe to discard):",
+      `rm .pi/work-state/${issue}.json`,
+    );
+  } else if (capForExplain === "explore-needs-clarification") {
+    lines.push(
+      "# 1. Read what explore couldn't determine:",
+      `cat tmp/issue-${issue}/handoff-comment.md`,
+      "",
+      "# 2. Edit the issue body to add the missing acceptance criteria / scope:",
+      `gh issue edit ${issue}`,
+      "",
+      "# 3. Re-run /work once the issue is clearer:",
+      `rm .pi/work-state/${issue}.json && pi`,
+      "",
+      "# 4. Abandon the handoff entry:",
+      `rm .pi/work-state/${issue}.json`,
+    );
+  } else {
+    lines.push(
+      "# 1. Inspect what survived before deciding:",
+      "git status && git diff --stat",
+      "",
+      "# 2. Retry with a longer per-spawn cap (use if dispatches kept timing out):",
+      `export PI_ENSEMBLE_SPAWN_TIMEOUT_MS_DEVELOPER=5400000 && rm .pi/work-state/${issue}.json && pi`,
+      "",
+      "# 3. Abandon the cycle, keep the worktree changes for manual takeover:",
+      `rm .pi/work-state/${issue}.json`,
+      "",
+      "# 4. Take over manually — commit + push what's there, open the PR yourself:",
+      `git add -p && git commit && git push -u origin ${branchForCmd}`,
+    );
+  }
+  lines.push("```", "");
 
   if (transcripts.length > 0) {
     lines.push("### Transcripts (last 5)", ...transcripts, "");
@@ -1864,6 +1969,10 @@ export function explainCap(
       return `CI failed ${MAX_CI_RETRIES} times in a row (each retry re-entered develop → adversarial → lens-review → ci) — CI is permanently broken for this branch, or the develop step keeps producing the same failure`;
     case "developer-timeout":
       return `developer subagent hit its wall-clock cap (PI_ENSEMBLE_SPAWN_TIMEOUT_MS_DEVELOPER, default 90 min) with ${fileBlurb} in the worktree — work needs different decomposition (split issue into smaller workstreams), a longer cap, or manual takeover`;
+    case "explore-already-complete":
+      return "explore concluded this issue is already done (e.g., satisfied by a prior PR or merged earlier). The driver halted before branch/develop ran — no code was written. Close the issue if you agree, or re-run /work with additional context if you believe there IS work to do";
+    case "explore-needs-clarification":
+      return "explore could not determine concrete work to do — the issue may be ambiguous, missing acceptance criteria, or contradictory. The driver halted before plan ran. Clarify the issue body and re-run /work";
   }
   // Template-literal `step-failed:<step>` values land here. Switch on the
   // step suffix to produce a tailored sentence.
@@ -2001,19 +2110,58 @@ export function renderHandoffUserMessage(
     `  scratch:     ${scratchDirAbs}/  (preserved on handoff for inspection)`,
     "",
     "What to do next — pick one:",
-    "",
-    "  # 1. Inspect what survived before deciding:",
-    `     git -C ${repoRoot} status && git -C ${repoRoot} diff --stat`,
-    "",
-    "  # 2. Retry with a longer per-spawn cap (use if dispatches kept timing out):",
-    `     export PI_ENSEMBLE_SPAWN_TIMEOUT_MS_DEVELOPER=5400000 && rm ${repoRoot}/.pi/work-state/${issue}.json && pi`,
-    "",
-    "  # 3. Abandon the cycle, keep the worktree changes for manual takeover:",
-    `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
-    "",
-    `  # 4. Take over manually — commit + push what's there, open the PR yourself:`,
-    `     cd ${repoRoot} && git add -p && git commit && git push -u origin ${branchName}`,
   );
+  // PR6 — explore-* caps halt before any branch/develop ran; the
+  // "retry with longer cap" + "git push what's there" commands are
+  // wrong (nothing was written; no work to push). Surface cap-shaped
+  // recovery commands instead.
+  if (cap === "explore-already-complete") {
+    lines.push(
+      "",
+      "  # 1. Verify by reading the issue + the explore report:",
+      `     gh issue view ${issue}  &&  cat ${handoffBodyPath}`,
+      "",
+      "  # 2. If you agree the issue is done, close it:",
+      `     gh issue close ${issue} --comment "Verified complete by /work — see prior PR"`,
+      "",
+      "  # 3. If you disagree, add context and re-run /work:",
+      `     gh issue comment ${issue} --body "Additional context: <what /work missed>"`,
+      `     rm ${repoRoot}/.pi/work-state/${issue}.json && pi`,
+      "",
+      "  # 4. Abandon the handoff entry (no code was written; safe to discard):",
+      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
+    );
+  } else if (cap === "explore-needs-clarification") {
+    lines.push(
+      "",
+      "  # 1. Read what explore couldn't determine:",
+      `     cat ${handoffBodyPath}`,
+      "",
+      "  # 2. Edit the issue body to add the missing acceptance criteria / scope:",
+      `     gh issue edit ${issue}`,
+      "",
+      "  # 3. Re-run /work once the issue is clearer:",
+      `     rm ${repoRoot}/.pi/work-state/${issue}.json && pi`,
+      "",
+      "  # 4. Abandon the handoff entry:",
+      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
+    );
+  } else {
+    lines.push(
+      "",
+      "  # 1. Inspect what survived before deciding:",
+      `     git -C ${repoRoot} status && git -C ${repoRoot} diff --stat`,
+      "",
+      "  # 2. Retry with a longer per-spawn cap (use if dispatches kept timing out):",
+      `     export PI_ENSEMBLE_SPAWN_TIMEOUT_MS_DEVELOPER=5400000 && rm ${repoRoot}/.pi/work-state/${issue}.json && pi`,
+      "",
+      "  # 3. Abandon the cycle, keep the worktree changes for manual takeover:",
+      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
+      "",
+      `  # 4. Take over manually — commit + push what's there, open the PR yourself:`,
+      `     cd ${repoRoot} && git add -p && git commit && git push -u origin ${branchName}`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -2217,9 +2365,15 @@ function inlineExplorePrompt(issue: number, scratchDirAbs: string): string {
     "  3. `codebase_memory_search_code({query: '<concept>'})` for existing relevant code.",
     "",
     "Return a STRUCTURED summary the work-driver can route on:",
+    "  - a verdict (heading: `## Verdict`), one line, EXACTLY one of:",
+    "      `VERDICT: NEEDS_WORK`           — issue is open and has real work to do",
+    "      `VERDICT: ALREADY_COMPLETE`     — issue is closed, merged, or already satisfied by a prior PR",
+    "      `VERDICT: NEEDS_CLARIFICATION`  — issue is ambiguous, contradictory, or missing acceptance criteria",
     "  - parallel-workstream candidates (heading: `## Workstreams`),",
     "  - relevant prior decisions (heading: `## Prior decisions`),",
     "  - touchpoint files (heading: `## Touchpoints`).",
+    "",
+    "The `## Verdict` block is LOAD-BEARING. If you conclude the issue is already done (e.g., a prior PR addressed it), say `VERDICT: ALREADY_COMPLETE` even if the issue is still technically open in the tracker — the driver routes on your verdict, not on the issue's status. On ALREADY_COMPLETE or NEEDS_CLARIFICATION the driver halts immediately and hands off to the operator; no plan/branch/develop will run.",
     scratchHygieneSection(scratchDirAbs),
   ].join("\n");
 }
