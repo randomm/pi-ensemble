@@ -142,6 +142,79 @@ export const MAX_CI_RETRIES = 2;
 export const REVIEW_WALL_CLOCK_MS = 90 * 60 * 1000;
 
 /**
+ * Per-step failure policy (PR5 halt-cascade prevention).
+ *
+ * Background: PR #239 driver continued past `dispatch-failed` because
+ * `nextStep()` has no branch for that event kind — the linear table just
+ * advanced. On nessie #553, a developer SIGTERM at 30 min cascaded into
+ * 2h31m of adversarial review against partial work, then 40 min of
+ * provider-timeouting handoff. ~4 hours wasted, opaque outcome.
+ *
+ * The fix is a routing classifier: when a step body's tail event is
+ * `dispatch-failed` (or `dispatch-failed-provider`), the driver loop
+ * consults this table BEFORE calling `nextStep()`:
+ *
+ *  - **HALT**: synthesise a cap-hit `step-failed:<step>` (or the special
+ *    `developer-timeout` shape when the errorTail matches the spawn
+ *    timeout marker), set `status='aborted'`, route to handoff. There
+ *    is no useful downstream past a HALT failure.
+ *  - **RETRY_ONCE**: re-run the same step body once. Idempotent steps
+ *    (adversarial loop against a stable diff, lens-review 6-way fanout)
+ *    can absorb transient provider transport errors. Second failure
+ *    HALTs via the same path.
+ *  - **DEGRADED_OK**: the existing fall-through to `nextStep()` is fine.
+ *    Step-back (informational) and the terminal steps (handoff, merged)
+ *    fit here.
+ *
+ * The verdict paths (adversarial-rejected → cap-hit handoff, lens
+ * round-cap → handoff) are unchanged — those route correctly already.
+ * This table only governs dispatch-failed at the step level.
+ */
+export type StepFailurePolicy = "HALT" | "RETRY_ONCE" | "DEGRADED_OK";
+
+export const STEP_FAILURE_POLICY: Record<WorkStep, StepFailurePolicy> = {
+  // No spec foundation → plan/branch/develop run blind.
+  explore: "HALT",
+  // No workstreams → silent regression to single-task develop without
+  // out-of-scope fences (PR3 doctrine violated).
+  plan: "HALT",
+  // No branch → develop edits HEAD, commit-pr has nothing to push, CI
+  // has nothing to watch. Was the empirical root of issue #553's first
+  // run cascade.
+  branch: "HALT",
+  // Partial uncommitted work after SIGTERM is not adversarial-reviewable.
+  // For N>1 workstreams: HALT if ANY branch failed (runDevelop's
+  // Promise.allSettled aggregate is the failure signal).
+  develop: "HALT",
+  // Internal 3-round loop is idempotent against a stable diff; transient
+  // transport is realistic. Second failure HALTs. The
+  // REJECTED-after-3-rounds verdict path already routes correctly to
+  // handoff via cap-hit — unchanged.
+  adversarial: "RETRY_ONCE",
+  // No PR → lens-review wastes hours on uncommitted work, CI retries
+  // to no purpose. Was a contributing factor in the #553 spin.
+  "commit-pr": "HALT",
+  // 6 lens children against a stable diff are idempotent. Cannot ship
+  // code that bypassed lens-review.
+  "lens-review": "RETRY_ONCE",
+  // Same shape as develop — partial fix work cannot meaningfully re-
+  // enter adversarial→lens.
+  "lens-fix": "HALT",
+  // Output is informational; an empty step-back reply still produces a
+  // useful handoff.
+  "step-back": "DEGRADED_OK",
+  // Silently marking a cycle merged when CI was never checked is the
+  // worst possible outcome. Marker-missing-but-ops-ran is already
+  // handled via ciRetryCount (PR2).
+  ci: "HALT",
+  // Must never halt the loop — IS the loop terminator. PR5 hardens
+  // handoff itself via in-process gh fallback (see runHandoff).
+  handoff: "DEGRADED_OK",
+  // Pure state mutation, cannot fail.
+  merged: "DEGRADED_OK",
+};
+
+/**
  * Project-local scratch directory for ephemeral /work artefacts (diff
  * snapshots between adversarial rounds, captured screenshots, one-off
  * verification scripts, analysis outputs).
@@ -242,7 +315,7 @@ export interface DriverContext {
   dispatchFn?: (
     pi: ExtensionAPI,
     spec: { role: string; prompt: string; cwd?: string },
-    opts?: { label?: string; skipDeck?: boolean },
+    opts?: { label?: string; skipDeck?: boolean; timeoutMs?: number },
   ) => Promise<DispatchResult>;
 }
 
@@ -1389,10 +1462,19 @@ async function runHandoff(ctx: DriverContext, state: WorkState, now: number): Pr
   };
   next = appendEvent(next, { kind: "step-started", step: "handoff", at: now });
 
-  // Build the handoff markdown from state. /work.md Step 7g specifies the
-  // body shape: which cap fired, rounds attempted, recurring finding
-  // pattern (or "orthogonal local bugs"), suggested next steps, transcripts.
-  const handoffMd = renderHandoffMarkdown(state);
+  // PR5: capture the worktree snapshot FIRST so handoff surfaces (in-chat
+  // sendUserMessage, GitHub body, /work-status terminal) can answer
+  // WHERE the work is without re-shelling git. Snapshot persists into
+  // pipelineState even if subsequent steps in runHandoff fail.
+  const snap = await captureWorktreeSnapshot(ctx.repoRoot, state.pipelineState.branchName);
+  next = {
+    ...next,
+    pipelineState: { ...next.pipelineState, handoffSnapshot: snap },
+  };
+
+  // Build the handoff markdown body. Now consumes handoffSnapshot via
+  // the additive sections in renderHandoffMarkdown (PR5 refinements).
+  const handoffMd = renderHandoffMarkdown(next);
   const handoffBodyPath = path.join(scratchDir(ctx.repoRoot, ctx.issue), "handoff-comment.md");
   try {
     await fs.mkdir(path.dirname(handoffBodyPath), { recursive: true });
@@ -1401,10 +1483,12 @@ async function runHandoff(ctx: DriverContext, state: WorkState, now: number): Pr
     trace(`work-driver: failed to write handoff body file: ${(err as Error).message}`);
   }
 
-  // Dispatch @ops to post the comment + apply the label. Falls back to
-  // `gh issue comment` when no PR was created (commit-pr was skipped or
-  // failed). Driver provides the body file path; ops invokes gh + reports
-  // back the comment URL.
+  // Dispatch @ops to post the comment + apply the label. PR5: pass a
+  // TIGHT 3-min timeout — the body file is already on disk, ops just runs
+  // two `gh` invocations. Overrides the ops 10-min default and prevents
+  // the #553 40-min provider-spin. If the ops dispatch fails OR the
+  // commentUrl doesn't parse out, the in-process gh fallback below takes
+  // over so the user never silently loses the artefact.
   const dispatch = ctx.dispatchFn ?? dispatchCore;
   const startedAt = Date.now();
   const prNumber = state.pipelineState.prNumber;
@@ -1418,7 +1502,11 @@ async function runHandoff(ctx: DriverContext, state: WorkState, now: number): Pr
   let opsReplyText = "";
   let dispatchOk = false;
   try {
-    const res = await dispatch(ctx.pi, { role: "ops", prompt }, { label: "ops:handoff" });
+    const res = await dispatch(
+      ctx.pi,
+      { role: "ops", prompt },
+      { label: "ops:handoff", timeoutMs: 3 * 60_000 },
+    );
     opsReplyText = res.text ?? "";
     dispatchOk = res.ok && !res.errorStop;
     const completionEvent = await buildCompletionEvent(ctx, "handoff", "ops", "ops:handoff", res);
@@ -1437,18 +1525,71 @@ async function runHandoff(ctx: DriverContext, state: WorkState, now: number): Pr
     });
   }
 
-  const commentUrl = parseHandoffCommentUrl(opsReplyText);
-  const labelApplied = dispatchOk && /label.*needs-human-attention/i.test(opsReplyText);
+  let commentUrl = parseHandoffCommentUrl(opsReplyText);
+  let labelApplied = dispatchOk && /label.*needs-human-attention/i.test(opsReplyText);
+
+  // PR5 in-process fallback. When the ops dispatch failed OR the
+  // commentUrl didn't parse out, the driver itself shells out `gh` —
+  // the body file is already on disk and no LLM is needed for two
+  // mechanical CLI invocations. Best-effort; if gh is missing / unauth'd
+  // / network down, the in-chat HANDOFF DISPATCH INCOMPLETE banner
+  // surfaces the failure with the verbatim recovery command.
+  if (!commentUrl || !labelApplied) {
+    try {
+      const targetId = String(prNumber ?? ctx.issue);
+      const objType = prNumber ? "pr" : "issue";
+      if (!commentUrl) {
+        const { stdout } = await execp(
+          `gh ${objType} comment ${targetId} --body-file ${JSON.stringify(handoffBodyPath)}`,
+          { cwd: ctx.repoRoot, timeout: 60_000 },
+        );
+        const parsedUrl = parseHandoffCommentUrl(stdout) ?? stdout.trim();
+        if (parsedUrl) commentUrl = parsedUrl;
+      }
+      if (!labelApplied) {
+        // Create the label first (idempotent — ignore "already exists" error).
+        try {
+          await execp(
+            "gh label create needs-human-attention --color FFAA00 " +
+              '--description "Agent loop hit a cap; human review required"',
+            { cwd: ctx.repoRoot, timeout: 15_000 },
+          );
+        } catch {
+          /* already exists or no perms; continue */
+        }
+        await execp(`gh ${objType} edit ${targetId} --add-label needs-human-attention`, {
+          cwd: ctx.repoRoot,
+          timeout: 30_000,
+        });
+        labelApplied = true;
+      }
+    } catch (err) {
+      trace(`work-driver: in-process gh fallback failed: ${(err as Error).message?.slice(0, 200)}`);
+    }
+  }
+
   next = appendEvent(next, {
     kind: "handoff-emitted",
     at: Date.now(),
     commentUrl,
     labelApplied,
+    handoffBodyPath,
   });
-  // Set terminal status AFTER all events for this step are appended.
+  // Set terminal status from the most recent cap-hit's cap shape:
+  //   - step-failed:<step> or developer-timeout → 'aborted' (the
+  //     halt-cascade router synthesised this; mid-flight failure)
+  //   - any other cap (adversarial-loop, round-cap, wall-clock,
+  //     ci-retry) → 'handoff' (cycle reached handoff via the verdict
+  //     path, not via dispatch-failure)
+  const lastCapHit = [...next.eventLog].reverse().find((e) => e.kind === "cap-hit");
+  const capShape = lastCapHit?.kind === "cap-hit" ? lastCapHit.cap : ("adversarial-loop" as const);
+  const isMidFlightHalt = capShape === "developer-timeout" || capShape.startsWith("step-failed:");
   next = {
     ...next,
-    pipelineState: { ...next.pipelineState, status: "handoff" },
+    pipelineState: {
+      ...next.pipelineState,
+      status: isMidFlightHalt ? "aborted" : "handoff",
+    },
   };
   trace(
     `work-driver: handoff for issue #${ctx.issue} (${target}) — commentUrl=${commentUrl ?? "?"} label=${labelApplied}`,
@@ -1502,6 +1643,11 @@ export function renderHandoffMarkdown(state: WorkState): string {
     )
     .map((e) => `- ${e.workstreamId}: ${e.ok ? "ok" : "FAIL"}`);
 
+  // PR5: explainCap provides the operator-readable WHY sentence used
+  // across all three handoff surfaces (in-chat, GitHub body, /work-status).
+  const capForExplain = capHit?.kind === "cap-hit" ? capHit.cap : ("adversarial-loop" as const);
+  const explain = explainCap(capForExplain, state);
+
   const lines: string[] = [
     "## ⏸ Cap hit — needs human attention",
     "",
@@ -1510,10 +1656,36 @@ export function renderHandoffMarkdown(state: WorkState): string {
     `**Branch**: \`${branch}\``,
     `**State file**: \`.pi/work-state/${issue}.json\``,
     "",
+    "### What this cap means",
+    "",
+    explain,
+    "",
     "### What was attempted",
     ...stepDurations.map((s) => s),
     "",
   ];
+
+  // PR5: Worktree state at handoff (from handoffSnapshot).
+  if (ps.handoffSnapshot) {
+    const snap = ps.handoffSnapshot;
+    lines.push(
+      "### Worktree state at handoff",
+      "",
+      `- HEAD: \`${snap.headSha || "(unknown)"}\``,
+      `- branch exists locally: ${snap.branchExists ? "yes" : "no"}`,
+      `- branch pushed to origin: ${snap.branchPushed ? "yes" : "no (local only)"}`,
+      `- uncommitted: ${snap.unstagedCount + snap.stagedCount} files (${snap.stagedCount} staged, ${snap.unstagedCount} unstaged)`,
+    );
+    if (snap.modifiedFiles.length > 0) {
+      const shown = snap.modifiedFiles.slice(0, 10);
+      lines.push(
+        `- modified files (first ${shown.length} of ${snap.modifiedFiles.length}):`,
+        ...shown.map((f) => `    - \`${f}\``),
+      );
+    }
+    lines.push("");
+  }
+
   if (branches.length > 0) {
     lines.push("### Workstream verdicts (Step 4 fanout)", ...branches, "");
   }
@@ -1529,20 +1701,46 @@ export function renderHandoffMarkdown(state: WorkState): string {
       "",
     );
   }
+
+  // PR5: Concrete recovery commands (was prose "Suggested next steps").
+  // The four named shell commands map to the four decisions an operator
+  // faces at handoff time — same shape as renderHandoffUserMessage's
+  // in-chat list, so the GitHub body and the chat agree on next actions.
+  const branchForCmd = ps.branchName ?? "<branch>";
   lines.push(
-    "### Suggested next steps",
+    "### Concrete recovery commands",
     "",
-    "1. Review the findings in the state file — the most recent `lens-issues-found` event has the full JSON.",
-    "2. Decide whether to:",
-    "   - Approve the override (record in vipune): the change is acceptable as-is.",
-    "   - Re-enter /work after fixing the spec (update issue body, then re-run).",
-    "   - Take over manually — work the diff yourself, push, merge.",
-    "3. Rate-limit re-entry: spinning /work without addressing the root pattern wastes tokens.",
+    "Pick one — these are the four decisions an operator faces at this handoff:",
+    "",
+    "```bash",
+    "# 1. Inspect what survived before deciding:",
+    "git status && git diff --stat",
+    "",
+    "# 2. Retry with a longer per-spawn cap (use if dispatches kept timing out):",
+    `export PI_ENSEMBLE_SPAWN_TIMEOUT_MS_DEVELOPER=5400000 && rm .pi/work-state/${issue}.json && pi`,
+    "",
+    "# 3. Abandon the cycle, keep the worktree changes for manual takeover:",
+    `rm .pi/work-state/${issue}.json`,
+    "",
+    "# 4. Take over manually — commit + push what's there, open the PR yourself:",
+    `git add -p && git commit && git push -u origin ${branchForCmd}`,
+    "```",
     "",
   );
+
   if (transcripts.length > 0) {
     lines.push("### Transcripts (last 5)", ...transcripts, "");
   }
+
+  // PR5: pointer footer.
+  lines.push(
+    "### Inspect further",
+    "",
+    `- Rich state + full event log: \`.pi/work-state/${issue}.json\``,
+    `- Per-subagent transcripts (preserved on handoff): \`tmp/issue-${issue}/\``,
+    `- This body file: \`tmp/issue-${issue}/handoff-comment.md\``,
+  );
+
   return lines.join("\n");
 }
 
@@ -1556,6 +1754,267 @@ export function parseHandoffCommentUrl(text: string | undefined): string | undef
   if (!text) return undefined;
   const m = text.match(/https:\/\/github\.com\/[^\s)>]+#issuecomment-\d+/);
   return m?.[0];
+}
+
+/**
+ * PR5 — capture a snapshot of the worktree at handoff time. Lets the
+ * operator-facing surfaces (in-chat sendUserMessage, /work-status
+ * terminal renderer, GitHub renderHandoffMarkdown) answer WHERE the
+ * work is without re-shelling git on every call.
+ *
+ * Best-effort: every git invocation is try/catch'd so a missing branch /
+ * gh-auth / network issue degrades gracefully — the snapshot's
+ * `branchPushed: false` and empty `modifiedFiles` is meaningful by
+ * itself; absence of the snapshot field is not.
+ *
+ * Caps file list at 50 entries to keep state-file readable; the
+ * `unstagedCount + stagedCount` totals are always accurate even when
+ * the per-file list is truncated.
+ */
+export async function captureWorktreeSnapshot(
+  repoRoot: string,
+  branchName: string | undefined,
+): Promise<NonNullable<WorkState["pipelineState"]["handoffSnapshot"]>> {
+  const snapshot: NonNullable<WorkState["pipelineState"]["handoffSnapshot"]> = {
+    modifiedFiles: [],
+    unstagedCount: 0,
+    stagedCount: 0,
+    branchExists: false,
+    branchPushed: false,
+    headSha: "",
+    capturedAt: Date.now(),
+  };
+  // git status --porcelain (XY format: column 1 = staged tier, column 2 = unstaged tier).
+  try {
+    const { stdout } = await execp("git status --porcelain", {
+      cwd: repoRoot,
+      maxBuffer: 256 * 1024,
+    });
+    const lines = stdout.split("\n").filter((l) => l.length > 0);
+    for (const line of lines) {
+      const x = line[0] ?? " ";
+      const y = line[1] ?? " ";
+      if (x !== " " && x !== "?") snapshot.stagedCount += 1;
+      if (y !== " ") snapshot.unstagedCount += 1;
+      const filePath = line.slice(3);
+      if (snapshot.modifiedFiles.length < 50) snapshot.modifiedFiles.push(filePath);
+    }
+  } catch (err) {
+    trace(
+      `work-driver: captureWorktreeSnapshot git status failed: ${(err as Error).message?.slice(0, 200)}`,
+    );
+  }
+  // HEAD short SHA.
+  try {
+    const { stdout } = await execp("git rev-parse --short HEAD", { cwd: repoRoot });
+    snapshot.headSha = stdout.trim();
+  } catch (err) {
+    trace(
+      `work-driver: captureWorktreeSnapshot git rev-parse failed: ${(err as Error).message?.slice(0, 200)}`,
+    );
+  }
+  if (branchName) {
+    // Local branch existence.
+    try {
+      await execp(`git rev-parse --verify ${JSON.stringify(branchName)}`, { cwd: repoRoot });
+      snapshot.branchExists = true;
+    } catch {
+      snapshot.branchExists = false;
+    }
+    // Remote tracking (best-effort; network may be down). 10s timeout
+    // because ls-remote can hang on unreachable remotes.
+    try {
+      const { stdout } = await execp(`git ls-remote --heads origin ${JSON.stringify(branchName)}`, {
+        cwd: repoRoot,
+        timeout: 10_000,
+      });
+      snapshot.branchPushed = stdout.trim().length > 0;
+    } catch {
+      snapshot.branchPushed = false;
+    }
+  }
+  return snapshot;
+}
+
+/**
+ * PR5 — single source of truth mapping a cap-hit `cap` value to an
+ * operator-readable sentence. Used by every handoff surface (in-chat
+ * sendUserMessage, /work-status terminal renderer, GitHub
+ * renderHandoffMarkdown) so the WHY explanation stays consistent.
+ *
+ * Exhaustive switch — adding a new cap value to the WorkEvent union
+ * forces a typecheck error here, which is the design intent.
+ */
+export function explainCap(
+  cap: Extract<WorkEvent, { kind: "cap-hit" }>["cap"],
+  state: WorkState,
+): string {
+  const snap = state.pipelineState.handoffSnapshot;
+  const fileCount = snap ? snap.unstagedCount + snap.stagedCount : undefined;
+  const fileBlurb =
+    fileCount !== undefined ? `${fileCount} file(s) modified-but-uncommitted` : "uncommitted work";
+  switch (cap) {
+    case "adversarial-loop":
+      return "adversarial gate ran its 3-round internal loop and could not reach APPROVED — the diff still has issues the adversarial-developer flagged";
+    case "round-cap":
+      return `lens-review hit its ${MAX_REVIEW_ROUNDS}-round cap with findings still open — the lens reviewers and the developer's fixes did not converge`;
+    case "wall-clock":
+      return "lens-review fix loop exceeded its 90-minute wall-clock cap — total time spent in review/fix iterations is past the budget";
+    case "ci-retry":
+      return `CI failed ${MAX_CI_RETRIES} times in a row (each retry re-entered develop → adversarial → lens-review → ci) — CI is permanently broken for this branch, or the develop step keeps producing the same failure`;
+    case "developer-timeout":
+      return `developer subagent hit its wall-clock cap (PI_ENSEMBLE_SPAWN_TIMEOUT_MS_DEVELOPER, default 90 min) with ${fileBlurb} in the worktree — work needs different decomposition (split issue into smaller workstreams), a longer cap, or manual takeover`;
+  }
+  // Template-literal `step-failed:<step>` values land here. Switch on the
+  // step suffix to produce a tailored sentence.
+  if (cap.startsWith("step-failed:")) {
+    const step = cap.slice("step-failed:".length) as WorkStep;
+    switch (step) {
+      case "explore":
+        return "the explore step dispatch failed before producing a usable spec — cycle cannot continue without recon context";
+      case "plan":
+        return "the plan step dispatch failed before decomposing the issue into workstreams — cycle would silently regress to single-task develop without out-of-scope fences";
+      case "branch":
+        return "the branch step dispatch failed before creating the feature branch — develop would edit HEAD (likely main), commit-pr has nothing to push, CI has nothing to watch";
+      case "develop":
+        return `the develop step dispatch failed with ${fileBlurb} on disk — adversarial review of partial work is not meaningful, halting cleanly`;
+      case "adversarial":
+        return "the adversarial gate dispatch failed twice (retry exhausted) — cannot commit code that has not passed the adversarial gate";
+      case "commit-pr":
+        return "the commit-pr step dispatch failed before pushing the PR — lens-review of uncommitted work would waste hours, CI has nothing to watch";
+      case "lens-review":
+        return "the lens-review dispatch failed twice (retry exhausted) — cannot ship code that has not passed the six-pass review";
+      case "lens-fix":
+        return "the lens-fix step dispatch failed mid-fix — re-running adversarial on a partial fix is not meaningful";
+      case "ci":
+        return "the CI monitoring step dispatch failed — cannot mark a cycle merged without confirming CI passed";
+      case "step-back":
+      case "handoff":
+      case "merged":
+        // These are DEGRADED_OK in STEP_FAILURE_POLICY and should never
+        // produce a step-failed:<step> cap. Render generic if it ever happens.
+        return `step "${step}" failed unexpectedly — see state-file event log`;
+    }
+  }
+  // Should be unreachable when the WorkEvent union is exhaustively
+  // covered above; if we land here, surface the raw cap so the user
+  // can still grep the state file.
+  return `step failed: ${String(cap)} — see state-file event log`;
+}
+
+/**
+ * PR5 — operator-facing in-chat handoff message. Multi-line; produced
+ * by `runWorkDriver` to replace the PR4-and-earlier terse ~150-char
+ * pointer-to-JSON. Sections:
+ *
+ *   1. Banner (HANDOFF DISPATCH INCOMPLETE when GitHub posting failed)
+ *   2. Why (explainCap)
+ *   3. Worktree state (from handoffSnapshot)
+ *   4. GitHub handoff (comment URL + label status)
+ *   5. Artefacts (body file, state file, scratch dir)
+ *   6. Recovery commands — four concrete shell snippets keyed to
+ *      common decisions (retry with longer cap, inspect, abandon,
+ *      take over manually)
+ *
+ * Pure function for testability; no I/O. The caller already has the
+ * latest state, repoRoot, and scratchDir to pass.
+ */
+export function renderHandoffUserMessage(
+  state: WorkState,
+  repoRoot: string,
+  scratchDirAbs: string,
+): string {
+  const ps = state.pipelineState;
+  const issue = state.issue;
+  const capHit = [...state.eventLog].reverse().find((e) => e.kind === "cap-hit");
+  const handoffEvt = [...state.eventLog].reverse().find((e) => e.kind === "handoff-emitted");
+  const cap = capHit?.kind === "cap-hit" ? capHit.cap : ("adversarial-loop" as const);
+  const why = explainCap(cap, state);
+  const snap = ps.handoffSnapshot;
+  const commentUrl = handoffEvt?.kind === "handoff-emitted" ? handoffEvt.commentUrl : undefined;
+  const labelApplied = handoffEvt?.kind === "handoff-emitted" ? handoffEvt.labelApplied : false;
+  const handoffBodyPath =
+    (handoffEvt?.kind === "handoff-emitted" ? handoffEvt.handoffBodyPath : undefined) ??
+    `${scratchDirAbs}/handoff-comment.md`;
+  const branchName = ps.branchName ?? "(branch not captured)";
+  const branchPushedTag = snap
+    ? snap.branchPushed
+      ? " (pushed)"
+      : " (NOT pushed — local only)"
+    : "";
+  const headTag = snap?.headSha ? ` · HEAD ${snap.headSha}` : "";
+  const fileCount = snap ? snap.unstagedCount + snap.stagedCount : 0;
+  const prTag = ps.prNumber ? `PR #${ps.prNumber}` : "no PR created";
+  const target = ps.prNumber ? `pr ${ps.prNumber}` : `issue ${issue}`;
+
+  const lines: string[] = [];
+
+  // 1. Banner when GitHub posting failed.
+  if (!commentUrl || !labelApplied) {
+    lines.push(
+      `⚠ pi-ensemble /work for issue #${issue} — HANDOFF DISPATCH INCOMPLETE`,
+      "",
+      "The handoff body was generated but the GitHub-side post FAILED:",
+      `  - comment posted: ${commentUrl ? `[ok] ${commentUrl}` : "[FAILED] NOT posted"}`,
+      `  - label applied:  ${labelApplied ? "[ok]" : "[FAILED] NOT applied"}`,
+      "",
+      "Post manually now:",
+      `  gh ${ps.prNumber ? "pr" : "issue"} comment ${ps.prNumber ?? issue} --body-file ${handoffBodyPath}`,
+      `  gh ${ps.prNumber ? "pr" : "issue"} edit ${ps.prNumber ?? issue} --add-label needs-human-attention`,
+      "",
+      "---",
+      "",
+    );
+  }
+
+  // 2. Standard handoff sections.
+  lines.push(
+    `pi-ensemble /work for issue #${issue} — HANDOFF (needs human attention)`,
+    "",
+    `Why: ${why}`,
+    `Last step: ${ps.lastCompletedStep ?? ps.currentStep}${ps.reviewRound > 0 ? ` · review round ${ps.reviewRound}/${MAX_REVIEW_ROUNDS}` : ""}`,
+    `Cycle: ${ps.status}${ps.status === "aborted" ? " (mid-flight failure, not a cap-hit)" : ""}`,
+    "",
+    "Worktree state:",
+    `  branch: ${branchName}${branchPushedTag}${headTag}`,
+    `  ${prTag}`,
+    `  ${fileCount} file(s) modified${snap && snap.stagedCount > 0 ? ` (${snap.stagedCount} staged, ${snap.unstagedCount} unstaged)` : ""}`,
+  );
+  if (snap && snap.modifiedFiles.length > 0) {
+    const shown = snap.modifiedFiles.slice(0, 5);
+    lines.push(
+      `  modified: ${shown.join(", ")}${snap.modifiedFiles.length > 5 ? ` ... and ${snap.modifiedFiles.length - 5} more` : ""}`,
+    );
+  }
+  if (commentUrl) {
+    lines.push(
+      "",
+      `GitHub handoff: ${commentUrl}`,
+      `  label ${labelApplied ? "applied to" : "NOT applied to"} ${target}`,
+    );
+  }
+  lines.push(
+    "",
+    "Artefacts:",
+    `  rich body:   ${handoffBodyPath}`,
+    `  state + log: ${repoRoot}/.pi/work-state/${issue}.json`,
+    `  scratch:     ${scratchDirAbs}/  (preserved on handoff for inspection)`,
+    "",
+    "What to do next — pick one:",
+    "",
+    "  # 1. Inspect what survived before deciding:",
+    `     git -C ${repoRoot} status && git -C ${repoRoot} diff --stat`,
+    "",
+    "  # 2. Retry with a longer per-spawn cap (use if dispatches kept timing out):",
+    `     export PI_ENSEMBLE_SPAWN_TIMEOUT_MS_DEVELOPER=5400000 && rm ${repoRoot}/.pi/work-state/${issue}.json && pi`,
+    "",
+    "  # 3. Abandon the cycle, keep the worktree changes for manual takeover:",
+    `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
+    "",
+    `  # 4. Take over manually — commit + push what's there, open the PR yourself:`,
+    `     cd ${repoRoot} && git add -p && git commit && git push -u origin ${branchName}`,
+  );
+  return lines.join("\n");
 }
 
 /**
@@ -2222,6 +2681,91 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
     }
     await writeState(ctx.repoRoot, state);
 
+    // PR5 halt-cascade router. Intercept dispatch-failed at HALT-class
+    // steps BEFORE nextStep() — the existing linear table has no
+    // dispatch-failed branch and would silently advance the cycle into
+    // wasted downstream work (the #553 cascade root).
+    {
+      const tail = state.eventLog[state.eventLog.length - 1];
+      const isDispatchFail =
+        tail?.kind === "dispatch-failed" || tail?.kind === "dispatch-failed-provider";
+      if (isDispatchFail) {
+        const policy = STEP_FAILURE_POLICY[step];
+        if (policy === "HALT") {
+          // Recognise SIGTERM-on-developer as a distinct cap shape so
+          // explainCap() can produce the right operator-facing sentence.
+          const errorTail = tail.kind === "dispatch-failed" ? (tail.errorTail ?? "") : "";
+          const isTimeout = /killed after \d+ms timeout/.test(errorTail);
+          const cap =
+            step === "develop" && isTimeout
+              ? ("developer-timeout" as const)
+              : (`step-failed:${step}` as const);
+          state = appendEvent(state, {
+            kind: "cap-hit",
+            at: Date.now(),
+            cap,
+            reviewRound: state.pipelineState.reviewRound,
+            nextStep: "handoff",
+          });
+          // Set currentStep='handoff' but LEAVE status='running' so the
+          // loop re-enters and runs runHandoff. runHandoff's final block
+          // sets status based on the cap shape (mid-flight failure →
+          // 'aborted', cap-hit verdict → 'handoff').
+          state = {
+            ...state,
+            pipelineState: { ...state.pipelineState, currentStep: "handoff" },
+          };
+          await writeState(ctx.repoRoot, state);
+          trace(
+            `work-driver: HALT on step="${step}" → cap="${cap}" → handoff (status set in runHandoff)`,
+          );
+          continue;
+        }
+        if (policy === "RETRY_ONCE") {
+          const attempts = state.pipelineState.retryAttempts ?? {};
+          const used = attempts[step] ?? 0;
+          if (used < 1) {
+            state = {
+              ...state,
+              pipelineState: {
+                ...state.pipelineState,
+                retryAttempts: { ...attempts, [step]: used + 1 },
+              },
+            };
+            await writeState(ctx.repoRoot, state);
+            const reason =
+              tail.kind === "dispatch-failed-provider"
+                ? "provider error"
+                : (tail.errorTail?.slice(0, 60) ?? "subagent failed");
+            lifecycle.emitStepRetry(step, stepOrd.num, stepOrd.total, used + 2, reason);
+            trace(`work-driver: RETRY_ONCE on step="${step}" (attempt ${used + 2})`);
+            continue; // re-run same step on next loop iteration
+          }
+          // Retry exhausted → HALT via the same cap shape. Same
+          // pattern as the HALT branch above — leave status='running'
+          // so the loop runs runHandoff next; runHandoff sets the
+          // terminal status based on the cap shape.
+          state = appendEvent(state, {
+            kind: "cap-hit",
+            at: Date.now(),
+            cap: `step-failed:${step}` as const,
+            reviewRound: state.pipelineState.reviewRound,
+            nextStep: "handoff",
+          });
+          state = {
+            ...state,
+            pipelineState: { ...state.pipelineState, currentStep: "handoff" },
+          };
+          await writeState(ctx.repoRoot, state);
+          trace(
+            `work-driver: RETRY_ONCE exhausted on step="${step}" → handoff (status set in runHandoff)`,
+          );
+          continue;
+        }
+        // DEGRADED_OK: existing fall-through is correct (no-op here).
+      }
+    }
+
     // Capture which step just completed BEFORE the nextStep transition
     // clobbers currentStep. This is the routing input the adversarial-
     // approved branch needs to distinguish "from develop" vs "from
@@ -2256,13 +2800,17 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
     await teardownWorkspaceTmp(ctx.repoRoot, ctx.issue);
   }
 
-  // Final user-facing line — PM picks it up as a user message and reports.
+  // PR5: rich operator handoff message. Replaces the PR4-and-earlier
+  // ~150-char pointer-to-JSON. The aborted status (set by the halt-
+  // cascade router in the post-step block) routes through the SAME
+  // renderer as handoff — the cap-hit event already encodes whether
+  // this was a mid-flight failure or a cap-hit, and renderHandoffUserMessage
+  // distinguishes them.
   if (final === "merged") {
     ctx.pi.sendUserMessage(`pi-ensemble /work for issue #${ctx.issue} — MERGED ✓`);
-  } else if (final === "handoff") {
+  } else if (final === "handoff" || final === "aborted") {
     ctx.pi.sendUserMessage(
-      `pi-ensemble /work for issue #${ctx.issue} — handed off (needs human attention). ` +
-        `See ${workStateDir(ctx.repoRoot)}/${ctx.issue}.json for the state and event log.`,
+      renderHandoffUserMessage(state, ctx.repoRoot, scratchDir(ctx.repoRoot, ctx.issue)),
     );
   }
 }

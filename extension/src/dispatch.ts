@@ -47,7 +47,7 @@ export function stripModelOverride(spec: DispatchSpec): DispatchSpec {
 export function dispatchCore(
   pi: ExtensionAPI,
   spec: DispatchSpec,
-  opts: { label?: string; skipDeck?: boolean } = {},
+  opts: { label?: string; skipDeck?: boolean; timeoutMs?: number } = {},
 ): Promise<DispatchResult> {
   const stripped = stripModelOverride(spec);
   const label = opts.label ?? stripped.role;
@@ -61,6 +61,11 @@ export function dispatchCore(
         signal,
         onProgress: hooks.onProgress,
         onStdin: hooks.onStdin,
+        // PR5: per-call timeout override. Used by runHandoff to cap the
+        // gh-comment ops dispatch at 3 min (the body file is on disk; ops
+        // just runs two CLI invocations — the ops 10-min role default
+        // would be too generous).
+        timeoutMs: opts.timeoutMs,
       }),
   });
   return handle.completion;

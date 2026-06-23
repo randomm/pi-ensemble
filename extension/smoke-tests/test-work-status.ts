@@ -114,8 +114,8 @@ const fakeRoot = "/tmp/fake-repo";
   };
   const out = renderStatus(state, fakeRoot);
   assert(
-    out.includes("HANDOFF (needs human attention)"),
-    "handoff status shows the needs-human-attention banner",
+    out.includes("HANDOFF") && out.includes("needs human attention"),
+    "handoff status shows the needs-human-attention banner (PR5: 'cap-hit' inserted between)",
   );
 }
 

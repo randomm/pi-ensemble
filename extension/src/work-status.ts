@@ -26,7 +26,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { trace } from "./trace.ts";
-import { MAX_CI_RETRIES, MAX_REVIEW_ROUNDS, REVIEW_WALL_CLOCK_MS } from "./work-driver.ts";
+import {
+  MAX_CI_RETRIES,
+  MAX_REVIEW_ROUNDS,
+  REVIEW_WALL_CLOCK_MS,
+  explainCap,
+} from "./work-driver.ts";
 import { type WorkEvent, type WorkState, readState, workStateDir } from "./workflow-state.ts";
 
 const execp = promisify(exec);
@@ -146,21 +151,26 @@ function fmtEvent(e: WorkEvent): string {
   }
 }
 
-/** Build the multi-line status report. Pure function for testability. */
+/**
+ * Build the multi-line status report. Routes on `status`:
+ *   - 'running' → renderRunningStatus (PR4 shape, unchanged)
+ *   - 'handoff' | 'aborted' | 'merged' → renderTerminalStatus
+ *     (PR5 postmortem layout)
+ */
 export function renderStatus(state: WorkState, repoRoot: string): string {
+  if (state.pipelineState.status === "running") {
+    return renderRunningStatus(state, repoRoot);
+  }
+  return renderTerminalStatus(state, repoRoot);
+}
+
+/** Build the running-cycle status (PR4 shape, unchanged). */
+export function renderRunningStatus(state: WorkState, repoRoot: string): string {
   const ps = state.pipelineState;
   const elapsedTotal = Date.now() - state.startedAt;
-  const statusBadge =
-    ps.status === "running"
-      ? "RUNNING"
-      : ps.status === "merged"
-        ? "MERGED ✓"
-        : ps.status === "handoff"
-          ? "HANDOFF (needs human attention)"
-          : "ABORTED";
 
   const lines: string[] = [];
-  lines.push(`/work #${state.issue} — ${statusBadge}`);
+  lines.push(`/work #${state.issue} — RUNNING`);
   lines.push(
     `  current step: ${ps.currentStep}${ps.lastCompletedStep ? ` (last completed: ${ps.lastCompletedStep})` : ""}`,
   );
@@ -170,7 +180,6 @@ export function renderStatus(state: WorkState, repoRoot: string): string {
   if (ps.inFlightJobIds.length > 0) {
     lines.push(`  in-flight: ${ps.inFlightJobIds.join(", ")}`);
   }
-  // Cap state — only show when the cycle is past the early steps.
   if (ps.reviewRound > 0) {
     const capParts: string[] = [`review round ${ps.reviewRound}/${MAX_REVIEW_ROUNDS}`];
     if (ps.reviewCapStartedAt) {
@@ -183,17 +192,14 @@ export function renderStatus(state: WorkState, repoRoot: string): string {
     lines.push(`  ci retries: ${ps.ciRetryCount}/${MAX_CI_RETRIES}`);
   }
 
-  // Per-step totals — useful "where did time go" breakdown.
   const totals = stepTotals(state.eventLog);
   if (Object.keys(totals).length > 0) {
-    lines.push("");
-    lines.push("step durations:");
+    lines.push("", "step durations:");
     for (const [step, t] of Object.entries(totals)) {
       lines.push(`  ${step.padEnd(14)} ${fmtElapsed(t.ms)}`);
     }
   }
 
-  // Last 5 events — Restate's "recent journal" pattern.
   if (state.eventLog.length > 0) {
     lines.push("");
     lines.push(
@@ -207,9 +213,139 @@ export function renderStatus(state: WorkState, repoRoot: string): string {
   lines.push("");
   lines.push(`state file: ${path.join(workStateDir(repoRoot), `${state.issue}.json`)}`);
 
-  // Suppress noise in the linter — fmtTokens reserved for future
-  // per-step tokens column when we propagate usage through the events.
-  void fmtTokens;
+  void fmtTokens; // reserved for v2 per-step token column
+  return lines.join("\n");
+}
+
+/**
+ * PR5 — postmortem layout for terminal cycles (handoff / aborted /
+ * merged). Consumes `handoffSnapshot` and `explainCap` to answer
+ * WHAT/WHY/WHERE/NEXT inline, without making the user open the JSON.
+ *
+ * Uses the same explainCap source-of-truth as the in-chat handoff
+ * sendUserMessage and the GitHub renderHandoffMarkdown, so all three
+ * surfaces agree on what the cap means + what to do.
+ */
+export function renderTerminalStatus(state: WorkState, repoRoot: string): string {
+  const ps = state.pipelineState;
+  const elapsedTotal = Date.now() - state.startedAt;
+  const issue = state.issue;
+  const statusBadge =
+    ps.status === "merged"
+      ? "MERGED ✓"
+      : ps.status === "handoff"
+        ? "HANDOFF (cap-hit, needs human attention)"
+        : "ABORTED (mid-flight failure, needs human attention)";
+
+  const lines: string[] = [];
+  lines.push(`/work #${issue} — ${statusBadge}`);
+  lines.push(`Duration: ${fmtElapsed(elapsedTotal)}`);
+
+  if (ps.status !== "merged") {
+    const capHit = [...state.eventLog].reverse().find((e) => e.kind === "cap-hit");
+    const cap = capHit?.kind === "cap-hit" ? capHit.cap : ("adversarial-loop" as const);
+    lines.push("", `Verdict: ${explainCap(cap, state)}`);
+  }
+
+  // Worktree state at handoff.
+  const snap = ps.handoffSnapshot;
+  if (snap || ps.branchName || ps.prNumber) {
+    lines.push("", "Worktree state:");
+    if (ps.branchName) {
+      const pushedTag = snap ? (snap.branchPushed ? " (pushed)" : " (NOT pushed)") : "";
+      const headTag = snap?.headSha ? ` · HEAD ${snap.headSha}` : "";
+      lines.push(`  branch: ${ps.branchName}${pushedTag}${headTag}`);
+    }
+    lines.push(`  ${ps.prNumber ? `PR: #${ps.prNumber}` : "PR: none created"}`);
+    if (snap) {
+      const fileCount = snap.unstagedCount + snap.stagedCount;
+      lines.push(
+        `  uncommitted: ${fileCount} file(s)${fileCount > 0 ? ` (${snap.stagedCount} staged, ${snap.unstagedCount} unstaged)` : ""}`,
+      );
+      if (snap.modifiedFiles.length > 0) {
+        const shown = snap.modifiedFiles.slice(0, 10);
+        lines.push(
+          `  modified (first ${shown.length} of ${snap.modifiedFiles.length}):`,
+          ...shown.map((f) => `    ${f}`),
+        );
+      }
+    }
+  }
+
+  // GitHub handoff outcome.
+  const handoffEvt = [...state.eventLog].reverse().find((e) => e.kind === "handoff-emitted");
+  if (handoffEvt?.kind === "handoff-emitted") {
+    lines.push(
+      "",
+      "GitHub handoff:",
+      `  comment: ${handoffEvt.commentUrl ?? "WARNING: NOT POSTED — see recovery #4 below"}`,
+      `  label:   ${handoffEvt.labelApplied ? "needs-human-attention applied" : "WARNING: NOT applied"}`,
+    );
+  }
+
+  // Per-step durations.
+  const totals = stepTotals(state.eventLog);
+  if (Object.keys(totals).length > 0) {
+    lines.push("", "Step durations:");
+    for (const [step, t] of Object.entries(totals)) {
+      lines.push(`  ${step.padEnd(14)} ${fmtElapsed(t.ms)}`);
+    }
+  }
+
+  // Last 5 events.
+  if (state.eventLog.length > 0) {
+    lines.push(
+      "",
+      `Recent events (last ${Math.min(5, state.eventLog.length)} of ${state.eventLog.length}):`,
+    );
+    for (const e of state.eventLog.slice(-5)) {
+      lines.push(fmtEvent(e));
+    }
+  }
+
+  // Artefacts.
+  const scratchDirPath = path.join(repoRoot, "tmp", `issue-${issue}`);
+  const handoffBodyPath = path.join(scratchDirPath, "handoff-comment.md");
+  lines.push(
+    "",
+    "Artefacts to inspect:",
+    `  rich body:   ${handoffBodyPath}`,
+    `  state + log: ${path.join(workStateDir(repoRoot), `${issue}.json`)}`,
+    `  transcripts: ${scratchDirPath}/`,
+  );
+
+  // Recovery commands (only for non-merged terminal states).
+  if (ps.status !== "merged") {
+    const branchForCmd = ps.branchName ?? "<branch>";
+    const target = ps.prNumber ? `pr ${ps.prNumber}` : `issue ${issue}`;
+    const objType = ps.prNumber ? "pr" : "issue";
+    const targetId = ps.prNumber ?? issue;
+    lines.push(
+      "",
+      "Recovery commands (pick one):",
+      "  # 1. Inspect what survived:",
+      "  git status && git diff --stat",
+      "",
+      "  # 2. Retry with longer per-spawn cap:",
+      `  export PI_ENSEMBLE_SPAWN_TIMEOUT_MS_DEVELOPER=5400000 && rm .pi/work-state/${issue}.json && pi`,
+      "",
+      "  # 3. Abandon the cycle, keep worktree:",
+      `  rm .pi/work-state/${issue}.json`,
+      "",
+      "  # 4. Take over manually:",
+      `  git add -p && git commit && git push -u origin ${branchForCmd}`,
+    );
+    if (handoffEvt?.kind === "handoff-emitted" && !handoffEvt.commentUrl) {
+      lines.push(
+        "",
+        "  # 5. Manually post the handoff comment (the GitHub-side post FAILED above):",
+        `  gh ${objType} comment ${targetId} --body-file ${handoffBodyPath}`,
+        `  gh ${objType} edit ${targetId} --add-label needs-human-attention`,
+      );
+    }
+    // Silence unused-var on `target` when commentUrl path doesn't fire.
+    void target;
+  }
 
   return lines.join("\n");
 }

@@ -192,8 +192,25 @@ export type WorkEvent =
        * ci-status:failure → develop → adversarial → review → ci → ... had no
        * cap of its own and could spin forever when the branch step silently
        * ABORTed and no PR ever existed for CI to watch.
+       *
+       * PR5 adds two new cap shapes for halt-cascade prevention:
+       *  - "developer-timeout": developer subagent SIGTERM'd by spawn-cap.
+       *    Routed by the post-step dispatch-failed router to handoff
+       *    immediately so adversarial doesn't waste hours on partial work
+       *    (the empirical #553 cascade).
+       *  - "step-failed:<step>": generic dispatch-failed at any HALT-class
+       *    step (explore / plan / branch / commit-pr / lens-fix / ci) or
+       *    retry-exhausted at any RETRY_ONCE-class step (adversarial /
+       *    lens-review). Template-literal shape so explainCap() can
+       *    enumerate without losing the originating step name.
        */
-      cap: "adversarial-loop" | "round-cap" | "wall-clock" | "ci-retry";
+      cap:
+        | "adversarial-loop"
+        | "round-cap"
+        | "wall-clock"
+        | "ci-retry"
+        | "developer-timeout"
+        | `step-failed:${WorkStep}`;
       reviewRound: number;
       /** What the driver will do next — either "handoff" (terminal) or "step-back" (Step 7h). */
       nextStep: "handoff" | "step-back";
@@ -229,6 +246,15 @@ export type WorkEvent =
       /** GitHub URL of the handoff PR/issue comment. */
       commentUrl?: string;
       labelApplied: boolean;
+      /**
+       * Absolute path to the rich handoff markdown body the driver wrote
+       * (`tmp/issue-<N>/handoff-comment.md`). PR5: lets
+       * `renderHandoffUserMessage` produce the verbatim
+       * `gh issue comment <N> --body-file <path>` recovery command
+       * without re-deriving the path. Optional for back-compat with PR4
+       * events.
+       */
+      handoffBodyPath?: string;
     }
   | {
       kind: "ci-status";
@@ -369,6 +395,40 @@ export interface PipelineState {
    * Readers treat absent as 0.
    */
   ciRetryCount?: number;
+  /**
+   * PR5 — per-step retry budget for RETRY_ONCE-classified steps
+   * (adversarial, lens-review). Driver's halt-cascade router increments
+   * on dispatch-failed; once `>= 1` the next failure routes to handoff
+   * via cap-hit `step-failed:<step>`. Persisted so a crash mid-retry
+   * doesn't re-loop on resume. Optional for back-compat with PR4 state
+   * files; readers treat absent step keys as 0 retries used.
+   */
+  retryAttempts?: Partial<Record<WorkStep, number>>;
+  /**
+   * PR5 — worktree snapshot captured by `runHandoff` before emitting
+   * the handoff artefact. Lets the operator-facing surfaces
+   * (renderHandoffUserMessage, renderTerminalStatus,
+   * renderHandoffMarkdown) answer WHERE the work is without re-shelling
+   * git on every call. Best-effort: capture failures populate the
+   * snapshot with empty / placeholder fields rather than aborting the
+   * handoff.
+   */
+  handoffSnapshot?: {
+    /** `git status --porcelain` paths; capped at 50 entries for budget. */
+    modifiedFiles: string[];
+    /** Files in the unstaged tier (M, D, ??, etc. in column 2). */
+    unstagedCount: number;
+    /** Files in the staged tier (column 1 non-space). */
+    stagedCount: number;
+    /** True when `git rev-parse --verify <branch>` succeeds locally. */
+    branchExists: boolean;
+    /** True when `git ls-remote --heads origin <branch>` returns the branch. */
+    branchPushed: boolean;
+    /** Short SHA of HEAD when the snapshot was taken. */
+    headSha: string;
+    /** Epoch ms when the snapshot was captured. */
+    capturedAt: number;
+  };
   /**
    * Epoch ms when the 90-min wall-clock cap was started. Persists across
    * Pi restarts — the cap-state accessor (review-cap.ts) reads this on

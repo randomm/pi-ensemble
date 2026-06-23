@@ -36,7 +36,14 @@ export type LifecycleKind =
   | "steered"
   | "step-started"
   | "step-completed"
-  | "step-failed";
+  | "step-failed"
+  /**
+   * PR5 — a RETRY_ONCE-classified step (adversarial, lens-review) hit a
+   * dispatch-failed and the driver is re-running it. Distinct from
+   * step-failed so the scrollback signals "transient — retrying" vs
+   * "permanent — handoff". One event per retry attempt.
+   */
+  | "step-retry";
 
 export interface LifecycleDetails {
   kind: LifecycleKind;
@@ -236,6 +243,31 @@ export function emitStepFailed(
   });
 }
 
+/**
+ * PR5 — a RETRY_ONCE step (adversarial, lens-review) had its dispatch
+ * fail and the driver is re-running it. `attempt` is the new attempt
+ * number (i.e., the retry count + 1; first retry is attempt=2). Reason
+ * carries why the previous attempt failed for scrollback context.
+ */
+export function emitStepRetry(
+  step: string,
+  stepNumber: number,
+  stepTotal: number,
+  attempt: number,
+  reason?: string,
+): void {
+  emit({
+    kind: "step-retry",
+    jobId: step,
+    label: step,
+    role: step,
+    stepNumber,
+    stepTotal,
+    round: attempt,
+    reason,
+  });
+}
+
 function emit(details: LifecycleDetails): void {
   if (isQuiet()) return;
   const text = formatLine(details);
@@ -307,6 +339,12 @@ export function formatLine(d: LifecycleDetails): string {
       const reason = d.reason ? ` · ${d.reason}` : "";
       return `▸ ensemble: ✗ step ${ordinal}${d.label}${round} failed${elapsed}${reason}`;
     }
+    case "step-retry": {
+      const ordinal = d.stepNumber && d.stepTotal ? `${d.stepNumber}/${d.stepTotal} ` : "";
+      const attempt = d.round ? ` attempt ${d.round}` : "";
+      const reason = d.reason ? ` · prior failure: ${d.reason}` : "";
+      return `▸ ensemble: ↻ step ${ordinal}${d.label} retrying${attempt}${reason}`;
+    }
   }
 }
 
@@ -337,5 +375,8 @@ function applyTheme(
       return theme.fg("success", content);
     case "step-failed":
       return theme.fg("error", content);
+    case "step-retry":
+      // Warning colour — transient, not yet a failure but worth noticing.
+      return theme.fg("warning", content);
   }
 }
