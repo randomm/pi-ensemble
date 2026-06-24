@@ -94,7 +94,7 @@ const PM_PROMPT_FILE = path.resolve(
     path.join(__dirname, "..", "..", "dist", "prompts", "standard", "project-manager.md"),
 );
 
-const SLASH_COMMANDS = ["start", "research", "plan", "work", "review", "audit"] as const;
+const SLASH_COMMANDS = ["start", "research", "plan", "work", "review", "audit", "do"] as const;
 type SlashCommand = (typeof SLASH_COMMANDS)[number];
 
 // Session-scoped flags.
@@ -115,7 +115,7 @@ let pmModeActive = false;
 
 const PM_STICKY_PREAMBLE = `# PM mode — orchestration only
 
-You are running inside a pi-ensemble workflow (/start, /research, /plan, /work, /review). Even though Pi has read, edit, write, and bash tools registered, you MUST NOT use edit, write, or non-vipune/git-read-only bash for implementation work. Implementation, tests, debugging, commits, deployment — ALL of it belongs to subagents:
+You are running inside a pi-ensemble workflow (/start, /research, /plan, /work, /review, /audit, /do). Even though Pi has read, edit, write, and bash tools registered, you MUST NOT use edit, write, or non-vipune/git-read-only bash for implementation work. Implementation, tests, debugging, commits, deployment — ALL of it belongs to subagents:
 
 - Implementation, tests, debugging, file edits → \`dispatch_specialist\` with role \`developer\` (then \`adversarial_loop\` to gate the diff)
 - Git ops, commits, PRs, branch creation, deployment → \`dispatch_specialist\` with role \`ops\`
@@ -318,6 +318,8 @@ function descriptionFor(name: SlashCommand): string {
       return "[#PR | path | latest N | empty=full] — On-demand six-pass code review (SECURITY/ERROR/TYPES/PERF/ARCH/SIMPLICITY)";
     case "audit":
       return "[<path> | <path>=<scope> ...] — Audit repo/path against its own standards (derive from docs/config/examples, not hard-coded)";
+    case "do":
+      return "<description> — Orchestrate free-form work via PM (no GitHub issue required; counterpart to /work)";
   }
 }
 

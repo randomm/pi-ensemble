@@ -1431,16 +1431,31 @@ async function fetchAllDiffs(worktrees: Record<string, string>, repoRoot: string
     const cwd = ids.length === 1 ? worktrees[ids[0] ?? ""] : repoRoot;
     return fetchDiff(cwd ?? repoRoot);
   }
-  // N>1: gather + merge with provenance headers.
+  // N>1: gather all per-workstream diffs FIRST, then decide whether to
+  // emit headers. PR7 — when every body is empty (e.g., all three
+  // developer workstreams provider-errored mid-stream without committing
+  // anything), return "" so PR6's `!diff.trim()` guard in runLens fires.
+  // Pre-PR7, the `## workstream: <id>\n` headers alone made the returned
+  // string non-empty and lens-review ran against header-only "diffs",
+  // hallucinating findings against unrelated files (the /work 553
+  // 2026-06-24 re-test cascade).
+  const fetched: Array<{ id: string; body: string }> = [];
+  for (const id of ids) {
+    const wt = worktrees[id];
+    if (!wt) continue;
+    fetched.push({ id, body: await fetchDiff(wt) });
+  }
+  if (fetched.every((f) => !f.body.trim())) return "";
+
+  // Mixed-or-full diff: emit headers + bodies with the same budget rules
+  // as before. Header preserved even for empty bodies in this branch so
+  // reviewers see "task-a had no changes" alongside "task-b had X".
   const TOTAL_CAP = 1024 * 1024;
   const sections: string[] = [];
   let totalBytes = 0;
   let truncated = false;
-  for (const id of ids) {
+  for (const { id, body: piece } of fetched) {
     if (truncated) break;
-    const wt = worktrees[id];
-    if (!wt) continue;
-    const piece = await fetchDiff(wt);
     const header = `## workstream: ${id}\n`;
     const remaining = TOTAL_CAP - totalBytes - header.length;
     if (remaining <= 0) {
@@ -1978,6 +1993,21 @@ export function explainCap(
   // step suffix to produce a tailored sentence.
   if (cap.startsWith("step-failed:")) {
     const step = cap.slice("step-failed:".length) as WorkStep;
+    // PR7 — for multi-workstream halts (PR3 fanout steps: develop +
+    // lens-review), append a parenthetical with the per-branch verdict
+    // count. The branches-converged event already carries the granular
+    // verdicts; explainCap surfaces the count so the operator can tell
+    // "all 3 branches failed" from "1 of 3 failed" without reading the
+    // event log.
+    const lastConverged = [...state.eventLog]
+      .reverse()
+      .find(
+        (e): e is Extract<WorkEvent, { kind: "branches-converged" }> =>
+          e.kind === "branches-converged" && e.step === step,
+      );
+    const fanoutTag = lastConverged
+      ? ` (${lastConverged.verdicts.filter((v) => !v.ok).length}/${lastConverged.verdicts.length} workstream branches failed)`
+      : "";
     switch (step) {
       case "explore":
         return "the explore step dispatch failed before producing a usable spec — cycle cannot continue without recon context";
@@ -1986,13 +2016,13 @@ export function explainCap(
       case "branch":
         return "the branch step dispatch failed before creating the feature branch — develop would edit HEAD (likely main), commit-pr has nothing to push, CI has nothing to watch";
       case "develop":
-        return `the develop step dispatch failed with ${fileBlurb} on disk — adversarial review of partial work is not meaningful, halting cleanly`;
+        return `the develop step dispatch failed with ${fileBlurb} on disk${fanoutTag} — adversarial review of partial work is not meaningful, halting cleanly`;
       case "adversarial":
         return "the adversarial gate dispatch failed twice (retry exhausted) — cannot commit code that has not passed the adversarial gate";
       case "commit-pr":
         return "the commit-pr step dispatch failed before pushing the PR — lens-review of uncommitted work would waste hours, CI has nothing to watch";
       case "lens-review":
-        return "the lens-review dispatch failed twice (retry exhausted) — cannot ship code that has not passed the six-pass review";
+        return `the lens-review dispatch failed twice (retry exhausted)${fanoutTag} — cannot ship code that has not passed the six-pass review`;
       case "lens-fix":
         return "the lens-fix step dispatch failed mid-fix — re-running adversarial on a partial fix is not meaningful";
       case "ci":
@@ -2093,6 +2123,24 @@ export function renderHandoffUserMessage(
     const shown = snap.modifiedFiles.slice(0, 5);
     lines.push(
       `  modified: ${shown.join(", ")}${snap.modifiedFiles.length > 5 ? ` ... and ${snap.modifiedFiles.length - 5} more` : ""}`,
+    );
+  }
+  // PR7 — surface per-workstream verdicts when the cycle hit a
+  // multi-workstream halt (PR3 fanout). renderHandoffMarkdown already
+  // emits this section for GitHub; mirror to chat so the operator
+  // doesn't have to click into the PR body to see which branch failed.
+  const lastConverged = [...state.eventLog]
+    .reverse()
+    .find(
+      (e): e is Extract<WorkEvent, { kind: "branches-converged" }> =>
+        e.kind === "branches-converged",
+    );
+  if (lastConverged && lastConverged.verdicts.length > 0) {
+    const okN = lastConverged.verdicts.filter((v) => v.ok).length;
+    lines.push(
+      "",
+      `Workstream verdicts (${lastConverged.step} fanout, ${okN}/${lastConverged.verdicts.length} ok):`,
+      ...lastConverged.verdicts.map((v) => `  ${v.id}: ${v.ok ? "ok" : "FAIL"}`),
     );
   }
   if (commentUrl) {
@@ -2917,6 +2965,51 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
           continue;
         }
         // DEGRADED_OK: existing fall-through is correct (no-op here).
+      }
+    }
+
+    // PR7 — multi-workstream halt-cascade router. PR3 emits
+    // `branches-converged` for N>1 fanouts (develop, lens-review).
+    // The PR5 dispatch-failed router above only watches single-dispatch
+    // tails, so all-branches-failed silently advanced into wasted
+    // adversarial + lens-review (the /work 553 2026-06-24 re-test:
+    // 3-of-3 develop branches provider-errored mid-stream, driver
+    // advanced into adversarial APPROVAL of empty diff and lens-review
+    // against header-only "diff").
+    //
+    // Doctrine: ANY failed branch on a HALT-class step routes to
+    // handoff. Partial success on multi-workstream is not a meaningful
+    // input downstream — /work.md's out-of-scope fence doctrine implies
+    // a failed branch leaves the broader decomposition incoherent.
+    {
+      const tail = state.eventLog[state.eventLog.length - 1];
+      if (tail?.kind === "branches-converged" && tail.verdicts.length > 0) {
+        const anyFailed = tail.verdicts.some((v) => !v.ok);
+        const policy = STEP_FAILURE_POLICY[step];
+        if (anyFailed && policy === "HALT") {
+          state = appendEvent(state, {
+            kind: "cap-hit",
+            at: Date.now(),
+            cap: `step-failed:${step}` as const,
+            reviewRound: state.pipelineState.reviewRound,
+            nextStep: "handoff",
+          });
+          state = {
+            ...state,
+            pipelineState: { ...state.pipelineState, currentStep: "handoff" },
+          };
+          await writeState(ctx.repoRoot, state);
+          const failedCount = tail.verdicts.filter((v) => !v.ok).length;
+          trace(
+            `work-driver: HALT on step="${step}" — ${failedCount}/${tail.verdicts.length} branches failed → handoff`,
+          );
+          continue;
+        }
+        // RETRY_ONCE doesn't apply to multi-workstream fanouts (no step
+        // in STEP_FAILURE_POLICY that fans out is RETRY_ONCE — develop
+        // is HALT, lens-review N>1 path uses the same N>1 fanout but
+        // its retry semantics are handled internally by runLensReview).
+        // DEGRADED_OK: fall-through.
       }
     }
 

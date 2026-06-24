@@ -93,8 +93,29 @@ assert(rec.registeredCommands.includes("plan"), "/plan registered");
 assert(rec.registeredCommands.includes("work"), "/work registered");
 assert(rec.registeredCommands.includes("review"), "/review registered");
 assert(rec.registeredCommands.includes("audit"), "/audit registered");
+assert(rec.registeredCommands.includes("do"), "/do registered (PR7 — free-form work counterpart to /work)");
 assert(rec.registeredCommands.includes("ensemble-debug"), "/ensemble-debug registered");
 assert(rec.registeredCommands.includes("runs"), "/runs registered");
+
+// PR7 — pi-prompts/do.md exists and uses the expected placeholders +
+// toolkit mentions. /do is PM-driven; its body is loaded from disk on
+// every invocation (no compiled driver code path).
+{
+  const doBody = await fs.readFile(path.join(PI_PROMPTS, "do.md"), "utf8");
+  assert(doBody.length > 500, "pi-prompts/do.md exists and is non-trivial");
+  assert(
+    doBody.includes("$ARGUMENTS"),
+    "pi-prompts/do.md uses $ARGUMENTS (consumed by expandArgs in commands.ts)",
+  );
+  assert(
+    doBody.includes("dispatch_specialist"),
+    "pi-prompts/do.md mentions dispatch_specialist (PM orchestration toolkit)",
+  );
+  assert(
+    doBody.includes("adversarial_loop"),
+    "pi-prompts/do.md mentions adversarial_loop (non-negotiable commit gate)",
+  );
+}
 assert(rec.registeredTools.includes("dispatch_specialist"), "dispatch_specialist tool registered");
 assert(rec.registeredTools.includes("dispatch_parallel"), "dispatch_parallel tool registered");
 assert(rec.registeredTools.includes("adversarial_loop"), "adversarial_loop tool registered");
@@ -102,7 +123,7 @@ assert(rec.registeredTools.includes("dispatch_lens_review"), "dispatch_lens_revi
 assert(rec.beforeAgentStartHandlers.length === 1, "exactly one before_agent_start hook");
 
 // Verify pi-prompts files exist
-for (const name of ["start", "research", "plan", "work", "review"]) {
+for (const name of ["start", "research", "plan", "work", "review", "do"]) {
   const file = path.join(PI_PROMPTS, `${name}.md`);
   const exists = await fs.stat(file).then(() => true).catch(() => false);
   assert(exists, `pi-prompts/${name}.md exists`);
@@ -244,6 +265,23 @@ assert(
   result3?.systemPrompt !== undefined && result3.systemPrompt.includes("PM mode — orchestration only"),
   "/start while busy: PM mode sticky preamble still active from earlier /start",
 );
+
+// PR7 — Fire /do <description>. PM-driven, no driver path; same shape
+// as /research / /plan. Placed at the end so the earlier hardcoded
+// sentMessages.length === N assertions don't shift.
+{
+  const { ctx: ctxDo } = makeCtx();
+  const before = rec.sentMessages.length;
+  await handlers.do!("fix the typo in README.md", ctxDo);
+  assert(
+    rec.sentMessages.length === before + 1,
+    "/do <description> → 1 message queued (PM-driven, no driver detour)",
+  );
+  assert(
+    rec.sentMessages[before].includes("**Request**: fix the typo in README.md"),
+    "/do: $ARGUMENTS expanded into the **Request** field of do.md",
+  );
+}
 
 console.log("\n=== test-command-flow summary ===");
 console.log(`registered: ${rec.registeredCommands.length} commands, ${rec.registeredTools.length} tools`);
