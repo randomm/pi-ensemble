@@ -120,7 +120,15 @@ RUN curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/ma
 # with ctx7 above so an upstream npm hiccup doesn't break the whole image
 # build; @explore's prompt surfaces the missing-binary case to the user
 # (instead of letting agents fall back to bare `curl` scraping).
-RUN npm install -g --ignore-scripts parallel-web-cli || true
+#
+# Unlike most globals here, parallel-web-cli ships as a thin npm wrapper whose
+# postinstall (scripts/install.js) downloads the platform binary from GitHub
+# Releases and verifies its SHA256 checksum. --ignore-scripts skips that hook,
+# leaving a stub on PATH that errors at runtime with "binary not found". So we
+# allow scripts for this one package — the download is a checksum-pinned fetch
+# from github.com/parallel-web/parallel-web-tools/releases, not arbitrary code.
+# Soft-fail preserved so a transient GitHub outage doesn't break the build.
+RUN npm install -g --allow-scripts=parallel-web-cli parallel-web-cli || true
 
 # -----------------------------------------------------------------------------
 # 6. Copy pi-ensemble repo + run install.sh
