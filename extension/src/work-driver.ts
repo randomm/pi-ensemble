@@ -317,6 +317,19 @@ export interface DriverContext {
     spec: { role: string; prompt: string; cwd?: string },
     opts?: { label?: string; skipDeck?: boolean; timeoutMs?: number },
   ) => Promise<DispatchResult>;
+  /**
+   * Optional injection point for tests: replace runAdversarialLoop with a
+   * fake. Production callers omit this — runAdversarial uses the real
+   * orchestrator from adversarial.ts. Mirrors `dispatchFn` for symmetry.
+   * Added in PR8 alongside the per-workstream adversarial fanout so the
+   * smoke tests can validate fanout shape without spawning real Pi
+   * children.
+   */
+  adversarialLoopFn?: (
+    params: { diff: string; context: string; workCwd?: string },
+    signal: AbortSignal,
+    orchestratorJobId: string,
+  ) => Promise<DispatchResult>;
 }
 
 /** Decide the next step from the current step + just-appended events. */
@@ -1004,102 +1017,203 @@ async function runDevelop(ctx: DriverContext, state: WorkState, now: number): Pr
  * deck entries owned by `runAdversarialLoop` remain the user-visible UI.
  * No double-deck.
  */
+/** PR8 — extract round count from adversarial_loop's reply text. */
+function parseAdversarialRounds(text: string): number {
+  if (text.includes("after round 1")) return 1;
+  if (text.includes("after round 2")) return 2;
+  return 3;
+}
+
 async function runAdversarial(
   ctx: DriverContext,
   state: WorkState,
   now: number,
 ): Promise<WorkState> {
-  let next = appendEvent(
-    { ...state, pipelineState: { ...state.pipelineState, currentStep: "adversarial" } },
-    { kind: "step-started", step: "adversarial", at: now },
-  );
+  // PR8 — adversarial is the developer's tight-loop reviewer; it belongs
+  // INSIDE each workstream's worktree, not on a merged fanout diff. The
+  // pre-PR8 single-dispatch path computed the diff via fetchAllDiffs
+  // (per-workstream sections concatenated with `## workstream:` headers)
+  // and routed adversarial_loop's internal fix-developers to a single cwd.
+  // For N>1 this caused two failures empirically (/work 553 2026-06-24):
+  //   1. Reviewer flagged phantom CRITICALs that were cross-workstream
+  //      merge artifacts (e.g., "uses undefined setView" — defined in
+  //      sibling workstream's diff fragment).
+  //   2. Internal fix-loop's developer dispatched into ONE worktree,
+  //      fragmenting state further across the others — the loop spun 3
+  //      rounds chasing phantoms.
+  // PR8 fans out adversarial per workstream: N parallel adversarial_loop
+  // runs, each scoped to one worktree's diff + cwd. Mirrors the develop
+  // fanout structure (PR3). Aggregated verdict is the conjunction —
+  // any per-workstream rejection routes to handoff via the existing
+  // adversarial-rejected + cap-hit pattern.
+  const ids =
+    Object.keys(state.pipelineState.workstreams ?? {}).length > 0
+      ? Object.keys(state.pipelineState.workstreams ?? {})
+      : ["default"];
 
-  // PR3: diff resolution via the multi-worktree-aware `fetchAllDiffs`. For
-  // single-workstream cycles (N=1, the default), this collapses to a single
-  // `git diff HEAD` from the recorded worktree path (which Step 3 sets to
-  // `ctx.repoRoot` when ops didn't create a worktree). For multi-workstream
-  // cycles, all N worktree diffs are merged with `## workstream: <id>`
-  // headers so the adversarial-developer sees one coherent document.
-  // This is the structural fix for the PR2 B2 "empty diff" bug.
-  const diff = await fetchAllDiffs(state.pipelineState.worktrees ?? {}, ctx.repoRoot);
-  // Working cwd for runAdversarialLoop's internal subagent spawn. Default
-  // worktree path (or first worktree for N>1) — the loop only needs ONE
-  // cwd to dispatch its internal adversarial-developer; the diff input
-  // captures the cross-worktree state for the multi-worktree case.
-  const cwd =
-    state.pipelineState.worktrees?.default ??
-    state.pipelineState.worktrees?.[Object.keys(state.pipelineState.worktrees ?? {})[0] ?? ""] ??
-    ctx.repoRoot;
-  const startedAt = Date.now();
-  const orchestratorJobId = makeRunId();
-
-  let result: DispatchResult;
-  try {
-    result = await runAdversarialLoop(
-      {
-        diff,
-        context: `/work issue #${ctx.issue}: gating diff before commit (Step 5).`,
-        workCwd: cwd,
-      },
-      // Driver does not propagate an AbortController for v1 — the spawn-
-      // level timeouts in spawn.ts (30 min default) bound the work. A
-      // future version can plumb pi.signal or similar.
-      new AbortController().signal,
-      orchestratorJobId,
-    );
-  } catch (err) {
-    return appendEvent(next, {
-      kind: "dispatch-failed",
+  let next: WorkState = {
+    ...state,
+    pipelineState: { ...state.pipelineState, currentStep: "adversarial" },
+  };
+  next = appendEvent(next, { kind: "step-started", step: "adversarial", at: now });
+  if (ids.length > 1) {
+    next = appendEvent(next, {
+      kind: "branches-fanned-out",
       step: "adversarial",
-      role: "adversarial-loop",
-      jobId: orchestratorJobId,
-      label: "adversarial_loop",
-      ms: Date.now() - startedAt,
-      at: Date.now(),
-      errorTail: (err as Error).message?.slice(-200),
+      workstreams: ids,
+      at: now,
     });
   }
 
-  // Append the dispatch-completed event so the audit trail stays uniform
-  // across steps that go through dispatchCore vs. ones (like adversarial /
-  // lens-review) that call orchestrator functions directly.
-  const evt = await buildCompletionEvent(
-    ctx,
-    "adversarial",
-    "adversarial-loop",
-    "adversarial_loop",
-    result,
+  type Outcome = {
+    id: string;
+    ok: boolean;
+    rounds: number;
+    rejectionText?: string;
+    completionEvent?: WorkEvent;
+    failureEvent?: WorkEvent;
+    branchEvent?: WorkEvent;
+  };
+  const outcomes: Outcome[] = await Promise.all(
+    ids.map(async (id): Promise<Outcome> => {
+      const cwd = state.pipelineState.worktrees?.[id] ?? ctx.repoRoot;
+      const label = ids.length > 1 ? `adversarial[${id}]` : "adversarial_loop";
+      const startedAt = Date.now();
+      const orchestratorJobId = makeRunId();
+      // Per-workstream diff: a single `git diff HEAD` from this worktree.
+      // Coherent because it captures exactly what ONE developer wrote on
+      // ONE branch. The cross-workstream merge happens later in
+      // commit-pr where ops integrates the per-workstream branches; this
+      // adversarial pass gates each workstream independently.
+      const diff = await fetchDiff(cwd);
+      const loopFn = ctx.adversarialLoopFn ?? runAdversarialLoop;
+      let result: DispatchResult;
+      try {
+        result = await loopFn(
+          {
+            diff,
+            context:
+              ids.length > 1
+                ? `/work issue #${ctx.issue}: gating diff for workstream "${id}" before commit (Step 5).`
+                : `/work issue #${ctx.issue}: gating diff before commit (Step 5).`,
+            workCwd: cwd,
+          },
+          // No AbortController plumbing in v1 — spawn-level timeouts
+          // in spawn.ts (per-role) bound the work.
+          new AbortController().signal,
+          orchestratorJobId,
+        );
+      } catch (err) {
+        const errMsg = (err as Error).message?.slice(-200);
+        return {
+          id,
+          ok: false,
+          rounds: 0,
+          failureEvent: {
+            kind: "dispatch-failed",
+            step: "adversarial",
+            role: "adversarial-loop",
+            jobId: orchestratorJobId,
+            label,
+            ms: Date.now() - startedAt,
+            at: Date.now(),
+            errorTail: errMsg,
+          },
+          branchEvent:
+            ids.length > 1
+              ? {
+                  kind: "branch-completed",
+                  step: "adversarial",
+                  workstreamId: id,
+                  ok: false,
+                  ms: Date.now() - startedAt,
+                  at: Date.now(),
+                  error: errMsg,
+                }
+              : undefined,
+        };
+      }
+      const completionEvent = await buildCompletionEvent(
+        ctx,
+        "adversarial",
+        "adversarial-loop",
+        label,
+        result,
+      );
+      const ok = result.ok && !result.errorStop;
+      const rounds = parseAdversarialRounds(result.text);
+      return {
+        id,
+        ok,
+        rounds,
+        rejectionText: ok ? undefined : result.text,
+        completionEvent,
+        branchEvent:
+          ids.length > 1
+            ? {
+                kind: "branch-completed",
+                step: "adversarial",
+                workstreamId: id,
+                ok,
+                ms: Date.now() - startedAt,
+                at: Date.now(),
+              }
+            : undefined,
+      };
+    }),
   );
-  next = appendEvent(next, evt);
 
-  // Parse the verdict from the result text. `runAdversarialLoop` returns
-  // `ok: true` for APPROVED and `ok: false` for the final-rejection case
-  // after 3 rounds. The verdict text contains either "Adversarial APPROVED"
-  // or "Adversarial REJECTED after 3 rounds".
-  const rounds = result.text.includes("after round 1")
-    ? 1
-    : result.text.includes("after round 2")
-      ? 2
-      : 3;
-  if (result.ok) {
+  // Append per-workstream events in deterministic order (dispatch-completed
+  // / dispatch-failed, then branch-completed for N>1).
+  const events: WorkEvent[] = [];
+  for (const o of outcomes) {
+    if (o.completionEvent) events.push(o.completionEvent);
+    if (o.failureEvent) events.push(o.failureEvent);
+    if (o.branchEvent) events.push(o.branchEvent);
+  }
+  next = appendEvent(next, ...events);
+
+  if (ids.length > 1) {
+    next = appendEvent(next, {
+      kind: "branches-converged",
+      step: "adversarial",
+      verdicts: outcomes.map((o) => ({ id: o.id, ok: o.ok })),
+      at: Date.now(),
+    });
+  }
+
+  // Aggregate verdict. ALL approved → adversarial-approved (nextStep routes
+  // to commit-pr). ANY rejected → adversarial-rejected + cap-hit (nextStep
+  // routes to handoff via the cap-hit). Synthesised here so the existing
+  // nextStep verdict-routing branches still work without modification.
+  const maxRounds = outcomes.reduce((acc, o) => Math.max(acc, o.rounds), 0);
+  const aggregateJobId = makeRunId();
+  if (outcomes.every((o) => o.ok)) {
     next = appendEvent(next, {
       kind: "adversarial-approved",
       at: Date.now(),
-      jobId: orchestratorJobId,
-      rounds,
+      jobId: aggregateJobId,
+      rounds: maxRounds,
     });
   } else {
+    // Concatenate per-workstream rejection text (or dispatch-failure
+    // marker) into findings so the handoff renderer surfaces all of them.
+    const findings = outcomes
+      .filter((o) => !o.ok)
+      .map((o) => {
+        const tag = ids.length > 1 ? `[workstream ${o.id}] ` : "";
+        return `${tag}${o.rejectionText ?? "(dispatch failed — see dispatch-failed event)"}`;
+      })
+      .join("\n\n---\n\n");
     next = appendEvent(
       next,
       {
         kind: "adversarial-rejected",
         at: Date.now(),
-        jobId: orchestratorJobId,
-        rounds: 3,
-        findings: result.text,
+        jobId: aggregateJobId,
+        rounds: maxRounds || 3,
+        findings,
       },
-      // adversarial_loop exhausted its 3 internal rounds → driver routes to
-      // handoff per /work.md Step 7f.3 doctrine (cap-hit, NOT user-block).
       {
         kind: "cap-hit",
         at: Date.now(),
