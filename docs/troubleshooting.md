@@ -722,3 +722,40 @@ Rationale: an intermediate handoff usually signals something the operator wants 
 ### Why deterministic grouping rather than PM-narrated?
 
 The compiled driver's PR10 shortcut (v0.12.5–v0.12.14) bundled ALL issues into ONE PR without any judgment — that empirically failed 3× (vipune `37219c9a`). PR15's retreat to strictly-sequential was safe but ignored real relatedness signal. PR16's grouping rules encode explicit heuristics (link markers, path overlap, subsystem tags) that produce reproducible partitions — same input → same groups, testable, no LLM budget, no drift between runs.
+
+## Outcome-verification gates — `verify-failed:<step>` cap-hits (PR17+)
+
+### What they are
+
+After the `develop` step (when every branch claims success) and after the `commit-pr` step (when the consolidation gate passes), the driver checks **executed evidence** instead of trusting the subagent's "done" claim. No LLM judges this — the driver runs the checks itself:
+
+**develop:**
+- At least one worktree has a real diff — uncommitted porcelain entries, or commits ahead of the `baseSha` recorded at the branch step. All worktrees empty = the claim was hollow.
+- The project's **verify command** exits 0 in each changed worktree.
+
+**commit-pr:**
+- Commits exist on the branch: `git rev-list --count origin/<base>..HEAD` > 0.
+- The parsed PR number resolves via `gh pr view`. If ops forgot the `pr: <N>` marker, the gate tries `gh pr list --head <branch>` and **adopts** the found number (bonus repair — pre-PR17 a missing marker silently degraded handoff/CI targeting).
+
+On failure the driver emits cap `verify-failed:<step>` → handoff, with the per-check evidence in `pipelineState.verifyEvidence` (rendered into the handoff body).
+
+### Verify command discovery
+
+Precedence:
+
+1. **`.pi/verify-cmd`** at the target repo root — first non-empty, non-comment line is the command verbatim. Use this when the derived command is wrong or you want tests instead of typecheck.
+2. **`package.json` scripts** — `typecheck` preferred over `test`; the runner is detected from the lockfile (`bun.lock`/`bun.lockb` → `bun run`, `pnpm-lock.yaml` → `pnpm run`, `yarn.lock` → `yarn`, else `npm run`).
+3. **`Cargo.toml`** → `cargo check --quiet`.
+4. Nothing found → the gate checks diff/commit/PR evidence only and notes the absence.
+
+The command is capped at 10 minutes (`PI_ENSEMBLE_VERIFY_TIMEOUT_MS` to override).
+
+### If the gate keeps failing
+
+- **Verify command fails on code the developer didn't touch** — the project was already broken before the cycle started. Fix the baseline first, or point `.pi/verify-cmd` at a narrower command (e.g., `cargo check -p <crate>`).
+- **Verify command too slow / needs services** — put a cheaper command in `.pi/verify-cmd` (typecheck-only is the intent; full test suites belong to CI).
+- **False alarm you need to bypass right now** — `PI_ENSEMBLE_VERIFY=0` disables the gate entirely (not recommended as a steady state; it re-opens the phantom-handoff class the gate exists to catch).
+
+### Why this exists
+
+Pre-PR17, every quality gate (adversarial, six lenses) was LLM judgment reading diffs and transcripts — nothing driver-side ever *executed* anything until post-PR CI. The #245/#253 silent-merge incidents were exactly this failure class: agents claimed success, the driver trusted the claim. The gate costs zero LLM tokens and catches hollow claims pre-commit instead of after a full adversarial → lens → CI round-trip.
