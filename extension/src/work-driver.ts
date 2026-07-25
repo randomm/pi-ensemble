@@ -390,6 +390,49 @@ export interface DriverContext {
       shell?: string;
     },
   ) => Promise<{ stdout: string; stderr?: string }>;
+  /**
+   * PR20 — optional injection point for tests: replace the transcript
+   * file read used by REPLAY_ONCE's evidence extraction. Production
+   * callers omit this; the default reads the file via fs. Mirrors
+   * `verifyExecFn`.
+   */
+  transcriptReadFn?: (transcriptPath: string) => Promise<string>;
+  /**
+   * PR20 — optional injection point for tests: replace runLensReview
+   * (which spawns SIX real Pi children). Mirrors `adversarialLoopFn`;
+   * combined with PI_ENSEMBLE_FORBID_LIVE_SPAWN=1 it guarantees the
+   * offline suite never launches live subagents.
+   */
+  lensReviewFn?: (params: {
+    diff: string;
+    context: string;
+    cwd?: string;
+  }) => Promise<import("./lens-review.ts").LensReviewSummary>;
+}
+
+/**
+ * PR20 — Mechanical transcript-tail extraction for REPLAY_ONCE.
+ *
+ * Reads the failed spawn's session transcript and returns its last
+ * ~1500 characters verbatim. Deliberately schema-blind: Pi transcript
+ * shapes drift between versions, and the point is deterministic,
+ * zero-LLM evidence ("here's what the failed attempt was doing when it
+ * died"), not a structured parse. Any read failure returns undefined —
+ * the replay still fires with a plain steer note.
+ */
+export async function readTranscriptTail(
+  ctx: DriverContext,
+  transcriptPath: string | undefined,
+): Promise<string | undefined> {
+  if (!transcriptPath) return undefined;
+  try {
+    const readFn = ctx.transcriptReadFn ?? ((p: string) => fs.readFile(p, "utf8"));
+    const raw = await readFn(transcriptPath);
+    const tail = raw.trim().slice(-1500);
+    return tail.length > 0 ? tail : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Decide the next step from the current step + just-appended events. */
@@ -1380,6 +1423,14 @@ async function runDevelop(ctx: DriverContext, state: WorkState, now: number): Pr
   const speculativeOn = process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE !== "1";
   const verdicts: Array<{ id: string; ok: boolean }> = [];
   const branchEvents: typeof next.eventLog = [];
+  // PR20 — REPLAY_ONCE evidence threading. When the halt-cascade router
+  // fired a replay for develop, replayContext carries the steer note +
+  // the failed attempt's transcript tail; append it to the developer
+  // prompt so the fresh session starts from evidence instead of blind.
+  const replayNote =
+    state.pipelineState.replayContext?.step === "develop"
+      ? `\n\n## Replay context — previous attempt failed\n\n${state.pipelineState.replayContext.note}`
+      : "";
   const results = await Promise.all(
     ids.map(async (id) => {
       const ws = state.pipelineState.workstreams?.[id];
@@ -1398,13 +1449,14 @@ async function runDevelop(ctx: DriverContext, state: WorkState, now: number): Pr
             ctx.pi,
             {
               role: "developer",
-              prompt: inlineDevelopPrompt(
-                activeIssues,
-                scratchAbs,
-                ws,
-                ids.length > 1 ? id : undefined,
-                speculativeOn ? speculativeContextPath : undefined,
-              ),
+              prompt:
+                inlineDevelopPrompt(
+                  activeIssues,
+                  scratchAbs,
+                  ws,
+                  ids.length > 1 ? id : undefined,
+                  speculativeOn ? speculativeContextPath : undefined,
+                ) + replayNote,
               cwd,
             },
             { label: developerLabel },
@@ -1618,7 +1670,23 @@ async function runAdversarial(
       // commit-pr where ops integrates the per-workstream branches; this
       // adversarial pass gates each workstream independently.
       const diff = await fetchDiff(cwd);
-      const loopFn = ctx.adversarialLoopFn ?? runAdversarialLoop;
+      // PR20 — offline-suite guard. runAdversarialLoop spawns REAL Pi
+      // children; a smoke test that reaches this step without injecting
+      // ctx.adversarialLoopFn silently launches live subagents — the
+      // suite only ever passed because those children happened to fail
+      // fast, and it hung outright when the host's pi/auth state made
+      // them block (empirical 2026-07-25). With the flag set, a missing
+      // injection fails LOUDLY instead of spawning.
+      const forbidLive = process.env.PI_ENSEMBLE_FORBID_LIVE_SPAWN === "1";
+      const loopFn =
+        ctx.adversarialLoopFn ??
+        (forbidLive
+          ? async () => {
+              throw new Error(
+                "PI_ENSEMBLE_FORBID_LIVE_SPAWN=1 — live runAdversarialLoop blocked (offline test guard; inject ctx.adversarialLoopFn)",
+              );
+            }
+          : runAdversarialLoop);
       let result: DispatchResult;
       try {
         result = await loopFn(
@@ -2523,8 +2591,21 @@ async function runLens(ctx: DriverContext, state: WorkState, now: number): Promi
   const startedAt = Date.now();
   const jobId = makeRunId();
   let summary: import("./lens-review.ts").LensReviewSummary;
+  // PR20 — same offline-suite guard as runAdversarial: runLensReview
+  // spawns SIX real Pi children; with the flag set, a test that reaches
+  // this step without injecting ctx.lensReviewFn fails loudly instead
+  // of silently launching live subagents.
+  const lensFn =
+    ctx.lensReviewFn ??
+    (process.env.PI_ENSEMBLE_FORBID_LIVE_SPAWN === "1"
+      ? async () => {
+          throw new Error(
+            "PI_ENSEMBLE_FORBID_LIVE_SPAWN=1 — live runLensReview blocked (offline test guard; inject ctx.lensReviewFn)",
+          );
+        }
+      : runLensReview);
   try {
-    summary = await runLensReview({
+    summary = await lensFn({
       diff,
       context: `/work issue #${ctx.issue}, lens-review round ${round}`,
       cwd,
@@ -4049,6 +4130,9 @@ async function buildCompletionEvent(
       at,
       exitCode: result.exitCode ?? null,
       errorTail: result.text?.slice(-200),
+      // PR20 — SIGTERM'd children still write transcripts; thread the
+      // path so REPLAY_ONCE can carry evidence into the replay.
+      transcriptPath: result.transcriptPath,
     };
   }
 
@@ -4912,6 +4996,68 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
           // explainCap() can produce the right operator-facing sentence.
           const errorTail = tail.kind === "dispatch-failed" ? (tail.errorTail ?? "") : "";
           const isTimeout = /killed after \d+ms timeout/.test(errorTail);
+          const isProviderError = tail.kind === "dispatch-failed-provider";
+          // PR20 — REPLAY_ONCE: for a develop timeout / provider error,
+          // re-dispatch ONCE with evidence before handing off. Fresh
+          // session + steer note + the failed attempt's transcript tail —
+          // never a blind re-dispatch (the pair_watch post-mortem burned
+          // 1.57M tokens on exactly that). Triggers ONLY on the two
+          // transient failure shapes; deterministic failures (ABORT,
+          // verify-gate caps, generic non-zero exits) go straight to
+          // handoff as before. Scoped to the single-dispatch develop
+          // tail (N=1 — the common case); N>1 fanout failures route via
+          // the PR7 multi-workstream router below and are excluded so a
+          // replay never re-runs ALL branches for one branch's timeout.
+          // Hard budget: one replay per step per cycle, persisted.
+          if (step === "develop" && (isTimeout || isProviderError)) {
+            const rAttempts = state.pipelineState.replayAttempts ?? {};
+            if ((rAttempts[step] ?? 0) < 1) {
+              const evidence = await readTranscriptTail(ctx, tail.transcriptPath);
+              const failMinutes = Math.max(1, Math.round((tail.ms ?? 0) / 60_000));
+              const note = [
+                `Your previous attempt at this task ${
+                  isProviderError
+                    ? "died mid-stream on a provider error"
+                    : "was killed by its wall-clock timeout"
+                } after ~${failMinutes} min.`,
+                evidence
+                  ? `Evidence — last activity from the failed attempt's transcript:\n\`\`\`\n${evidence}\n\`\`\``
+                  : "(transcript tail unavailable — inspect the worktree state directly)",
+                "Start by running `git status` in your worktree to see what the previous attempt already changed. Do NOT redo completed work — continue from where it got to.",
+              ].join("\n\n");
+              state = appendEvent(state, {
+                kind: "plumb-report",
+                at: Date.now(),
+                step,
+                role: "driver",
+                body: `REPLAY_ONCE fired for ${step} (${
+                  isProviderError ? "provider error" : "timeout"
+                }): one budgeted evidence-carrying replay dispatched. Second failure will hand off as usual.`,
+              });
+              state = {
+                ...state,
+                pipelineState: {
+                  ...state.pipelineState,
+                  replayAttempts: { ...rAttempts, [step]: 1 },
+                  replayContext: { step, note, at: Date.now() },
+                },
+              };
+              await writeState(ctx.repoRoot, state);
+              lifecycle.emitStepRetry(
+                step,
+                stepOrd.num,
+                stepOrd.total,
+                2,
+                isProviderError
+                  ? "provider error — replaying once with evidence"
+                  : "timeout — replaying once with evidence",
+              );
+              trace(
+                `work-driver: REPLAY_ONCE on step="${step}" (${isProviderError ? "provider" : "timeout"}; evidence=${evidence ? "transcript-tail" : "none"})`,
+              );
+              continue; // re-run develop with replayContext threaded into the prompt
+            }
+          }
           const cap =
             step === "develop" && isTimeout
               ? ("developer-timeout" as const)

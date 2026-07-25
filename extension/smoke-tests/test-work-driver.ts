@@ -99,6 +99,15 @@ const mockIssueBodyOk = async (issue: number, _cwd: string) => ({
 // it with an injected verifyExecFn.
 process.env.PI_ENSEMBLE_VERIFY = "0";
 
+// PR20 — offline suites must NEVER spawn live Pi children. Tests that
+// reach the adversarial step without injecting ctx.adversarialLoopFn
+// used to silently launch real subagents (passing only because the
+// children failed fast; the suite hung outright when the host's
+// pi/auth state made them block — empirical 2026-07-25). With this
+// flag, a missing injection throws loudly and the cycle halts through
+// the normal RETRY_ONCE → cap → handoff machinery.
+process.env.PI_ENSEMBLE_FORBID_LIVE_SPAWN = "1";
+
 // Fake DispatchResult builder.
 function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
   return {
@@ -338,9 +347,16 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
 // PR3 sequence: explore → plan (decomposes) → branch (ops) → develop
 // (developer). Plan returns no `## Workstreams` block, so the driver
 // synthesises the `default` workstream and the cycle stays single-task.
-// Steps 5/7 (adversarial / lens-review) call orchestrator functions
-// directly (NOT through dispatchFn); we throw on dispatch #5 to halt
-// cleanly before those live paths fire.
+//
+// PR20 fix — the old "throw on dispatch #5" halt was STALE: since PR4's
+// speculative explore, dispatch #5 is the speculative (whose failure is
+// TOLERATED by Promise.allSettled), so the cycle sailed into a LIVE
+// runAdversarialLoop spawn — a real Pi child in an offline smoke test.
+// It passed only because the child happened to fail fast; when the
+// host's pi/auth state makes the child block, the whole suite hangs
+// (empirical 2026-07-25). Inject adversarialLoopFn that throws instead:
+// deterministic offline halt at the same boundary the comment always
+// intended.
 {
   const dir = mkdtempSync(path.join(tmpdir(), "work-driver-loop-"));
   try {
@@ -353,14 +369,12 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
       repoRoot: dir,
       issue: 600,
       issueBodyFetcherFn: mockIssueBodyOk,
+      adversarialLoopFn: async () => {
+        throw new Error("smoke: halting at adversarial step (offline suite must never live-spawn)");
+      },
       dispatchFn: async (_pi, spec, opts) => {
         rolesDispatched.push(spec.role);
         labelsDispatched.push(opts?.label ?? spec.role);
-        // explore (Step 1) → plan (Step 2) → ops branch (Step 3) → developer (Step 4)
-        // Halt before adversarial would fire (dispatch #5+).
-        if (rolesDispatched.length >= 5) {
-          throw new Error("smoke: halting before adversarial step (would call live runAdversarialLoop)");
-        }
         return mkResult({
           role: spec.role,
           text: `mock ${spec.role} output for issue #600`,
@@ -5004,6 +5018,202 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     if (prevVerify === undefined) delete process.env.PI_ENSEMBLE_VERIFY;
     else process.env.PI_ENSEMBLE_VERIFY = prevVerify;
     process.env.PI_ENSEMBLE_VERIFY = "0";
+    if (prevSpec === undefined) delete process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE;
+    else process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE = prevSpec;
+    if (prevMech === undefined) delete process.env.PI_ENSEMBLE_MECHANIZE_OPS;
+    else process.env.PI_ENSEMBLE_MECHANIZE_OPS = prevMech;
+  }
+}
+
+// PR20 — REPLAY_ONCE: evidence-carrying budgeted replay for develop
+// timeouts / provider errors. Full-driver integration tests; dispatch
+// counters + prompt capture prove exactly-one replay and evidence
+// threading.
+{
+  const prevSpec = process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE;
+  const prevMech = process.env.PI_ENSEMBLE_MECHANIZE_OPS;
+  process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE = "1";
+  process.env.PI_ENSEMBLE_MECHANIZE_OPS = "0";
+
+  type ReplayFixture = {
+    dir: string;
+    developerResults: Array<() => DispatchResult>;
+    developerPrompts: string[];
+    ctx: DriverContext;
+  };
+  const mkReplayFixture = async (
+    issue: number,
+    developerResults: Array<() => DispatchResult>,
+  ): Promise<ReplayFixture> => {
+    const dir = mkdtempSync(path.join(tmpdir(), `replay-${issue}-`));
+    await (await import("node:fs/promises")).mkdir(path.join(dir, ".git", "info"), {
+      recursive: true,
+    });
+    const developerPrompts: string[] = [];
+    let devCall = 0;
+    const ctx: DriverContext = {
+      pi: makeFakePi().pi,
+      repoRoot: dir,
+      issue,
+      issueBodyFetcherFn: mockIssueBodyOk,
+      transcriptReadFn: async () => "FAKE-TRANSCRIPT-TAIL: last tool call was `cargo build` in src/",
+      adversarialLoopFn: async () =>
+        mkResult({ role: "adversarial-developer", text: "APPROVED after round 1" }),
+      dispatchFn: async (_pi, spec, opts) => {
+        const label = opts?.label ?? spec.role;
+        if (label === "explore") return mkResult({ text: "VERDICT: NEEDS_WORK" });
+        if (label === "plan") return mkResult({ text: "" });
+        if (label === "ops") return mkResult({ role: "ops", text: `branch: feature/issue-${issue}` });
+        if (label === "developer") {
+          developerPrompts.push(spec.prompt);
+          const producer = developerResults[Math.min(devCall, developerResults.length - 1)];
+          devCall++;
+          return producer ? producer() : mkResult({ role: "developer", text: "done" });
+        }
+        if (label === "ops:commit-pr")
+          throw new Error("halt at commit-pr: integration assertion boundary");
+        if (label === "ops:handoff") return mkResult({ role: "ops", text: "Posted." });
+        throw new Error(`unexpected dispatch: ${label}`);
+      },
+    };
+    return { dir, developerResults, developerPrompts, ctx };
+  };
+
+  try {
+    // RP1 — provider error → one evidence-carrying replay → success.
+    {
+      const f = await mkReplayFixture(981, [
+        () =>
+          mkResult({
+            role: "developer",
+            ok: false,
+            errorStop: { message: "stream died mid-flight" },
+            transcriptPath: "/fake/replay-transcript.json",
+          }),
+        () => mkResult({ role: "developer", text: "done — implemented (second attempt)" }),
+      ]);
+      try {
+        await runWorkDriver(f.ctx).catch(() => {});
+        const after = await readState(f.dir, 981);
+        assert(
+          f.developerPrompts.length === 2,
+          "RP1: provider error → exactly one replay dispatch (2 developer calls total)",
+        );
+        assert(
+          /Replay context — previous attempt failed/.test(f.developerPrompts[1] ?? "") &&
+            /FAKE-TRANSCRIPT-TAIL/.test(f.developerPrompts[1] ?? ""),
+          "RP1: replay prompt carries the steer note + the failed attempt's transcript tail",
+        );
+        assert(
+          !/Replay context/.test(f.developerPrompts[0] ?? ""),
+          "RP1: first attempt's prompt has NO replay note (regression guard)",
+        );
+        assert(
+          after?.pipelineState.replayAttempts?.develop === 1,
+          "RP1: replay budget recorded in pipelineState.replayAttempts",
+        );
+        assert(
+          after?.eventLog.some(
+            (e) => e.kind === "plumb-report" && /REPLAY_ONCE fired for develop/.test(e.body),
+          ),
+          "RP1: plumb-report documents the replay for the handoff/audit trail",
+        );
+        assert(
+          after?.eventLog.some((e) => e.kind === "adversarial-approved"),
+          "RP1: cycle proceeded through adversarial after the successful replay",
+        );
+        assert(
+          !after?.eventLog.some((e) => e.kind === "cap-hit" && e.cap === "step-failed:develop"),
+          "RP1: no develop cap-hit — the replay avoided the handoff",
+        );
+      } finally {
+        rmSync(f.dir, { recursive: true, force: true });
+      }
+    }
+
+    // RP2 — wall-clock timeout marker also triggers the replay.
+    {
+      const f = await mkReplayFixture(982, [
+        () =>
+          mkResult({
+            role: "developer",
+            ok: false,
+            text: "partial work...\n[pi-ensemble] killed after 5400000ms timeout",
+            transcriptPath: "/fake/replay-transcript.json",
+          }),
+        () => mkResult({ role: "developer", text: "done — implemented (second attempt)" }),
+      ]);
+      try {
+        await runWorkDriver(f.ctx).catch(() => {});
+        const after = await readState(f.dir, 982);
+        assert(
+          f.developerPrompts.length === 2 && after?.pipelineState.replayAttempts?.develop === 1,
+          "RP2: timeout marker triggers the same one-replay path",
+        );
+        assert(
+          /was killed by its wall-clock timeout/.test(
+            after?.pipelineState.replayContext?.note ?? "",
+          ),
+          "RP2: replayContext note names the timeout cause",
+        );
+      } finally {
+        rmSync(f.dir, { recursive: true, force: true });
+      }
+    }
+
+    // RP3 — budget enforcement: both attempts fail → handoff, exactly 2
+    // developer dispatches (never a third).
+    {
+      const fail = () =>
+        mkResult({
+          role: "developer",
+          ok: false,
+          errorStop: { message: "stream died again" },
+          transcriptPath: "/fake/replay-transcript.json",
+        });
+      const f = await mkReplayFixture(983, [fail, fail]);
+      try {
+        await runWorkDriver(f.ctx).catch(() => {});
+        const after = await readState(f.dir, 983);
+        assert(
+          f.developerPrompts.length === 2,
+          "RP3: second failure does NOT replay again (hard budget of one)",
+        );
+        assert(
+          after?.eventLog.some((e) => e.kind === "cap-hit" && e.cap === "step-failed:develop"),
+          "RP3: second failure routes to handoff via the unchanged cap path",
+        );
+        assert(
+          after?.pipelineState.status === "handoff" || after?.pipelineState.status === "aborted",
+          "RP3: cycle terminates (handoff/aborted) after budget exhaustion",
+        );
+      } finally {
+        rmSync(f.dir, { recursive: true, force: true });
+      }
+    }
+
+    // RP4 — deterministic failure (generic non-zero exit, no timeout
+    // marker, not a provider error) does NOT trigger a replay.
+    {
+      const f = await mkReplayFixture(984, [
+        () => mkResult({ role: "developer", ok: false, text: "some unexpected crash" }),
+      ]);
+      try {
+        await runWorkDriver(f.ctx).catch(() => {});
+        const after = await readState(f.dir, 984);
+        assert(
+          f.developerPrompts.length === 1,
+          "RP4: deterministic failure → straight to handoff, no replay (pair_watch anti-pattern guard)",
+        );
+        assert(
+          after?.pipelineState.replayAttempts?.develop === undefined,
+          "RP4: replay budget untouched for non-qualifying failures",
+        );
+      } finally {
+        rmSync(f.dir, { recursive: true, force: true });
+      }
+    }
+  } finally {
     if (prevSpec === undefined) delete process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE;
     else process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE = prevSpec;
     if (prevMech === undefined) delete process.env.PI_ENSEMBLE_MECHANIZE_OPS;

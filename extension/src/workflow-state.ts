@@ -154,6 +154,15 @@ export type WorkEvent =
       /** Process-level failure (non-zero exit), distinct from provider-error. */
       exitCode?: number | null;
       errorTail?: string;
+      /**
+       * PR20 — path to the failed spawn's session transcript when one
+       * exists (SIGTERM'd children still write transcripts). The
+       * REPLAY_ONCE machinery reads a mechanical tail from it so the
+       * replay dispatch carries evidence of where the failed attempt
+       * got to. Pre-PR20 this was dropped for dispatch-failed events
+       * (only dispatch-failed-provider carried it).
+       */
+      transcriptPath?: string;
     }
   | {
       kind: "adversarial-approved";
@@ -504,6 +513,24 @@ export interface PipelineState {
    * files; readers treat absent step keys as 0 retries used.
    */
   retryAttempts?: Partial<Record<WorkStep, number>>;
+  /**
+   * PR20 — REPLAY_ONCE budget, sibling to `retryAttempts` but for the
+   * evidence-carrying replay path: on a develop timeout / provider
+   * error, the driver re-dispatches ONCE with a steer note + the failed
+   * attempt's transcript tail (fresh session with evidence — never a
+   * blind re-dispatch; the pair_watch post-mortem burned 1.57M tokens
+   * on exactly that anti-pattern). Hard cap of one replay per step per
+   * cycle; the second failure routes to handoff exactly as pre-PR20.
+   * Persisted so a crash mid-replay doesn't re-loop on resume.
+   */
+  replayAttempts?: Partial<Record<WorkStep, number>>;
+  /**
+   * PR20 — the steer note + transcript-tail evidence carried into the
+   * replay dispatch. Kept in state (rather than passed transiently) so
+   * the handoff body and post-hoc audits can see exactly what evidence
+   * the replay ran with.
+   */
+  replayContext?: { step: WorkStep; note: string; at: number };
   /**
    * PR5 — worktree snapshot captured by `runHandoff` before emitting
    * the handoff artefact. Lets the operator-facing surfaces
