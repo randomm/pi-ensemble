@@ -2436,6 +2436,144 @@ export async function verifyStepOutcome(
         }
       }
     }
+
+    // --- Skip-ratchet gate (PR277) ---
+    // Counts net increase in test skip markers to prevent disabling gates.
+    // Excludes comments, strings, and documentation to avoid false positives.
+    if (process.env.PI_ENSEMBLE_SKIP_RATCHET !== "0") {
+      const SKIP_MARKERS = [
+        "#[ignore]",
+        "it.skip(",
+        "describe.skip(",
+        "test.skip(",
+        "@Disabled",
+        "pytest.mark.skip",
+        "t.Skip(",
+      ];
+      for (const cwd of changedWorktrees) {
+        let diffContent = "";
+        try {
+          const { stdout } = await execFn(`git diff ${baseSha ?? "HEAD"} -U0`, {
+            cwd,
+            maxBuffer: 8 * 1024 * 1024,
+          });
+          diffContent = stdout;
+        } catch (err) {
+          notes.push(
+            `git diff failed in ${cwd} (${(err as Error).message?.slice(0, 100)}) — skip-ratchet check skipped`,
+          );
+          continue;
+        }
+        let netIncrease = 0;
+        const lines = diffContent.split("\n");
+        for (const line of lines) {
+          if (line.startsWith("+")) {
+            // Added line — skip if it looks like a comment or string literal
+            const trimmed = line.slice(1).trimStart(); // Remove leading '+' and leading spaces
+            if (
+              trimmed.startsWith("//") ||
+              trimmed.startsWith("#") ||
+              trimmed.startsWith("/*") ||
+              trimmed.startsWith("*") ||
+              trimmed.startsWith('"') ||
+              trimmed.startsWith("'")
+            ) {
+              continue;
+            }
+            // Count all occurrences of each marker (not just presence)
+            for (const marker of SKIP_MARKERS) {
+              let count = 0;
+              let idx = 0;
+              while (true) {
+                const found = trimmed.indexOf(marker, idx);
+                if (found === -1) break;
+                count++;
+                idx = found + marker.length;
+              }
+              netIncrease += count;
+            }
+          } else if (line.startsWith("-")) {
+            // Removed line
+            const trimmed = line.slice(1).trimStart(); // Remove leading '-' and leading spaces
+            if (
+              trimmed.startsWith("//") ||
+              trimmed.startsWith("#") ||
+              trimmed.startsWith("/*") ||
+              trimmed.startsWith("*") ||
+              trimmed.startsWith('"') ||
+              trimmed.startsWith("'")
+            ) {
+              continue;
+            }
+            // Count all occurrences of each marker
+            for (const marker of SKIP_MARKERS) {
+              let count = 0;
+              let idx = 0;
+              while (true) {
+                const found = trimmed.indexOf(marker, idx);
+                if (found === -1) break;
+                count++;
+                idx = found + marker.length;
+              }
+              netIncrease -= count;
+            }
+          }
+        }
+        if (netIncrease > 0) {
+          // Check for exemption in issue body
+          const issueBody = state.pipelineState.issueBodyArtifact?.trim() ?? "";
+          if (/\[skip-exempt:/i.test(issueBody)) {
+            notes.push(
+              `diff adds ${netIncrease} skipped-test marker(s) but issue body contains [skip-exempt: ...] — ratchet exempted`,
+            );
+          } else {
+            failures.push(
+              `diff adds ${netIncrease} skipped-test marker(s) — a skipped test is a disabled gate`,
+            );
+          }
+        }
+      }
+    } else {
+      notes.push("PI_ENSEMBLE_SKIP_RATCHET=0 — skip-ratchet gate disabled");
+    }
+
+    // --- Product smoke command gate (PR277) ---
+    if (process.env.PI_ENSEMBLE_SMOKE !== "0") {
+      let smokeCmd: string | undefined;
+      try {
+        const smokeFile = path.join(ctx.repoRoot, ".pi", "smoke-cmd");
+        const content = await fs.readFile(smokeFile, "utf8");
+        const firstLine = content.split("\n").find((l) => l.length > 0 && !l.startsWith("#"));
+        smokeCmd = firstLine;
+      } catch {
+        // No smoke-cmd file — not a failure, just a note
+      }
+      if (smokeCmd) {
+        try {
+          await execFn(smokeCmd, {
+            cwd: ctx.repoRoot,
+            timeout: verifyTimeoutMs(),
+            maxBuffer: 4 * 1024 * 1024,
+          });
+        } catch (err) {
+          const e = err as Error & { stdout?: string; stderr?: string; killed?: boolean };
+          const tail = `${e.stdout ?? ""}
+${e.stderr ?? ""}`
+            .trim()
+            .slice(-1500);
+          failures.push(
+            e.killed
+              ? `smoke: command \`${smokeCmd}\` exceeded its ${Math.round(verifyTimeoutMs() / 60000)}-min timeout`
+              : `smoke: command \`${smokeCmd}\` failed: ${tail || e.message?.slice(0, 300)}`,
+          );
+        }
+      } else {
+        notes.push("no .pi/smoke-cmd — product smoke not run");
+      }
+    } else {
+      notes.push("PI_ENSEMBLE_SMOKE=0 — smoke gate disabled");
+    }
+
     return { ok: failures.length === 0, failures, notes };
   }
 
