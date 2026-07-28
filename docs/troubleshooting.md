@@ -743,11 +743,11 @@ On failure the driver emits cap `verify-failed:<step>` → handoff, with the per
 
 The develop gate also counts net additions of **skip-markers** in the diff (`#[ignore]`, `it.skip(`, `describe.skip(`, `test.skip(`, `@Disabled`, `pytest.mark.skip`, `t.Skip(`). A net increase means you're **disabling a test gate** that existed before — the ratchet only moves one direction.
 
-If the diff adds skip-markers, the gate fails with an evidence line naming the count. Exemptions are allowed if the GitHub issue body contains `[skip-exempt: <reason>]` — documenting why the disable is temporary.
+If the diff adds skip-markers, the gate fails with an evidence line naming the count. The filter excludes comments (but NOT Rust attributes like `#[ignore]`) and string literals to avoid false positives in documentation or quoted code.
 
 **Why this exists:** vipune's core embedder was broken for ~2.5 months while its test suite stayed green — 22 `#[ignore]` sites kept the real-embedder tests out of the fast suite, and nothing ever executed the product. The ratchet catches skip-marker additions before they accumulate.
 
-**Escape hatch:** `PI_ENSEMBLE_SKIP_RATCHET=0` disables the check (use sparingly — every skip you add without exemption erodes the test net).
+**Escape hatch:** `PI_ENSEMBLE_SKIP_RATCHET=0` disables the check (use sparingly).
 
 #### Product smoke command (PR277)
 

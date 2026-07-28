@@ -2450,6 +2450,59 @@ export async function verifyStepOutcome(
         "pytest.mark.skip",
         "t.Skip(",
       ];
+
+      // Helper: count marker occurrences in a line, excluding comments and strings.
+      // Returns the net count (positive for additions, negative for removals).
+      const countMarkersInLine = (line: string, marker: string, sign: 1 | -1): number => {
+        const trimmed = line.slice(1).trimStart(); // Remove leading '+'/'-' and leading spaces
+
+        // Skip comment lines (but NOT Rust attributes like #[ignore])
+        if (trimmed.startsWith("//")) return 0; // C-style single-line comment
+        if (trimmed.startsWith("/*")) return 0; // C-style multi-line comment start
+        if (trimmed.startsWith("*")) return 0; // Multi-line comment continuation
+        if (trimmed.startsWith("#")) {
+          // Shell/Python comment, NOT a Rust attribute (#[...])
+          if (!trimmed.startsWith("#[")) return 0;
+        }
+
+        // Count markers outside of string literals. This basic heuristic
+        // works for common patterns like console.log('it.skip(') where
+        // the marker appears in a string. It's not perfect (AST parsing
+        // would be required for full correctness), but it catches false
+        // positives in typical code.
+        let count = 0;
+        let inSingleQuote = false;
+        let inDoubleQuote = false;
+        let pos = 0;
+        while (pos < trimmed.length) {
+          const ch = trimmed[pos];
+          if (!inSingleQuote && !inDoubleQuote) {
+            // Outside strings: check for markers
+            if (ch === '"') {
+              inDoubleQuote = true;
+            } else if (ch === "'") {
+              inSingleQuote = true;
+            } else if (trimmed.startsWith(marker, pos)) {
+              count++;
+              pos += marker.length;
+              continue;
+            }
+          } else if (inDoubleQuote) {
+            // Inside double-quoted string
+            if (ch === '"' && trimmed[pos - 1] !== "\\") {
+              inDoubleQuote = false;
+            }
+          } else if (inSingleQuote) {
+            // Inside single-quoted string
+            if (ch === "'" && trimmed[pos - 1] !== "\\") {
+              inSingleQuote = false;
+            }
+          }
+          pos++;
+        }
+        return count * sign;
+      };
+
       for (const cwd of changedWorktrees) {
         let diffContent = "";
         try {
@@ -2468,69 +2521,21 @@ export async function verifyStepOutcome(
         const lines = diffContent.split("\n");
         for (const line of lines) {
           if (line.startsWith("+")) {
-            // Added line — skip if it looks like a comment or string literal
-            const trimmed = line.slice(1).trimStart(); // Remove leading '+' and leading spaces
-            if (
-              trimmed.startsWith("//") ||
-              trimmed.startsWith("#") ||
-              trimmed.startsWith("/*") ||
-              trimmed.startsWith("*") ||
-              trimmed.startsWith('"') ||
-              trimmed.startsWith("'")
-            ) {
-              continue;
-            }
-            // Count all occurrences of each marker (not just presence)
+            // Added line
             for (const marker of SKIP_MARKERS) {
-              let count = 0;
-              let idx = 0;
-              while (true) {
-                const found = trimmed.indexOf(marker, idx);
-                if (found === -1) break;
-                count++;
-                idx = found + marker.length;
-              }
-              netIncrease += count;
+              netIncrease += countMarkersInLine(line, marker, 1);
             }
           } else if (line.startsWith("-")) {
             // Removed line
-            const trimmed = line.slice(1).trimStart(); // Remove leading '-' and leading spaces
-            if (
-              trimmed.startsWith("//") ||
-              trimmed.startsWith("#") ||
-              trimmed.startsWith("/*") ||
-              trimmed.startsWith("*") ||
-              trimmed.startsWith('"') ||
-              trimmed.startsWith("'")
-            ) {
-              continue;
-            }
-            // Count all occurrences of each marker
             for (const marker of SKIP_MARKERS) {
-              let count = 0;
-              let idx = 0;
-              while (true) {
-                const found = trimmed.indexOf(marker, idx);
-                if (found === -1) break;
-                count++;
-                idx = found + marker.length;
-              }
-              netIncrease -= count;
+              netIncrease += countMarkersInLine(line, marker, -1);
             }
           }
         }
         if (netIncrease > 0) {
-          // Check for exemption in issue body
-          const issueBody = state.pipelineState.issueBodyArtifact?.trim() ?? "";
-          if (/\[skip-exempt:/i.test(issueBody)) {
-            notes.push(
-              `diff adds ${netIncrease} skipped-test marker(s) but issue body contains [skip-exempt: ...] — ratchet exempted`,
-            );
-          } else {
-            failures.push(
-              `diff adds ${netIncrease} skipped-test marker(s) — a skipped test is a disabled gate`,
-            );
-          }
+          failures.push(
+            `diff adds ${netIncrease} skipped-test marker(s) — a skipped test is a disabled gate`,
+          );
         }
       }
     } else {

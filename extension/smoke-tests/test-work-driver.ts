@@ -5055,57 +5055,8 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
             const gate = await verifyStepOutcome(ctx, s, "develop");
             const markerFail = gate.failures.find((f) => /skip.*marker/.test(f));
             assert(
-              !gate.ok && markerFail !== undefined && /[0-9]+/.test(markerFail),
+              !gate.ok && markerFail !== undefined && markerFail.includes("3"),
               "PR277: net increase of skip markers fails gate with correct count",
-            );
-          } finally {
-            rmSync(dir, { recursive: true, force: true });
-          }
-        }
-
-        // --- Skip-ratchet: exemption in issue body allows path ---
-        {
-          const dir = mkdtempSync(path.join(tmpdir(), "pr277-exempt-"));
-          try {
-            fsSync.mkdirSync(path.join(dir, ".pi"), { recursive: true });
-            fsSync.writeFileSync(path.join(dir, ".pi", "verify-cmd"), "echo ok\n");
-            let s = initialState(1001, 1002);
-            s = {
-              ...s,
-              pipelineState: {
-                ...s.pipelineState,
-                worktrees: { default: dir },
-                baseSha: "abc123",
-                issueBodyArtifact: "fixing flaky test\n[skip-exempt: test is unstable in CI]",
-              },
-            };
-            const execWithSkipMarkers2: NonNullable<DriverContext["verifyExecFn"]> = async (
-              cmd,
-            ) => {
-              if (cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
-              if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
-              if (cmd.startsWith("git diff")) {
-                return { stdout: '+#[ignore]\n+it.skip("test1");\n' };
-              }
-              return { stdout: "" };
-            };
-            const ctx: DriverContext = {
-              pi: makeFakePi().pi,
-              repoRoot: dir,
-              issue: 1001,
-              issueBodyFetcherFn: () => ({
-                stdout: "fixing flaky test\n[skip-exempt: test is unstable in CI]",
-              }),
-              verifyExecFn: execWithSkipMarkers2,
-            };
-            const gate = await verifyStepOutcome(ctx, s, "develop");
-            assert(
-              gate.ok && !gate.failures.some((f) => /skip.*marker/.test(f)),
-              "PR277: exemption in issue body prevents failure",
-            );
-            assert(
-              gate.notes.some((n) => /skip-exempt/.test(n) && /exempted/.test(n)),
-              "PR277: exemption produces note not failure",
             );
           } finally {
             rmSync(dir, { recursive: true, force: true });
@@ -5188,15 +5139,9 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
               verifyExecFn: execWithFalsePositives,
             };
             const gate = await verifyStepOutcome(ctx, s, "develop");
-            // Note: This test documents current known limitation. Lines like
-            // console.log('it.skip(') will false-positive because the marker
-            // appears in a string. A full fix would require AST parsing or
-            // more sophisticated string detection. This is a MINOR issue per
-            // the adversarial review.
-            // For now we expect the failure to document the limitation.
             assert(
-              !gate.ok && gate.failures.some((f) => /skip.*marker/.test(f)),
-              "PR277: documenting current false-positive behavior for strings (known limitation)",
+              gate.ok && !gate.failures.some((f) => /skip.*marker/.test(f)),
+              "PR277: markers in comments and strings should be excluded, not counted",
             );
           } finally {
             rmSync(dir, { recursive: true, force: true });
@@ -5336,8 +5281,11 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
           try {
             fsSync.mkdirSync(path.join(dir, ".pi"), { recursive: true });
             fsSync.writeFileSync(path.join(dir, ".pi", "verify-cmd"), "echo ok\n");
-            const testDisable = async (envVar: string, marker: string) => {
-              process.env[envVar] = "0";
+
+            // Test: PI_ENSEMBLE_SMOKE=0 disables smoke gate (skip-ratchet still enabled, so feed harmless diff)
+            const prevSmoke = process.env.PI_ENSEMBLE_SMOKE;
+            process.env.PI_ENSEMBLE_SMOKE = "0";
+            try {
               let s = initialState(1007, 1008);
               s = {
                 ...s,
@@ -5347,45 +5295,68 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
                   baseSha: "abc123",
                 },
               };
-              const exec: NonNullable<DriverContext["verifyExecFn"]> = async (cmd) => {
-                if (cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
+              const execSmokeDisabled: NonNullable<DriverContext["verifyExecFn"]> = async (cmd) => {
+                if (cmd === "git status --porcelain") return { stdout: "M src/main.ts\n" };
                 if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
-                if (cmd.startsWith("git diff")) return { stdout: `+${marker}\n` };
-                if (cmd.includes("run smoke")) throw new Error("Smoke failed");
+                if (cmd.startsWith("git diff")) return { stdout: "+new code\n" }; // No skip markers, so ratchet won't fail
+                if (cmd.includes("run smoke")) throw new Error("Smoke failed"); // Smoke fails but is disabled
                 return { stdout: "" };
               };
-              const ctx: DriverContext = {
+              const ctxSmokeDisabled: DriverContext = {
                 pi: makeFakePi().pi,
                 repoRoot: dir,
                 issue: 1007,
-                issueBodyFetcherFn: () => ({ stdout: "testing env vars" }),
-                verifyExecFn: exec,
+                issueBodyFetcherFn: () => ({ stdout: "testing smoke disable" }),
+                verifyExecFn: execSmokeDisabled,
               };
-              const gate = await verifyStepOutcome(ctx, s, "develop");
-              return gate.ok;
-            };
+              fsSync.mkdirSync(path.join(dir, ".pi"), { recursive: true });
+              fsSync.writeFileSync(path.join(dir, ".pi", "smoke-cmd"), "bun run smoke\n");
+              const smokeDisabled = await verifyStepOutcome(ctxSmokeDisabled, s, "develop");
+              assert(
+                smokeDisabled.ok,
+                "PR277: PI_ENSEMBLE_SMOKE=0 disables smoke gate (failing smoke is ignored)",
+              );
+            } finally {
+              if (prevSmoke === undefined) delete process.env.PI_ENSEMBLE_SMOKE;
+              else process.env.PI_ENSEMBLE_SMOKE = prevSmoke;
+              rmSync(path.join(dir, ".pi", "smoke-cmd"), { force: true });
+            }
 
-            // Smoke-cmd disabled via PI_ENSEMBLE_SMOKE=0
-            fsSync.mkdirSync(path.join(dir, ".pi"), { recursive: true });
-            fsSync.writeFileSync(
-              path.join(dir, ".pi", "smoke-cmd"),
-              "bun run smoke\n",
-            );
-            const smokeDisabled = await testDisable("PI_ENSEMBLE_SMOKE", "#[ignore]");
-            assert(
-              smokeDisabled,
-              "PR277: PI_ENSEMBLE_SMOKE=0 disables smoke gate (failing smoke is ignored)",
-            );
-
-            // Skip-ratchet disabled via PI_ENSEMBLE_SKIP_RATCHET=0
-            const ratchetDisabled = await testDisable(
-              "PI_ENSEMBLE_SKIP_RATCHET",
-              "#[ignore]",
-            );
-            assert(
-              ratchetDisabled,
-              "PR277: PI_ENSEMBLE_SKIP_RATCHET=0 disables skip-ratchet gate",
-            );
+            // Test: PI_ENSEMBLE_SKIP_RATCHET=0 disables skip-ratchet gate (smoke still enabled, so make it pass)
+            const prevRatchet = process.env.PI_ENSEMBLE_SKIP_RATCHET;
+            process.env.PI_ENSEMBLE_SKIP_RATCHET = "0";
+            try {
+              let s = initialState(1008, 1009);
+              s = {
+                ...s,
+                pipelineState: {
+                  ...s.pipelineState,
+                  worktrees: { default: dir },
+                  baseSha: "abc123",
+                },
+              };
+              const execRatchetDisabled: NonNullable<DriverContext["verifyExecFn"]> = async (cmd) => {
+                if (cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
+                if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
+                if (cmd.startsWith("git diff")) return { stdout: '+#[ignore]\n+it.skip("test");\n' }; // Skip markers but ratchet disabled
+                return { stdout: "" };
+              };
+              const ctxRatchetDisabled: DriverContext = {
+                pi: makeFakePi().pi,
+                repoRoot: dir,
+                issue: 1008,
+                issueBodyFetcherFn: () => ({ stdout: "testing ratchet disable" }),
+                verifyExecFn: execRatchetDisabled,
+              };
+              const ratchetDisabled = await verifyStepOutcome(ctxRatchetDisabled, s, "develop");
+              assert(
+                ratchetDisabled.ok,
+                "PR277: PI_ENSEMBLE_SKIP_RATCHET=0 disables skip-ratchet gate",
+              );
+            } finally {
+              if (prevRatchet === undefined) delete process.env.PI_ENSEMBLE_SKIP_RATCHET;
+              else process.env.PI_ENSEMBLE_SKIP_RATCHET = prevRatchet;
+            }
           } finally {
             rmSync(dir, { recursive: true, force: true });
           }
