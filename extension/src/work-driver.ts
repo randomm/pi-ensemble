@@ -2473,15 +2473,20 @@ export async function verifyStepOutcome(
         let count = 0;
         let inSingleQuote = false;
         let inDoubleQuote = false;
+        let inBacktick = false; // Template literals — not parsing ${…} interpolation
         let pos = 0;
         while (pos < trimmed.length) {
           const ch = trimmed[pos];
-          if (!inSingleQuote && !inDoubleQuote) {
+          if (!inSingleQuote && !inDoubleQuote && !inBacktick) {
             // Outside strings: check for markers
             if (ch === '"') {
               inDoubleQuote = true;
             } else if (ch === "'") {
               inSingleQuote = true;
+            } else if (ch === "`") {
+              // Inside backtick string — do not attempt to parse ${…} interpolation;
+              // treat everything until closing backtick as string content.
+              inBacktick = true;
             } else if (trimmed.startsWith(marker, pos)) {
               count++;
               pos += marker.length;
@@ -2497,6 +2502,11 @@ export async function verifyStepOutcome(
             if (ch === "'" && trimmed[pos - 1] !== "\\") {
               inSingleQuote = false;
             }
+          } else if (inBacktick) {
+            // Inside backtick string (template literal)
+            if (ch === "`" && trimmed[pos - 1] !== "\\") {
+              inBacktick = false;
+            }
           }
           pos++;
         }
@@ -2504,6 +2514,12 @@ export async function verifyStepOutcome(
       };
 
       for (const cwd of changedWorktrees) {
+        // F4: if baseSha is absent, note the weakened scope of the check
+        if (!baseSha) {
+          notes.push(
+            "baseSha unavailable — skip-ratchet compared working tree against HEAD only; committed changes not inspected",
+          );
+        }
         let diffContent = "";
         try {
           const { stdout } = await execFn(`git diff ${baseSha ?? "HEAD"} -U0`, {
@@ -2548,7 +2564,10 @@ export async function verifyStepOutcome(
       try {
         const smokeFile = path.join(ctx.repoRoot, ".pi", "smoke-cmd");
         const content = await fs.readFile(smokeFile, "utf8");
-        const firstLine = content.split("\n").find((l) => l.length > 0 && !l.startsWith("#"));
+        const firstLine = content
+          .split("\n")
+          .map((l) => l.trim())
+          .find((l) => l.length > 0 && !l.startsWith("#"));
         smokeCmd = firstLine;
       } catch {
         // No smoke-cmd file — not a failure, just a note

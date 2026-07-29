@@ -5009,8 +5009,8 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     // PR277 — skip-ratchet + smoke-cmd gates. Inject verifyExecFn to
     // return canned diff output with skip-marker patterns, canned
     // smoke-cmd file content, and canned issue bodies. Verify the
-    // verify-failed:develop cap fires with correct evidence, exemption
-    // path produces notes not failures, and env vars disable checks.
+    // verify-failed:develop cap fires with correct evidence and env vars
+    // disable checks with notes.
     {
       const prevSkipRatchet = process.env.PI_ENSEMBLE_SKIP_RATCHET;
       const prevSmoke = process.env.PI_ENSEMBLE_SMOKE;
@@ -5063,7 +5063,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
           }
         }
 
-        // --- Skip-ratchet: net decrease never fails gate ---
+        // --- Skip-ratchet: net zero (addition + removal) passes gate ---
         {
           const dir = mkdtempSync(path.join(tmpdir(), "pr277-decrease-"));
           try {
@@ -5078,13 +5078,14 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
                 baseSha: "abc123",
               },
             };
-            const execWithRemovedMarkers: NonNullable<DriverContext["verifyExecFn"]> = async (
+            // Diff has one addition and one removal, netting to zero — exercises the net-delta arithmetic
+            const execWithNetZeroMarkers: NonNullable<DriverContext["verifyExecFn"]> = async (
               cmd,
             ) => {
               if (cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
               if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
               if (cmd.startsWith("git diff")) {
-                return { stdout: '-#[ignore]\n-it.skip("old");\n' };
+                return { stdout: '+it.skip("new");\n-#[ignore]\n' };
               }
               return { stdout: "" };
             };
@@ -5092,20 +5093,43 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
               pi: makeFakePi().pi,
               repoRoot: dir,
               issue: 1002,
-              issueBodyFetcherFn: () => ({ stdout: "removing old skips" }),
-              verifyExecFn: execWithRemovedMarkers,
+              issueBodyFetcherFn: () => ({ stdout: "replacing skips" }),
+              verifyExecFn: execWithNetZeroMarkers,
             };
             const gate = await verifyStepOutcome(ctx, s, "develop");
             assert(
               gate.ok && !gate.failures.some((f) => /skip.*marker/.test(f)),
-              "PR277: net decrease of markers never fails gate",
+              "PR277: net-zero markers (addition + removal) pass gate — net-delta arithmetic is exercised",
+            );
+            // Also verify net-negative (more removals than additions) does not fail
+            const execWithNetNegative: NonNullable<DriverContext["verifyExecFn"]> = async (
+              cmd,
+            ) => {
+              if (cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
+              if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
+              if (cmd.startsWith("git diff")) {
+                return { stdout: '+it.skip("new");\n-#[ignore]\n-it.skip("old");\n' };
+              }
+              return { stdout: "" };
+            };
+            const ctxNegative: DriverContext = {
+              pi: makeFakePi().pi,
+              repoRoot: dir,
+              issue: 1002,
+              issueBodyFetcherFn: () => ({ stdout: "removing more skips" }),
+              verifyExecFn: execWithNetNegative,
+            };
+            const gateNegative = await verifyStepOutcome(ctxNegative, s, "develop");
+            assert(
+              gateNegative.ok && !gateNegative.failures.some((f) => /skip.*marker/.test(f)),
+              "PR277: net-negative markers (more removals) do not produce marker failure",
             );
           } finally {
             rmSync(dir, { recursive: true, force: true });
           }
         }
 
-        // --- Skip-ratchet: comments and strings are excluded ---
+        // --- Skip-ratchet: comments, strings, and template literals are excluded ---
         {
           const dir = mkdtempSync(path.join(tmpdir(), "pr277-false-positive-"));
           try {
@@ -5126,7 +5150,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
                 if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
                 if (cmd.startsWith("git diff")) {
                   return {
-                    stdout: "+// TODO: convert to it.skip\n+console.log('it.skip(')\n+'actual code'",
+                    stdout: `+// TODO: convert to it.skip\n+console.log('it.skip(')\n+\`it.skip("test")\`\n+'actual code'`,
                   };
                 }
                 return { stdout: "" };
@@ -5141,7 +5165,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
             const gate = await verifyStepOutcome(ctx, s, "develop");
             assert(
               gate.ok && !gate.failures.some((f) => /skip.*marker/.test(f)),
-              "PR277: markers in comments and strings should be excluded, not counted",
+              "PR277: markers in comments, strings, and template literals should be excluded, not counted",
             );
           } finally {
             rmSync(dir, { recursive: true, force: true });
@@ -5313,8 +5337,9 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
               fsSync.writeFileSync(path.join(dir, ".pi", "smoke-cmd"), "bun run smoke\n");
               const smokeDisabled = await verifyStepOutcome(ctxSmokeDisabled, s, "develop");
               assert(
-                smokeDisabled.ok,
-                "PR277: PI_ENSEMBLE_SMOKE=0 disables smoke gate (failing smoke is ignored)",
+                smokeDisabled.ok
+                  && smokeDisabled.notes.some((n) => /PI_ENSEMBLE_SMOKE=0/.test(n)),
+                "PR277: PI_ENSEMBLE_SMOKE=0 disables smoke gate (failing smoke is ignored) and emits disabled note",
               );
             } finally {
               if (prevSmoke === undefined) delete process.env.PI_ENSEMBLE_SMOKE;
@@ -5350,8 +5375,9 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
               };
               const ratchetDisabled = await verifyStepOutcome(ctxRatchetDisabled, s, "develop");
               assert(
-                ratchetDisabled.ok,
-                "PR277: PI_ENSEMBLE_SKIP_RATCHET=0 disables skip-ratchet gate",
+                ratchetDisabled.ok
+                  && ratchetDisabled.notes.some((n) => /PI_ENSEMBLE_SKIP_RATCHET=0/.test(n)),
+                "PR277: PI_ENSEMBLE_SKIP_RATCHET=0 disables skip-ratchet gate and emits disabled note",
               );
             } finally {
               if (prevRatchet === undefined) delete process.env.PI_ENSEMBLE_SKIP_RATCHET;
