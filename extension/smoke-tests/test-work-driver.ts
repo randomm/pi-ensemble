@@ -42,6 +42,7 @@ import {
   MAX_ISSUES_PER_GROUP,
   verifyCmdFor,
   verifyStepOutcome,
+  countSkipMarkersInDiffLine,
   renderHandoffMarkdown,
   renderHandoffUserMessage,
   runWorkDriver,
@@ -5415,6 +5416,121 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     if (prevMech === undefined) delete process.env.PI_ENSEMBLE_MECHANIZE_OPS;
     else process.env.PI_ENSEMBLE_MECHANIZE_OPS = prevMech;
   }
+}
+
+// ============================================================================
+// PR277 — R7: direct unit tests for countSkipMarkersInDiffLine
+// ============================================================================
+{
+  // R1 regression: even number of backslashes — the quote DOES terminate.
+  assert(
+    countSkipMarkersInDiffLine('+const p = "a\\\\"; it.skip("x")') === 1,
+    "R7: even backslashes before quote — quote terminates, marker after string counts",
+  );
+
+  // #[ignore] alone on a line counts 1 (Rust attribute, not a comment).
+  assert(
+    countSkipMarkersInDiffLine("+#[ignore]") === 1,
+    "R7: #[ignore] alone counts 1 (Rust attribute)",
+  );
+
+  // Shell comment with # prefix — should NOT count.
+  assert(
+    countSkipMarkersInDiffLine('+# a shell comment mentioning it.skip(') === 0,
+    "R7: shell comment # it.skip( counts 0",
+  );
+
+  // Multiple same-marker instances on one line.
+  assert(
+    countSkipMarkersInDiffLine('+it.skip("a"); it.skip("b"); it.skip("c")') === 3,
+    "R7: three it.skip( on one line counts 3",
+  );
+
+  // Marker inside double quotes counts 0.
+  assert(
+    countSkipMarkersInDiffLine('+console.log("it.skip(")') === 0,
+    "R7: it.skip( inside double quotes counts 0",
+  );
+
+  // Marker inside single quotes counts 0.
+  assert(
+    countSkipMarkersInDiffLine("+console.log('it.skip(')") === 0,
+    "R7: it.skip( inside single quotes counts 0",
+  );
+
+  // Marker inside backtick template literal counts 0.
+  assert(
+    countSkipMarkersInDiffLine('+`it.skip("test")`') === 0,
+    "R7: it.skip( inside backticks counts 0",
+  );
+
+  // R2 regression: trailing comment — should NOT count.
+  assert(
+    countSkipMarkersInDiffLine('+code(); // it.skip("later")') === 0,
+    "R7: trailing comment // it.skip( counts 0",
+  );
+
+  // "http://example.com" followed by a real marker — the // inside string
+  // must NOT start a comment, so the real marker still counts.
+  assert(
+    countSkipMarkersInDiffLine('+const u = "http://example.com"; it.skip("x")') === 1,
+    "R7: // inside string does not start comment; real marker after counts 1",
+  );
+
+  // C-style comment line — should NOT count.
+  assert(
+    countSkipMarkersInDiffLine('+// TODO: convert to it.skip(') === 0,
+    "R7: full line // comment counts 0",
+  );
+
+  // Multi-line comment start — should NOT count.
+  assert(
+    countSkipMarkersInDiffLine('+/* it.skip("test") */') === 0,
+    "R7: /* comment start counts 0",
+  );
+
+  // Multi-line comment continuation — should NOT count.
+  assert(
+    countSkipMarkersInDiffLine('+* it.skip("test")') === 0,
+    "R7: * comment continuation counts 0",
+  );
+
+  // ODD number of backslashes — the quote IS escaped, marker is still in string.
+  assert(
+    countSkipMarkersInDiffLine('+const p = "a\\"; it.skip("x")') === 0,
+    "R7: odd backslashes (1) — quote escaped, marker in string counts 0",
+  );
+
+  // describe.skip(
+  assert(
+    countSkipMarkersInDiffLine('+describe.skip("suite")') === 1,
+    "R7: describe.skip( counts 1",
+  );
+
+  // @Disabled
+  assert(
+    countSkipMarkersInDiffLine('+@Disabled') === 1,
+    "R7: @Disabled counts 1",
+  );
+
+  // pytest.mark.skip
+  assert(
+    countSkipMarkersInDiffLine('+@pytest.mark.skip(reason="flaky")') === 1,
+    "R7: pytest.mark.skip counts 1",
+  );
+
+  // t.Skip(
+  assert(
+    countSkipMarkersInDiffLine('+t.Skip("no db")') === 1,
+    "R7: t.Skip( counts 1",
+  );
+
+  // Negative line (removal) — countSkipMarkersInDiffLine returns positive count,
+  // caller applies the sign.
+  assert(
+    countSkipMarkersInDiffLine('-it.skip("old")') === 1,
+    "R7: negative line returns positive count (sign applied by caller)",
+  );
 }
 
 // ============================================================================

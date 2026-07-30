@@ -2291,6 +2291,126 @@ export async function verifyCmdFor(repoRoot: string): Promise<string | undefined
   return undefined;
 }
 
+/**
+ * Skip-marker counters — PR277.
+ *
+ * Scans a single diff line (including the leading +/-) for skip markers,
+ * excluding comments and string literals. Single-pass over all markers.
+ *
+ * R1 fix: counts consecutive backslashes ending at pos-1; a quote is
+ *   escaped only when that count is ODD (even count = quote terminates).
+ * R2 fix: while outside strings, "//" starts a line comment and the
+ *   remainder is ignored (but "//" inside a string does NOT start a
+ *   comment).
+ */
+
+// Markers the skip-ratchet gate detects. Must stay in sync with the set
+// used by verifyStepOutcome when PI_ENSEMBLE_SKIP_RATCHET is active.
+const SKIP_MARKERS = [
+  "#[ignore]",
+  "it.skip(",
+  "describe.skip(",
+  "test.skip(",
+  "@Disabled",
+  "pytest.mark.skip",
+  "t.Skip(",
+] as const;
+
+/**
+ * Count consecutive occurrences of `ch` going backwards from `index`
+ * (exclusive) in `str`. Stops at the first non-matching character.
+ */
+function countConsecutiveBackwards(str: string, ch: string, index: number): number {
+  let count = 0;
+  let i = index - 1;
+  while (i >= 0 && str[i] === ch) {
+    count++;
+    i--;
+  }
+  return count;
+}
+
+/**
+ * Count skip markers in a single diff line (including the leading +/-
+ * indicator). Returns the number of markers found, excluding those
+ * inside comments or string literals.
+ *
+ * Single-pass: walks the line once, tracking quote-state and comment
+ * state simultaneously.
+ */
+export function countSkipMarkersInDiffLine(line: string): number {
+  // Remove the leading +/- and leading whitespace.
+  const trimmed = line.slice(1).trimStart();
+
+  // Skip lines that are entirely comments (but NOT Rust attributes like #[ignore]).
+  if (trimmed.startsWith("//")) return 0;
+  if (trimmed.startsWith("/*")) return 0;
+  if (trimmed.startsWith("*")) return 0;
+  if (trimmed.startsWith("#") && !trimmed.startsWith("#[")) return 0;
+
+  let count = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let inLineComment = false;
+  let pos = 0;
+
+  while (pos < trimmed.length) {
+    const ch = trimmed[pos];
+
+    if (inLineComment) {
+      // Rest of line is a comment — no markers counted.
+      pos++;
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      if (ch === '"' && countConsecutiveBackwards(trimmed, "\\", pos) % 2 === 0) {
+        inDoubleQuote = false;
+      }
+    } else if (inSingleQuote) {
+      if (ch === "'" && countConsecutiveBackwards(trimmed, "\\", pos) % 2 === 0) {
+        inSingleQuote = false;
+      }
+    } else if (inBacktick) {
+      if (ch === "`" && countConsecutiveBackwards(trimmed, "\\", pos) % 2 === 0) {
+        inBacktick = false;
+      }
+    } else {
+      // Outside any string or comment.
+      // Check for line-comment start.
+      if (ch === "/" && trimmed[pos + 1] === "/") {
+        inLineComment = true;
+        pos += 2;
+        continue;
+      }
+
+      // Check for string starts.
+      if (ch === '"') {
+        inDoubleQuote = true;
+      } else if (ch === "'") {
+        inSingleQuote = true;
+      } else if (ch === "`") {
+        inBacktick = true;
+      } else {
+        // Check for any skip marker.
+        for (const marker of SKIP_MARKERS) {
+          if (trimmed.startsWith(marker, pos)) {
+            count++;
+            pos += marker.length - 1; // -1 because pos++ at end of loop
+            // Marker consumed; break to avoid overlapping matches.
+            break;
+          }
+        }
+      }
+    }
+
+    pos++;
+  }
+
+  return count;
+}
+
 /** PR17 — bounded wall-clock for the verify command (default 10 min). */
 function verifyTimeoutMs(): number {
   const env = Number(process.env.PI_ENSEMBLE_VERIFY_TIMEOUT_MS);
@@ -2441,78 +2561,6 @@ export async function verifyStepOutcome(
     // Counts net increase in test skip markers to prevent disabling gates.
     // Excludes comments, strings, and documentation to avoid false positives.
     if (process.env.PI_ENSEMBLE_SKIP_RATCHET !== "0") {
-      const SKIP_MARKERS = [
-        "#[ignore]",
-        "it.skip(",
-        "describe.skip(",
-        "test.skip(",
-        "@Disabled",
-        "pytest.mark.skip",
-        "t.Skip(",
-      ];
-
-      // Helper: count marker occurrences in a line, excluding comments and strings.
-      // Returns the net count (positive for additions, negative for removals).
-      const countMarkersInLine = (line: string, marker: string, sign: 1 | -1): number => {
-        const trimmed = line.slice(1).trimStart(); // Remove leading '+'/'-' and leading spaces
-
-        // Skip comment lines (but NOT Rust attributes like #[ignore])
-        if (trimmed.startsWith("//")) return 0; // C-style single-line comment
-        if (trimmed.startsWith("/*")) return 0; // C-style multi-line comment start
-        if (trimmed.startsWith("*")) return 0; // Multi-line comment continuation
-        if (trimmed.startsWith("#")) {
-          // Shell/Python comment, NOT a Rust attribute (#[...])
-          if (!trimmed.startsWith("#[")) return 0;
-        }
-
-        // Count markers outside of string literals. This basic heuristic
-        // works for common patterns like console.log('it.skip(') where
-        // the marker appears in a string. It's not perfect (AST parsing
-        // would be required for full correctness), but it catches false
-        // positives in typical code.
-        let count = 0;
-        let inSingleQuote = false;
-        let inDoubleQuote = false;
-        let inBacktick = false; // Template literals — not parsing ${…} interpolation
-        let pos = 0;
-        while (pos < trimmed.length) {
-          const ch = trimmed[pos];
-          if (!inSingleQuote && !inDoubleQuote && !inBacktick) {
-            // Outside strings: check for markers
-            if (ch === '"') {
-              inDoubleQuote = true;
-            } else if (ch === "'") {
-              inSingleQuote = true;
-            } else if (ch === "`") {
-              // Inside backtick string — do not attempt to parse ${…} interpolation;
-              // treat everything until closing backtick as string content.
-              inBacktick = true;
-            } else if (trimmed.startsWith(marker, pos)) {
-              count++;
-              pos += marker.length;
-              continue;
-            }
-          } else if (inDoubleQuote) {
-            // Inside double-quoted string
-            if (ch === '"' && trimmed[pos - 1] !== "\\") {
-              inDoubleQuote = false;
-            }
-          } else if (inSingleQuote) {
-            // Inside single-quoted string
-            if (ch === "'" && trimmed[pos - 1] !== "\\") {
-              inSingleQuote = false;
-            }
-          } else if (inBacktick) {
-            // Inside backtick string (template literal)
-            if (ch === "`" && trimmed[pos - 1] !== "\\") {
-              inBacktick = false;
-            }
-          }
-          pos++;
-        }
-        return count * sign;
-      };
-
       // F4: if baseSha is absent, note the weakened scope of the check
       if (!baseSha) {
         notes.push(
@@ -2525,28 +2573,24 @@ export async function verifyStepOutcome(
         try {
           const { stdout } = await execFn(`git diff ${baseSha ?? "HEAD"} -U0`, {
             cwd,
-            maxBuffer: 8 * 1024 * 1024,
+            timeout: verifyTimeoutMs(),
+            maxBuffer: 64 * 1024 * 1024,
           });
           diffContent = stdout;
         } catch (err) {
-          notes.push(
-            `git diff failed in ${cwd} (${(err as Error).message?.slice(0, 100)}) — skip-ratchet check skipped`,
+          failures.push(
+            `skip-ratchet: git diff failed in ${cwd} (${(err as Error).message?.slice(0, 100)}) — cannot inspect diff`,
           );
-          continue;
         }
+        if (!diffContent) continue;
+
         let netIncrease = 0;
         const lines = diffContent.split("\n");
         for (const line of lines) {
           if (line.startsWith("+")) {
-            // Added line
-            for (const marker of SKIP_MARKERS) {
-              netIncrease += countMarkersInLine(line, marker, 1);
-            }
+            netIncrease += countSkipMarkersInDiffLine(line);
           } else if (line.startsWith("-")) {
-            // Removed line
-            for (const marker of SKIP_MARKERS) {
-              netIncrease += countMarkersInLine(line, marker, -1);
-            }
+            netIncrease -= countSkipMarkersInDiffLine(line);
           }
         }
         if (netIncrease > 0) {
