@@ -5581,6 +5581,34 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     countSkipMarkersInDiffLine('+code() /* it.skip("x") */') === 1,
     "R7: known limitation: mid-line block comment is not filtered (false positive)",
   );
+
+  // F1 invariant: no SKIP_MARKERS entry is a proper prefix of another.
+  // This pins the corrected break→continue semantics in
+  // countSkipMarkersInDiffLine: the word-boundary guard uses `continue` so
+  // the loop genuinely tries the next marker after a boundary rejection.
+  // With the current marker set this distinction is latent (no marker is a
+  // prefix of another), but it is a live trap: adding `pytest.mark.skipif`
+  // after `pytest.mark.skip` would silently never match the longer marker
+  // if the guard used `break`. This invariant fails loudly the day someone
+  // adds an overlapping marker, exactly when the break→continue fix matters.
+  const markers = [
+    "#[ignore]",
+    "it.skip(",
+    "describe.skip(",
+    "test.skip(",
+    "@Disabled",
+    "pytest.mark.skip",
+    "t.Skip(",
+  ];
+  for (const a of markers) {
+    for (const b of markers) {
+      if (a === b) continue;
+      assert(
+        !b.startsWith(a),
+        `R7 invariant: "${a}" is not a proper prefix of "${b}" — if this fails, the word-boundary loop must use 'continue' (not 'break')`,
+      );
+    }
+  }
 }
 
 // ============================================================================

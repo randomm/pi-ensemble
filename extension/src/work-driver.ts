@@ -2432,7 +2432,7 @@ export function countSkipMarkersInDiffLine(line: string): number {
             const afterPos = pos + marker.length;
             const nextCh = afterPos < trimmed.length ? trimmed[afterPos] : undefined;
             if (nextCh !== undefined && /[A-Za-z0-9_]/.test(nextCh)) {
-              break; // word-boundary not met; try next marker
+              continue; // word-boundary not met; try next marker
             }
             count++;
             pos += marker.length;
