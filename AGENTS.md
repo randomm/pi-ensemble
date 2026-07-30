@@ -14,7 +14,7 @@ CI is for VERIFICATION, not DISCOVERY. All gates pass locally before `git push`.
 cd extension && bunx tsc --noEmit && bun run check && \
   for t in smoke-tests/test-*.ts; do \
     case "$t" in *-live.ts) continue;; esac; \
-    bun run "$t" || break; \
+    bun run "$t" || exit 1; \
   done
 ```
 
