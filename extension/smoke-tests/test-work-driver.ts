@@ -96,6 +96,18 @@ const mockIssueBodyOk = async (issue: number, _cwd: string) => ({
 // retry.
 process.env.PI_ENSEMBLE_TRANSIENT_RETRY_BACKOFF_MS = "0";
 
+// Offline-suite safety net: a few flow tests deliberately reach the
+// adversarial / lens steps without injecting a loopFn (they only assert the
+// cycle HALTS, not the review verdict). Those steps call the real
+// spawnSpecialist, which would launch a live `pi` child — slow and flaky,
+// and now doubly so since #298's internal infra-retry re-spawns on failure
+// (with the #296-raised 45-min role cap as the wall-clock bound). Cap any
+// such accidental live spawn at 2s so the suite stays deterministic and
+// fast. Mocked dispatches (ctx.dispatchFn) never hit spawnSpecialist and are
+// unaffected; test-cancel.ts exercises the real timeout paths separately.
+process.env.PI_ENSEMBLE_SPAWN_TIMEOUT_MS = "2000";
+process.env.PI_ENSEMBLE_INACTIVITY_TIMEOUT_MS = "2000";
+
 // PR17 — the outcome-verification gate shells out (git status/rev-list,
 // verify command, gh pr view) against the driver's repoRoot/worktrees.
 // The flow tests below run in fake tmp dirs that aren't git repos and
