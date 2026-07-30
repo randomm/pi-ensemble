@@ -6107,6 +6107,14 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
         throw new Error(`unexpected dispatch: ${spec.role} / ${opts?.label}`);
       },
+      adversarialLoopFn: async () => {
+        return mkResult({
+          role: "adversarial-loop",
+          ok: true,
+          loopOutcome: "approved",
+          text: "Adversarial APPROVED.",
+        });
+      },
     };
 
     await runWorkDriver(ctx).catch(() => {});
@@ -6385,6 +6393,14 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
         throw new Error(`unexpected dispatch: ${spec.role} / ${opts?.label}`);
       },
+      adversarialLoopFn: async () => {
+        return mkResult({
+          role: "adversarial-loop",
+          ok: true,
+          loopOutcome: "approved",
+          text: "Adversarial APPROVED.",
+        });
+      },
     };
 
     await runWorkDriver(ctx).catch(() => {});
@@ -6505,6 +6521,14 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
         throw new Error(`unexpected dispatch: ${spec.role} / ${opts?.label}`);
       },
+      adversarialLoopFn: async () => {
+        return mkResult({
+          role: "adversarial-loop",
+          ok: true,
+          loopOutcome: "approved",
+          text: "Adversarial APPROVED.",
+        });
+      },
     };
 
     await runWorkDriver(ctx).catch(() => {});
@@ -6535,6 +6559,148 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     assert(
       lsFiles.trim() === "safe-helper.ts",
       "new file is tracked in the committed tree",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// 48b. Issue #305 — adversarial receives lens-fix diff BEFORE commit.
+//
+// Proves the fix: commit AFTER adversarial-approved (changed in this PR)
+// means adversarial reads the working-tree diff (git diff HEAD) which
+// contains the uncommitted lens-fix changes. If commit happened BEFORE
+// adversarial (bug #305 original state), the tree would be clean at
+// adversarial review time and params.diff would be empty — this test
+// would FAIL, exposing the defect.
+{
+  const dir = mkdtempSync(path.join(tmpdir(), "work-driver-lens-fix-adversarial-diff-"));
+  try {
+    const fs = await import("node:fs/promises");
+    const { promisify } = await import("node:util");
+    const { exec } = await import("node:child_process");
+    const execp = promisify(exec);
+
+    // Real git repo with a committed feature branch.
+    await execp("git init -q", { cwd: dir });
+    await execp('git config user.email "t@t" && git config user.name "T"', {
+      cwd: dir,
+      shell: "/bin/bash",
+    });
+    await fs.writeFile(path.join(dir, "base.txt"), "hello\n");
+    await execp("git add base.txt && git commit -q -m initial", { cwd: dir, shell: "/bin/bash" });
+    await execp("git update-ref refs/remotes/origin/main HEAD", { cwd: dir });
+    await execp("git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main", {
+      cwd: dir,
+    });
+    await execp("git checkout -qb feature/lens-adversarial-diff", { cwd: dir });
+    await fs.writeFile(path.join(dir, "feature.txt"), "const x = eval(input);\n");
+    await execp("git add feature.txt && git commit -q -m 'feature with bug'", {
+      cwd: dir,
+      shell: "/bin/bash",
+    });
+
+    // Pre-seed at lens-fix step with a lens-issues-found event.
+    let s = initialState(309, 1_000_000);
+    s = {
+      ...s,
+      pipelineState: {
+        ...s.pipelineState,
+        currentStep: "lens-fix",
+        lastCompletedStep: "commit-pr",
+        worktrees: { default: dir },
+        workstreams: {
+          default: { id: "default", scope: "test", paths: [], outOfScope: [] },
+        },
+        branchName: "feature/lens-adversarial-diff",
+        prNumber: 3090,
+        reviewRound: 1,
+      },
+      eventLog: [
+        {
+          kind: "lens-issues-found" as const,
+          at: 2_000_000,
+          jobId: "j-lens-1",
+          round: 1,
+          findings: JSON.stringify([
+            {
+              lens: "SECURITY",
+              severity: "MEDIUM",
+              path: "feature.txt",
+              line: 1,
+              title: "eval() usage",
+              description: "Use of eval is unsafe",
+              suggestion: "Replace with safeParse(input)",
+            },
+          ]),
+          verdict: "ISSUES_FOUND" as const,
+        },
+      ],
+    };
+    await writeState(dir, s);
+
+    // Capture the diff passed to adversarialLoopFn.
+    const capturedDiffs: string[] = [];
+    const ctx: DriverContext = {
+      pi: makeFakePi().pi,
+      repoRoot: dir,
+      issue: 309,
+      issueBodyFetcherFn: mockIssueBodyOk,
+      dispatchFn: async (_pi, spec, opts) => {
+        // lens-fix dispatch: make a change in the working tree.
+        if (opts?.label?.startsWith("developer:lens-fix")) {
+          await fs.writeFile(path.join(dir, "feature.txt"), "const x = safeParse(input);\n");
+          return mkResult({
+            role: "developer",
+            ok: true,
+            text: "Fixed the eval usage.",
+          });
+        }
+
+        if (opts?.label === "ops:handoff") {
+          return mkResult({ role: "ops", text: "Posted." });
+        }
+
+        throw new Error(`unexpected dispatch: ${spec.role} / ${opts?.label}`);
+      },
+      adversarialLoopFn: async (params) => {
+        // Capture the diff BEFORE the commit happens.
+        capturedDiffs.push(params.diff);
+        // APPROVE the fix.
+        return mkResult({
+          role: "adversarial-loop",
+          ok: true,
+          loopOutcome: "approved",
+          text: "Adversarial APPROVED.",
+        });
+      },
+    };
+
+    await runWorkDriver(ctx).catch(() => {});
+
+    // Verify adversarial received a diff containing the fix.
+    assert(
+      capturedDiffs.length === 1,
+      `adversarialLoopFn called once (got ${capturedDiffs.length})`,
+    );
+    assert(
+      capturedDiffs.some((d) => d.includes("safeParse")),
+      "adversarial diff contains the lens-fix changes (uncommitted before review)",
+    );
+    assert(
+      capturedDiffs[0].includes("-const x = eval(input);"),
+      "adversarial diff shows the removed unsafe eval line",
+    );
+    assert(
+      capturedDiffs[0].includes("+const x = safeParse(input);"),
+      "adversarial diff shows the added safeParse line",
+    );
+
+    // Verify the driver still committed after adversarial approved.
+    const { stdout: log } = await execp("git log --format=%s -1", { cwd: dir });
+    assert(
+      log.includes("fix(lens)"),
+      `commit message references lens-fix (got: ${log.trim()})`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

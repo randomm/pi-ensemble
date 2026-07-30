@@ -1779,6 +1779,32 @@ async function runAdversarial(
       jobId: aggregateJobId,
       rounds: maxRounds,
     });
+
+    // Issue #305 — commit lens-fix changes AFTER adversarial approves.
+    // runLensFix leaves fix uncommitted in the working tree so adversarial
+    // can review it via fetchDiff (git diff HEAD). Only commit on approval
+    // so rejected fixes stay visible for inspection in handoff.
+    if (state.pipelineState.lastCompletedStep === "lens-fix" && ids.length === 1) {
+      // N>1 case is not supported for lens-fix workflow (lens-fix runs
+      // against the consolidated main repo after commit-pr, not per-worktree).
+      const execFn = ctx.verifyExecFn ?? execp;
+      const committed = await commitLensFixChanges(
+        ctx.repoRoot,
+        state.pipelineState.reviewRound,
+        execFn,
+      );
+      if (committed) {
+        // Push the commit so the remote branch (and PR) are updated for
+        // the next lens-review round and CI.
+        try {
+          await execFn("git push origin HEAD -q", { cwd: ctx.repoRoot, maxBuffer: 64 * 1024 });
+        } catch (err) {
+          trace(
+            `work-driver: lens-fix push failed (non-blocking): ${(err as Error).message?.slice(0, 200)}`,
+          );
+        }
+      }
+    }
   } else if (failed.every((o) => o.infra) && ids.length === 1) {
     // N>1 keeps the legacy aggregate below: its tail is branches-converged,
     // which the RETRY_ONCE router doesn't intercept, so dropping the verdict
@@ -2998,34 +3024,6 @@ async function runLensFix(ctx: DriverContext, state: WorkState, now: number): Pr
     now,
     () => inlineLensFixPrompt(findings, scratchDir(ctx.repoRoot, ctx.issue)),
   );
-
-  // Issue #305 — commit the fix before the next lens-review reads its diff.
-  // runSingleDispatch returns a dispatch-completed event on success.
-  // Only commit if the dispatch succeeded.
-  const lastEvent = next.eventLog[next.eventLog.length - 1];
-  if (lastEvent?.kind === "dispatch-completed" && lastEvent.ok) {
-    // Determine the cwd for git operations. For N=1 (the common case),
-    // worktrees is {default: repoRoot}. For N>1, lens-fix runs against
-    // the consolidated main repo (commit-pr already merged worktrees).
-    // Either way, ctx.repoRoot is the correct target.
-    const execFn = ctx.verifyExecFn ?? execp;
-    const committed = await commitLensFixChanges(
-      ctx.repoRoot,
-      state.pipelineState.reviewRound,
-      execFn,
-    );
-    if (committed) {
-      // Push the commit so the remote branch (and PR) are updated for
-      // the next lens-review round and CI.
-      try {
-        await execFn("git push origin HEAD -q", { cwd: ctx.repoRoot, maxBuffer: 64 * 1024 });
-      } catch (err) {
-        trace(
-          `work-driver: lens-fix push failed (non-blocking): ${(err as Error).message?.slice(0, 200)}`,
-        );
-      }
-    }
-  }
 
   return next;
 }
