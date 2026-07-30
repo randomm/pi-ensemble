@@ -2513,13 +2513,14 @@ export async function verifyStepOutcome(
         return count * sign;
       };
 
+      // F4: if baseSha is absent, note the weakened scope of the check
+      if (!baseSha) {
+        notes.push(
+          "baseSha unavailable — skip-ratchet compared working tree against HEAD only; committed changes not inspected",
+        );
+      }
+
       for (const cwd of changedWorktrees) {
-        // F4: if baseSha is absent, note the weakened scope of the check
-        if (!baseSha) {
-          notes.push(
-            "baseSha unavailable — skip-ratchet compared working tree against HEAD only; committed changes not inspected",
-          );
-        }
         let diffContent = "";
         try {
           const { stdout } = await execFn(`git diff ${baseSha ?? "HEAD"} -U0`, {
