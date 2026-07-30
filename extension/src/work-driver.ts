@@ -2888,10 +2888,97 @@ async function runLens(ctx: DriverContext, state: WorkState, now: number): Promi
 }
 
 /**
+ * Issue #305 — Mechanically commit lens-fix changes in the worktree.
+ *
+ * Called by runLensFix after a successful developer dispatch. Stages and
+ * commits any working-tree changes so the next runLens (which reads
+ * committed state via `git diff origin/<base>..HEAD`) can see the fix.
+ * If no changes exist (developer made no modifications), does nothing —
+ * no empty commit.
+ *
+ * Returns true if a commit was made, false if the working tree was clean.
+ */
+async function commitLensFixChanges(
+  cwd: string,
+  round: number,
+  execFn: (
+    cmd: string,
+    opts?: { cwd?: string; maxBuffer?: number; shell?: string },
+  ) => Promise<{ stdout: string; stderr?: string }>,
+): Promise<boolean> {
+  // Check if there are any changes (staged + unstaged + untracked).
+  try {
+    const { stdout: status } = await execFn("git status --porcelain", {
+      cwd,
+      maxBuffer: 64 * 1024,
+    });
+    if (!status.trim()) {
+      trace(`work-driver: lens-fix round ${round} — working tree clean, skipping commit`);
+      return false;
+    }
+  } catch (err) {
+    trace(
+      `work-driver: lens-fix round ${round} — git status failed: ${(err as Error).message?.slice(0, 200)}`,
+    );
+    return false;
+  }
+
+  // Stage + commit.
+  try {
+    // Stage all porcelain paths explicitly (tracked + untracked) rather
+    // than `git add -u`, so new files created by the developer as part
+    // of the fix are committed. Filter out `.pi/` to avoid staging
+    // driver artefacts like .pi/work-state/<issue>.json (#305).
+    // Mirrors the stagePorcelainPaths pattern used by mechanizedCommitPr.
+    const { stdout: porcelain } = await execFn("git status --porcelain", {
+      cwd,
+      maxBuffer: 64 * 1024,
+    });
+    const paths: string[] = [];
+    for (const line of porcelain.split("\n")) {
+      if (line.trim().length === 0) continue;
+      const entry = line.slice(3);
+      const arrow = entry.indexOf(" -> ");
+      if (arrow >= 0) {
+        paths.push(entry.slice(0, arrow), entry.slice(arrow + 4));
+      } else {
+        paths.push(entry);
+      }
+    }
+    for (const p of paths) {
+      const clean = p.startsWith('"') && p.endsWith('"') ? p.slice(1, -1) : p;
+      // Skip driver artefacts under .pi/
+      if (clean.startsWith(".pi/")) {
+        continue;
+      }
+      await execFn(`git add -- ${JSON.stringify(clean)}`, { cwd, maxBuffer: 256 * 1024 });
+    }
+    await execFn(`git commit -q -m 'fix(lens): round ${round} — address lens-review findings'`, {
+      cwd,
+      maxBuffer: 64 * 1024,
+    });
+    trace(`work-driver: lens-fix round ${round} — committed fix`);
+    return true;
+  } catch (err) {
+    trace(
+      `work-driver: lens-fix round ${round} — commit failed: ${(err as Error).message?.slice(0, 200)}`,
+    );
+    return false;
+  }
+}
+
+/**
  * Step 7f — Lens fix loop iteration. Dispatches @developer with the
  * findings from the last lens-issues-found event. The driver's transition
  * table routes lens-fix → adversarial → lens-review (or to handoff on cap-
  * hit per nextStep()).
+ *
+ * Issue #305 — after a successful dispatch, the driver mechanically commits
+ * the fix in the worktree. This bridges the gap between runLensFix (which
+ * edits the working tree) and runLens (which reads committed state via
+ * `git diff origin/<base>..HEAD`). Without this commit, the next lens round
+ * sees the same baseline and re-flags the same findings at escalating
+ * severity.
  */
 async function runLensFix(ctx: DriverContext, state: WorkState, now: number): Promise<WorkState> {
   // Find the most recent lens-issues-found in the log to extract findings.
@@ -2902,7 +2989,7 @@ async function runLensFix(ctx: DriverContext, state: WorkState, now: number): Pr
         e.kind === "lens-issues-found",
     );
   const findings = lastFinding?.findings ?? "(no prior findings recorded)";
-  return runSingleDispatch(
+  const next = await runSingleDispatch(
     ctx,
     state,
     "lens-fix",
@@ -2911,6 +2998,36 @@ async function runLensFix(ctx: DriverContext, state: WorkState, now: number): Pr
     now,
     () => inlineLensFixPrompt(findings, scratchDir(ctx.repoRoot, ctx.issue)),
   );
+
+  // Issue #305 — commit the fix before the next lens-review reads its diff.
+  // runSingleDispatch returns a dispatch-completed event on success.
+  // Only commit if the dispatch succeeded.
+  const lastEvent = next.eventLog[next.eventLog.length - 1];
+  if (lastEvent?.kind === "dispatch-completed" && lastEvent.ok) {
+    // Determine the cwd for git operations. For N=1 (the common case),
+    // worktrees is {default: repoRoot}. For N>1, lens-fix runs against
+    // the consolidated main repo (commit-pr already merged worktrees).
+    // Either way, ctx.repoRoot is the correct target.
+    const execFn = ctx.verifyExecFn ?? execp;
+    const committed = await commitLensFixChanges(
+      ctx.repoRoot,
+      state.pipelineState.reviewRound,
+      execFn,
+    );
+    if (committed) {
+      // Push the commit so the remote branch (and PR) are updated for
+      // the next lens-review round and CI.
+      try {
+        await execFn("git push origin HEAD -q", { cwd: ctx.repoRoot, maxBuffer: 64 * 1024 });
+      } catch (err) {
+        trace(
+          `work-driver: lens-fix push failed (non-blocking): ${(err as Error).message?.slice(0, 200)}`,
+        );
+      }
+    }
+  }
+
+  return next;
 }
 
 /**
@@ -4886,7 +5003,7 @@ function inlineLensFixPrompt(findings: string, scratchDirAbs: string): string {
     "  - Make the minimal change per finding. Group by file.",
     "  - Run local quality gates before declaring complete.",
     "  - Do NOT touch unrelated code.",
-    "  - Do NOT commit. Leave the changes uncommitted.",
+    "  - The driver will commit the changes after your dispatch completes.",
     "",
     "Findings (JSON-encoded array of {path, line, severity, title, suggestion}):",
     "```json",
