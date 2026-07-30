@@ -43,6 +43,7 @@ import {
   verifyCmdFor,
   verifyStepOutcome,
   countSkipMarkersInDiffLine,
+  SKIP_MARKERS,
   renderHandoffMarkdown,
   renderHandoffUserMessage,
   runWorkDriver,
@@ -5591,17 +5592,8 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
   // after `pytest.mark.skip` would silently never match the longer marker
   // if the guard used `break`. This invariant fails loudly the day someone
   // adds an overlapping marker, exactly when the break→continue fix matters.
-  const markers = [
-    "#[ignore]",
-    "it.skip(",
-    "describe.skip(",
-    "test.skip(",
-    "@Disabled",
-    "pytest.mark.skip",
-    "t.Skip(",
-  ];
-  for (const a of markers) {
-    for (const b of markers) {
+  for (const a of SKIP_MARKERS) {
+    for (const b of SKIP_MARKERS) {
       if (a === b) continue;
       assert(
         !b.startsWith(a),

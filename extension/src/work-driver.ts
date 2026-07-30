@@ -2306,7 +2306,7 @@ export async function verifyCmdFor(repoRoot: string): Promise<string | undefined
 
 // Markers the skip-ratchet gate detects. Must stay in sync with the set
 // used by verifyStepOutcome when PI_ENSEMBLE_SKIP_RATCHET is active.
-const SKIP_MARKERS = [
+export const SKIP_MARKERS = [
   "#[ignore]",
   "it.skip(",
   "describe.skip(",
