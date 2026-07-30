@@ -5531,6 +5531,56 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     countSkipMarkersInDiffLine('-it.skip("old")') === 1,
     "R7: negative line returns positive count (sign applied by caller)",
   );
+
+  // F1: word-boundary guard — pytest.mark.skipif should NOT match pytest.mark.skip.
+  assert(
+    countSkipMarkersInDiffLine('+pytest.mark.skipif(sys.platform == "win32")') === 0,
+    "R7: pytest.mark.skipif does NOT match pytest.mark.skip (word boundary)",
+  );
+
+  // F1: pytest.mark.skip at end of line counts 1.
+  assert(
+    countSkipMarkersInDiffLine('+pytest.mark.skip') === 1,
+    "R7: pytest.mark.skip at end of line counts 1",
+  );
+
+  // F1: pytest.mark.skip with (reason) counts 1 — paren is not an identifier char.
+  assert(
+    countSkipMarkersInDiffLine('+pytest.mark.skip(reason="x")') === 1,
+    "R7: pytest.mark.skip(reason=...) counts 1 (paren is boundary)",
+  );
+
+  // F1: @DisabledOnOs should NOT match @Disabled.
+  assert(
+    countSkipMarkersInDiffLine('+@DisabledOnOs(OS.WINDOWS)') === 0,
+    "R7: @DisabledOnOs does NOT match @Disabled (word boundary)",
+  );
+
+  // F1: @Disabled alone at end of line counts 1.
+  assert(
+    countSkipMarkersInDiffLine('+@Disabled') === 1,
+    "R7: @Disabled at end of line counts 1",
+  );
+
+  // F1: @Disabled with reason counts 1 — paren is not an identifier char.
+  assert(
+    countSkipMarkersInDiffLine('+@Disabled("flaky")') === 1,
+    "R7: @Disabled(\"flaky\") counts 1 (paren is boundary)",
+  );
+
+  // F5: known limitation — unterminated string on a diff line hides later markers.
+  // From a multi-line template literal, the second line is a fragment with odd quotes.
+  assert(
+    countSkipMarkersInDiffLine('+"it.skip(') === 0,
+    "R7: known limitation: unterminated string on a diff line hides later markers (false negative)",
+  );
+
+  // F6: known limitation — mid-line block comment is NOT filtered.
+  // Only line-leading /* and * are excluded; mid-line /* */ passes through.
+  assert(
+    countSkipMarkersInDiffLine('+code() /* it.skip("x") */') === 1,
+    "R7: known limitation: mid-line block comment is not filtered (false positive)",
+  );
 }
 
 // ============================================================================

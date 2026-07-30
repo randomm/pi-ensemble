@@ -2320,23 +2320,35 @@ const SKIP_MARKERS = [
  * Count consecutive occurrences of `ch` going backwards from `index`
  * (exclusive) in `str`. Stops at the first non-matching character.
  */
-function countConsecutiveBackwards(str: string, ch: string, index: number): number {
-  let count = 0;
-  let i = index - 1;
-  while (i >= 0 && str[i] === ch) {
-    count++;
-    i--;
-  }
-  return count;
-}
-
 /**
  * Count skip markers in a single diff line (including the leading +/-
  * indicator). Returns the number of markers found, excluding those
  * inside comments or string literals.
  *
- * Single-pass: walks the line once, tracking quote-state and comment
- * state simultaneously.
+ * Single-pass: walks the line once, tracking quote-state and a running
+ * backslash counter for O(1) escape detection.
+ *
+ * Comment exclusion: filters full-line comments (`//`, `/*`, `*`, `#`),
+ * line-leading block comments, trailing `//` comments, and Rust attributes
+ * like `#[ignore]` (NOT treated as comments).
+ *
+ * Known limitations (single-line analysis, `git diff -U0` yields fragments):
+ *
+ * - **Unterminated strings on a diff line**: a diff line with an odd number
+ *   of quotes (e.g. `+"it.skip(` from a multi-line template literal) will
+ *   cause the rest of the line to be parsed as inside a string. Markers
+ *   after the unterminated quote are **not counted** (false negative).
+ *   Cross-line state cannot be reconstructed reliably from diff fragments.
+ *
+ * - **Markers on continuation lines inside multi-line strings**: a diff line
+ *   that is a continuation of a multi-line template literal (e.g. the second
+ *   line `  it.skip("x")`) will look balanced in isolation and the marker
+ *   **will be counted** (false positive). Same reconstruction limitation.
+ *
+ * - **Mid-line block comments**: markers inside a C-style block comment that
+ *   starts mid-line ARE counted. Only line-leading `/*` and `*` are filtered.
+ *   Adding an `inBlockComment` state is intentionally deferred — the added
+ *   complexity costs more than the rare case is worth.
  */
 export function countSkipMarkersInDiffLine(line: string): number {
   // Remove the leading +/- and leading whitespace.
@@ -2352,37 +2364,53 @@ export function countSkipMarkersInDiffLine(line: string): number {
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let inBacktick = false;
-  let inLineComment = false;
   let pos = 0;
+  let backslashCount = 0;
 
   while (pos < trimmed.length) {
     const ch = trimmed[pos];
 
-    if (inLineComment) {
-      // Rest of line is a comment — no markers counted.
+    // Track consecutive backslashes — O(1) incremental counter.
+    // A quote is escaped iff backslashCount is ODD at the moment we see it.
+    if (ch === "\\") {
+      backslashCount++;
       pos++;
       continue;
     }
 
+    // Determine the effective backslash count for this character, then reset.
+    const bs = backslashCount;
+    backslashCount = 0;
+
     if (inDoubleQuote) {
-      if (ch === '"' && countConsecutiveBackwards(trimmed, "\\", pos) % 2 === 0) {
-        inDoubleQuote = false;
+      if (ch === '"') {
+        if (bs % 2 !== 0) {
+          // Escaped quote — stays inside string.
+        } else {
+          inDoubleQuote = false;
+        }
       }
     } else if (inSingleQuote) {
-      if (ch === "'" && countConsecutiveBackwards(trimmed, "\\", pos) % 2 === 0) {
-        inSingleQuote = false;
+      if (ch === "'") {
+        if (bs % 2 !== 0) {
+          // Escaped quote.
+        } else {
+          inSingleQuote = false;
+        }
       }
     } else if (inBacktick) {
-      if (ch === "`" && countConsecutiveBackwards(trimmed, "\\", pos) % 2 === 0) {
-        inBacktick = false;
+      if (ch === "`") {
+        if (bs % 2 !== 0) {
+          // Escaped backtick.
+        } else {
+          inBacktick = false;
+        }
       }
     } else {
       // Outside any string or comment.
-      // Check for line-comment start.
+      // Check for line-comment start — always extends to end of line.
       if (ch === "/" && trimmed[pos + 1] === "/") {
-        inLineComment = true;
-        pos += 2;
-        continue;
+        break;
       }
 
       // Check for string starts.
@@ -2394,14 +2422,26 @@ export function countSkipMarkersInDiffLine(line: string): number {
         inBacktick = true;
       } else {
         // Check for any skip marker.
+        let matchedMarker = false;
         for (const marker of SKIP_MARKERS) {
           if (trimmed.startsWith(marker, pos)) {
+            // Word-boundary guard: reject if the character after the marker
+            // is an identifier character. Prevents false positives like
+            // `pytest.mark.skipif` matching `pytest.mark.skip`, or
+            // `@DisabledOnOs` matching `@Disabled`.
+            const afterPos = pos + marker.length;
+            const nextCh = afterPos < trimmed.length ? trimmed[afterPos] : undefined;
+            if (nextCh !== undefined && /[A-Za-z0-9_]/.test(nextCh)) {
+              break; // word-boundary not met; try next marker
+            }
             count++;
-            pos += marker.length - 1; // -1 because pos++ at end of loop
-            // Marker consumed; break to avoid overlapping matches.
-            break;
+            pos += marker.length;
+            backslashCount = 0;
+            matchedMarker = true;
+            break; // matched — stop checking other markers at this position
           }
         }
+        if (matchedMarker) continue; // skip pos++ (F4: explicit marker advance)
       }
     }
 

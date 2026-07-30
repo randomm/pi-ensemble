@@ -743,7 +743,15 @@ On failure the driver emits cap `verify-failed:<step>` → handoff, with the per
 
 The develop gate also counts net additions of **skip-markers** in the diff (`#[ignore]`, `it.skip(`, `describe.skip(`, `test.skip(`, `@Disabled`, `pytest.mark.skip`, `t.Skip(`). A net increase means you're **disabling a test gate** that existed before — the ratchet only moves one direction.
 
-If the diff adds skip-markers, the gate fails with an evidence line naming the count. The filter excludes comments (but NOT Rust attributes like `#[ignore]`) and string literals to avoid false positives in documentation or quoted code.
+If the diff adds skip-markers, the gate fails with an evidence line naming the count. The filter excludes comments (but NOT Rust attributes like `#[ignore]`) and string literals to avoid false positives in documentation or quoted code. Word-boundary matching prevents false positives like `pytest.mark.skipif` or `@DisabledOnOs` matching their shorter counterparts.
+
+**Known limitations (single-line analysis):** `git diff -U0` yields per-line fragments, so cross-line state cannot be reconstructed:
+
+- **Unterminated strings on a diff line** (e.g. `+"it.skip(` from a multi-line template literal): the rest of the line is parsed as inside a string, so markers after the quote are **not counted** (false negative).
+- **Markers on continuation lines inside multi-line strings** (e.g. `  it.skip("x")` as the second line of a template literal): the line looks balanced in isolation, so the marker **is counted** (false positive).
+- **Mid-line block comments** (e.g. `+code() /* it.skip("x") */`): the marker IS counted. Only line-leading `/*` and `*` are filtered.
+
+These are documented limits, not bugs — fixing them requires real parser state across diff lines, which is undecidable from `git diff -U0` fragments.
 
 **Why this exists:** vipune's core embedder was broken for ~2.5 months while its test suite stayed green — 22 `#[ignore]` sites kept the real-embedder tests out of the fast suite, and nothing ever executed the product. The ratchet catches skip-marker additions before they accumulate.
 
