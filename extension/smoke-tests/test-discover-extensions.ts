@@ -16,7 +16,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { discoverInstalledExtensions } from "../src/spawn.ts";
+import { discoverInstalledExtensions } from "../src/spawn-extension-forward.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
