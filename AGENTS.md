@@ -380,7 +380,23 @@ This file enforces principles, conventions, and load-bearing constraints. It's n
 - No `// @ts-ignore`, no `// @ts-expect-error` without an explicit reason in the comment
 - Imports sorted automatically by Biome (`bunx biome format --write src/`)
 - Avoid `any` — use `unknown` and narrow with type guards. If you must cast, comment WHY.
-- One concern per module; modules under `extension/src/` should stay readable in one screen where possible
+
+### File size limits
+
+- **Hard limit**: 500 lines per source file
+- **Ideal target**: 300 lines or fewer
+- **Refactor trigger**: Exceeds 500 lines OR has 3+ distinct responsibilities
+
+The repo is currently NOT compliant. Existing violations are grandfathered pending a split:
+
+- `extension/src/work-driver.ts` (5,703 lines)
+- `extension/smoke-tests/test-work-driver.ts` (7,237 lines)
+- `extension/src/permission-guard.ts` (1,444 lines)
+- `extension/src/spawn.ts` (871 lines)
+- `extension/src/workflow-state.ts` (792 lines)
+- `extension/src/async-jobs.ts` (806 lines)
+
+The rule applies to NEW and MODIFIED files. There is currently NO mechanical enforcement (no lint rule, no CI check). A size ratchet — allow existing, fail on net growth, same shape as the #277 skip-ratchet — is the intended mechanism.
 
 ### Markdown (prompts/)
 
@@ -459,6 +475,7 @@ CLI flags and event shapes change between Pi minor versions. The pin in `extensi
 8. **LLMs may squash-merge when gates pass** (see §9) — humans still hold approval authority on breaking changes and disputed PRs
 9. **200-PR test for docs** — endures or doesn't get written
 10. **Transcript discipline** — orchestrator reads dispatch-tool summaries, never raw transcript files
+11. **File size limits** — 500 lines hard cap, 300 ideal; existing violations grandfathered, new/modified files enforced
 
 **Golden rule**: Question every addition. Simplest solution wins. When in doubt, the doctrine in this file is authoritative — including for me.
 

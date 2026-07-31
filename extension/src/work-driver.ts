@@ -69,7 +69,7 @@ import { runLensReview } from "./lens-review.ts";
 import * as lifecycle from "./lifecycle-events.ts";
 import { makeRunId } from "./spawn.ts";
 import { trace } from "./trace.ts";
-import type { DispatchResult } from "./types.ts";
+import { type DispatchFailureCause, type DispatchResult, isRateLimit429Msg } from "./types.ts";
 import * as workWidget from "./work-widget.ts";
 
 const execp = promisify(exec);
@@ -247,17 +247,10 @@ function transientRetryBackoffMs(): number {
 }
 
 /**
- * #308 — classify a dispatch-failure event by its ROOT CAUSE so the retry
+ * #308/#314 — classify a dispatch-failure event by its ROOT CAUSE so the retry
  * router can branch on structure (killCause / 429 / errorStop) instead of
- * regex-matching errorTail strings. Replaces isTransientFailure (#297).
- *
- * Returns a discriminated cause with the retry policy baked in:
- *   - "self-killed:timeout"  — wall-clock cap. NEVER retry (budget IS the constraint).
- *   - "self-killed:inactivity" — no stdout for inactivity window. Retry at most ONCE.
- *   - "self-killed:abort"  — user cancel. NEVER retry.
- *   - "rate-limited:429"   — provider asked for retry delay. NEVER retry (useless).
- *   - "provider-severed"   — transport dropped (errorStop). Retry, multiple times for adversarial.
- *   - "crashed"            — non-zero exit with no structured signal. Retry once as safety net.
+ * regex-matching errorTail strings. Uses shared DispatchFailureCause type
+ * and RATE_LIMIT_429_PATTERN from types.ts for consistency with adversarial.ts.
  */
 export function classifyFailureCause(tail: {
   kind: string;
@@ -265,13 +258,7 @@ export function classifyFailureCause(tail: {
   killCause?: string;
   providerMessage?: string;
 }): {
-  cause:
-    | "self-killed:timeout"
-    | "self-killed:inactivity"
-    | "self-killed:abort"
-    | "rate-limited:429"
-    | "provider-severed"
-    | "crashed";
+  cause: DispatchFailureCause;
   shouldRetry: boolean;
   maxRetries: number;
 } {
@@ -289,7 +276,8 @@ export function classifyFailureCause(tail: {
 
   // 429 rate-limit — detected from providerMessage (errorStop.message).
   // Retrying is definitionally useless; the provider explicitly asked us to wait.
-  if (isRateLimit429(tail)) {
+  const msg = tail.providerMessage ?? tail.errorTail ?? "";
+  if (isRateLimit429Msg(msg)) {
     return { cause: "rate-limited:429", shouldRetry: false, maxRetries: 0 };
   }
 
@@ -303,22 +291,8 @@ export function classifyFailureCause(tail: {
     return { cause: "crashed", shouldRetry: true, maxRetries: 1 };
   }
 
-  return { cause: "crashed", shouldRetry: false, maxRetries: 0 };
-}
-
-/**
- * Detect 429 rate-limit from the provider error message.
- *
- * Observed text: "Provider request error: Server requested 86399s retry delay (max: 60s). 429 status code (no body)"
- *
- * errorStop.message carries the provider's error text. No structured status
- * code field exists yet in the errorStop shape — we match the distinctive
- * "retry delay" + "429" pattern. Isolate in one named helper so the
- * heuristic is a single point of change when the shape evolves.
- */
-function isRateLimit429(tail: { providerMessage?: string; errorTail?: string }): boolean {
-  const msg = tail.providerMessage ?? tail.errorTail ?? "";
-  return /429\s*status/i.test(msg) || /retry delay.*429/i.test(msg);
+  // Unexpected kind — treat as crash but don't retry.
+  return { cause: "crashed-unknown", shouldRetry: false, maxRetries: 0 };
 }
 
 /**
@@ -346,6 +320,39 @@ export function failureCauseReason(tail: {
       return `provider/transport error: ${tail.providerMessage ?? tail.errorTail?.slice(0, 60) ?? "connection lost"}`;
     case "crashed":
       return `subagent failed: ${tail.errorTail?.slice(0, 60) ?? "non-zero exit"}`;
+    case "crashed-unknown":
+      return `subagent failed (unexpected event): ${tail.errorTail?.slice(0, 60) ?? "unknown failure"}`;
+    case "success":
+      return "(success — no failure reason)";
+  }
+}
+
+/**
+ * #314 — variant of failureCauseReason that accepts a pre-computed
+ * classification to avoid double-calling classifyFailureCause on the
+ * same event (e.g. in the step-completion handler at ~5428).
+ */
+function failureCauseReasonForClass(
+  tail: { errorTail?: string; providerMessage?: string },
+  cls: { cause: DispatchFailureCause },
+): string {
+  switch (cls.cause) {
+    case "self-killed:timeout":
+      return "killed by pi-ensemble (wall-clock timeout)";
+    case "self-killed:inactivity":
+      return "killed by pi-ensemble (inactivity watchdog)";
+    case "self-killed:abort":
+      return "cancelled (abort signal)";
+    case "rate-limited:429":
+      return "provider rate-limited (429) — retrying cannot help";
+    case "provider-severed":
+      return `provider/transport error: ${tail.providerMessage ?? tail.errorTail?.slice(0, 60) ?? "connection lost"}`;
+    case "crashed":
+      return `subagent failed: ${tail.errorTail?.slice(0, 60) ?? "non-zero exit"}`;
+    case "crashed-unknown":
+      return `subagent failed (unexpected event): ${tail.errorTail?.slice(0, 60) ?? "unknown failure"}`;
+    case "success":
+      return "(success — no failure reason)";
   }
 }
 
@@ -5417,7 +5424,9 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
       const lastEvent = state.eventLog[state.eventLog.length - 1];
       const elapsed = Date.now() - stepStartedAt;
       if (lastEvent?.kind === "dispatch-failed" || lastEvent?.kind === "dispatch-failed-provider") {
-        const reason = failureCauseReason(lastEvent);
+        // #314 — classify once, derive both reason and retry policy.
+        const classification = classifyFailureCause(lastEvent);
+        const reason = failureCauseReasonForClass(lastEvent, classification);
         // #299 — when the halt-cascade router below is about to RETRY this
         // failure, skip the ✗ step-failed line: the single ↻ retry line
         // carries the reason, and pre-#299 one transient produced multiple
@@ -5425,7 +5434,6 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
         const policy = STEP_FAILURE_POLICY[step];
         const semanticRetryAvailable =
           policy === "RETRY_ONCE" && (state.pipelineState.retryAttempts?.[step] ?? 0) < 1;
-        const classification = classifyFailureCause(lastEvent);
         const transientRetryAvailable =
           policy === "HALT" &&
           transientRetryEnabled() &&

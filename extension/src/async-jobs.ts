@@ -5,7 +5,7 @@ import * as lifecycle from "./lifecycle-events.ts";
 import type { RunningState } from "./progress.ts";
 import * as sessionAutosave from "./session-autosave.ts";
 import { trace } from "./trace.ts";
-import type { DispatchResult } from "./types.ts";
+import { type DispatchResult, isRateLimit429Msg } from "./types.ts";
 
 function totalTokens(result: DispatchResult): number {
   const u = result.usage;
@@ -189,10 +189,7 @@ export function formatSingleReport(jobId: string, label: string, result: Dispatc
     status = "FAILED (self-killed: inactivity watchdog)";
   } else if (result.killCause === "abort") {
     status = "FAILED (cancelled: abort signal)";
-  } else if (
-    result.errorStop &&
-    /429\s*status|retry delay.*429/i.test(result.errorStop.message ?? "")
-  ) {
+  } else if (result.errorStop && isRateLimit429Msg(result.errorStop.message)) {
     status = "FAILED (rate-limited: 429 — retrying cannot help)";
     bodyPrefix = result.errorStop.message
       ? `Provider request error: ${result.errorStop.message}`
@@ -213,7 +210,7 @@ export function formatSingleReport(jobId: string, label: string, result: Dispatc
   if (bodyPrefix) {
     body = [
       bodyPrefix,
-      result.errorStop && !/429/i.test(result.errorStop.message ?? "")
+      result.errorStop && !isRateLimit429Msg(result.errorStop.message)
         ? "Last text below is the agent's pre-failure activity — VERIFY DIRECTLY before assuming progress (worktree may be unchanged)."
         : "Retrying cannot help; the provider explicitly asked for a wait period.",
       "",
@@ -476,8 +473,11 @@ export function startJob(pi: ExtensionAPI, input: StartJobInput): StartJobHandle
       childHandles.delete(jobId);
       if (!input.skipDeck) dispatchDeck.clearEntry(jobId);
       // Five-way: ok / killCause / 429 / FAILED-PROVIDER-ERROR / process-exit-failed.
-      // #309 — killCause (#296) wins over errorStop. A self-kill is NOT a
+      // #309/#314 — killCause (#296) wins over errorStop. A self-kill is NOT a
       // provider/transport error and must not emit the "terminated mid-stream" badge.
+      // Uses shared isRateLimit429Msg (types.ts) so lifecycle + formatSingleReport
+      // cannot disagree on what is a 429.
+      const is429 = result.errorStop && isRateLimit429Msg(result.errorStop.message);
       if (result.killCause) {
         // Self-kill: treat as process-level failure, not provider error.
         lifecycle.emitFailed(
@@ -487,10 +487,7 @@ export function startJob(pi: ExtensionAPI, input: StartJobInput): StartJobHandle
           result.ms,
           result.exitCode ?? undefined,
         );
-      } else if (
-        result.errorStop &&
-        !/429\s*status|retry delay.*429/i.test(result.errorStop.message ?? "")
-      ) {
+      } else if (result.errorStop && !is429) {
         // Genuine provider/transport error (not 429).
         // #299 — driver-owned jobs skip the per-child "terminated
         // mid-stream" line: the driver emits its own step-failed /
@@ -499,10 +496,7 @@ export function startJob(pi: ExtensionAPI, input: StartJobInput): StartJobHandle
         if (ownerKind === "pm") {
           lifecycle.emitErrored(jobId, input.label, input.role, result.ms, totalTokens(result));
         }
-      } else if (
-        result.errorStop &&
-        /429\s*status|retry delay.*429/i.test(result.errorStop.message ?? "")
-      ) {
+      } else if (is429) {
         // #309 — 429 with ok=true must NOT emit a "finished" badge.
         // The child technically exited ok (it produced output), but the
         // provider rate-limited the request. Emit as failed so the

@@ -53,7 +53,7 @@ import {
   setupWorkspaceTmp,
   teardownWorkspaceTmp,
 } from "../src/work-driver.ts";
-import type { DispatchResult } from "../src/types.ts";
+import { isRateLimit429Msg, type DispatchResult } from "../src/types.ts";
 import { formatSingleReport } from "../src/async-jobs.ts";
 import {
   type WorkState,
@@ -6949,6 +6949,14 @@ async function testFailureCauseTaxonomy() {
     assert(cls.maxRetries === 1, "crashed → maxRetries=1");
   }
 
+  // --- classifyFailureCause: unknown event kind → crashed-unknown (never retries) ---
+  {
+    const cls = classifyFailureCause(mkEvent({ kind: "unknown-event-type" }));
+    assert(cls.cause === "crashed-unknown", "unknown kind → crashed-unknown");
+    assert(cls.shouldRetry === false, "crashed-unknown → shouldRetry=false");
+    assert(cls.maxRetries === 0, "crashed-unknown → maxRetries=0");
+  }
+
   // --- failureCauseReason: operator-facing strings ---
   {
     const reasonTimeout = failureCauseReason(mkEvent({ killCause: "timeout" }));
@@ -7030,6 +7038,10 @@ async function testFailureCauseTaxonomy() {
     assert(
       !report.includes("FAILED-PROVIDER-ERROR"),
       "self-kill inactivity is NOT tagged as provider error",
+    );
+    assert(
+      !report.includes("terminated mid-stream"),
+      "self-kill inactivity does NOT emit terminated mid-stream badge",
     );
   }
 
@@ -7155,6 +7167,66 @@ async function testFailureCauseTaxonomy() {
     assert(
       !timeoutFailed.includes("subagent failed"),
       `F1: RETRY_ONCE timeout reason must NOT say "subagent failed" (got: ${timeoutFailed})`,
+    );
+  }
+
+  // --- F2: shared 429 pattern prevents formatSingleReport / startJob lifecycle disagreement ---
+  // Both formatSingleReport and startJob's lifecycle handler (async-jobs.ts) use
+  // isRateLimit429Msg. Verify the shared helper matches the patterns we expect
+  // so the two paths cannot disagree.
+  {
+    // Standard 429 message from Pi
+    assert(
+      isRateLimit429Msg("Server requested 86399s retry delay (max: 60s). 429 status code (no body)"),
+      "F2: 429 with 'retry delay' + '429 status' is detected",
+    );
+
+    // Variant: 429 status first
+    assert(
+      isRateLimit429Msg("HTTP 429 status — rate limit exceeded"),
+      "F2: '429 status' alone is detected",
+    );
+
+    // Variant: retry delay without explicit 429 word
+    assert(
+      isRateLimit429Msg("Provider requested 120s retry delay due to 429 rate-limit"),
+      "F2: 'retry delay' + '429' in any order is detected",
+    );
+
+    // Non-429 provider error — must NOT match
+    assert(
+      !isRateLimit429Msg("TypeError: fetch failed"),
+      "F2: generic error is NOT detected as 429",
+    );
+
+    // undefined input
+    assert(
+      !isRateLimit429Msg(undefined),
+      "F2: undefined message is NOT detected as 429",
+    );
+
+    // formatSingleReport for 429 must NOT contain "terminated mid-stream"
+    // (this is the user-visible consequence of the lifecycle + report agreement)
+    const r429 = formatSingleReport(
+      "f2-job",
+      "developer",
+      mkResult({
+        ok: true,
+        exitCode: 0,
+        errorStop: {
+          reason: "error",
+          message: "Server requested 86399s retry delay (max: 60s). 429 status code (no body)",
+        },
+        text: "partial output",
+      }),
+    );
+    assert(
+      !r429.includes("terminated mid-stream"),
+      "F2: 429 report must NOT contain terminated mid-stream",
+    );
+    assert(
+      r429.includes("429"),
+      "F2: 429 report MUST name the rate-limit",
     );
   }
 }
