@@ -28,10 +28,7 @@ function assert(cond: boolean, msg: string) {
   }
 }
 
-async function writePkg(
-  dir: string,
-  pkg: Record<string, unknown>,
-): Promise<void> {
+async function writePkg(dir: string, pkg: Record<string, unknown>): Promise<void> {
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, "package.json"), JSON.stringify(pkg, null, 2));
 }

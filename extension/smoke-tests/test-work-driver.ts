@@ -23,36 +23,31 @@ import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { formatSingleReport } from "../src/async-jobs.ts";
 import { type DispatchResult, isRateLimit429Msg } from "../src/types.ts";
+import { type DriverContext, STEP_FAILURE_POLICY, nextStep } from "../src/work-driver-context.ts";
+import { parseAbort, parseBranchName } from "../src/work-driver-diff.ts";
+import { explainCap } from "../src/work-driver-explain.ts";
+import { classifyFailureCause, failureCauseReason } from "../src/work-driver-failure-taxonomy.ts";
 import { MAX_ISSUES_PER_GROUP, groupIssues } from "../src/work-driver-grouping.ts";
+import { renderHandoffMarkdown } from "../src/work-driver-handoff-markdown.ts";
+import { renderHandoffUserMessage } from "../src/work-driver-handoff-message.ts";
+import { parseMergeCommit } from "../src/work-driver-merged.ts";
 import { SKIP_MARKERS, countSkipMarkersInDiffLine } from "../src/work-driver-skip-ratchet.ts";
+import { verifyCmdFor, verifyStepOutcome } from "../src/work-driver-verify.ts";
 import {
-  type DriverContext,
-  DriverNotImplementedError,
-  STEP_FAILURE_POLICY,
-  captureWorktreeSnapshot,
-  classifyFailureCause,
-  explainCap,
-  failureCauseReason,
-  nextStep,
-  parseAbort,
-  parseBranchName,
-  parseExploreVerdict,
-  parseHandoffCommentUrl,
-  parseMergeCommit,
-  parsePerIssueVerdicts,
-  parsePrNumber,
-  parseStepBackReply,
-  parseWorkstreams,
-  parseWorktreesBlock,
-  renderHandoffMarkdown,
-  renderHandoffUserMessage,
-  runWorkDriver,
   scratchDir,
   setupWorkspaceTmp,
   teardownWorkspaceTmp,
-  verifyCmdFor,
-  verifyStepOutcome,
-} from "../src/work-driver.ts";
+} from "../src/work-driver-workspace.ts";
+import { DriverNotImplementedError, runWorkDriver } from "../src/work-driver.ts";
+import { parseWorktreesBlock } from "../src/work-driver-branch-develop.ts";
+import { captureWorktreeSnapshot, parseHandoffCommentUrl } from "../src/work-driver-handoff.ts";
+import { parsePrNumber } from "../src/work-driver-lens.ts";
+import {
+  parseExploreVerdict,
+  parsePerIssueVerdicts,
+  parseWorkstreams,
+} from "../src/work-driver-plan.ts";
+import { parseStepBackReply } from "../src/work-driver-stepback-ci.ts";
 import {
   WORK_STATE_SCHEMA_VERSION,
   type WorkState,
