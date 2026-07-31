@@ -21,14 +21,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { formatSingleReport } from "../src/async-jobs.ts";
+import { type DispatchResult, isRateLimit429Msg } from "../src/types.ts";
+import { MAX_ISSUES_PER_GROUP, groupIssues } from "../src/work-driver-grouping.ts";
+import { SKIP_MARKERS, countSkipMarkersInDiffLine } from "../src/work-driver-skip-ratchet.ts";
 import {
-  DriverNotImplementedError,
   type DriverContext,
+  DriverNotImplementedError,
   STEP_FAILURE_POLICY,
-  classifyFailureCause,
-  failureCauseReason,
   captureWorktreeSnapshot,
+  classifyFailureCause,
   explainCap,
+  failureCauseReason,
   nextStep,
   parseAbort,
   parseBranchName,
@@ -40,24 +44,18 @@ import {
   parseStepBackReply,
   parseWorkstreams,
   parseWorktreesBlock,
-  groupIssues,
-  MAX_ISSUES_PER_GROUP,
-  verifyCmdFor,
-  verifyStepOutcome,
-  countSkipMarkersInDiffLine,
-  SKIP_MARKERS,
   renderHandoffMarkdown,
   renderHandoffUserMessage,
   runWorkDriver,
   scratchDir,
   setupWorkspaceTmp,
   teardownWorkspaceTmp,
+  verifyCmdFor,
+  verifyStepOutcome,
 } from "../src/work-driver.ts";
-import { isRateLimit429Msg, type DispatchResult } from "../src/types.ts";
-import { formatSingleReport } from "../src/async-jobs.ts";
 import {
-  type WorkState,
   WORK_STATE_SCHEMA_VERSION,
+  type WorkState,
   appendEvent,
   detectInconsistencies,
   initialState,
@@ -141,7 +139,10 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
   try {
     const issue = 547;
     let state = initialState(issue, 1000);
-    assert(state.schemaVersion === WORK_STATE_SCHEMA_VERSION, "initialState carries schemaVersion 1");
+    assert(
+      state.schemaVersion === WORK_STATE_SCHEMA_VERSION,
+      "initialState carries schemaVersion 1",
+    );
     assert(state.resumable === false, "initialState is observational-only (resumable=false)");
     assert(state.pipelineState.currentStep === "explore", "initialState starts at explore");
     assert(state.pipelineState.status === "running", "initialState status=running");
@@ -170,10 +171,7 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
     await writeState(dir, state);
     const afterAppend = await readState(dir, issue);
     assert(afterAppend?.eventLog.length === 1, "appendEvent persists exactly one event");
-    assert(
-      afterAppend?.eventLog[0]?.kind === "step-started",
-      "appended event has expected kind",
-    );
+    assert(afterAppend?.eventLog[0]?.kind === "step-started", "appended event has expected kind");
 
     // Schema-version mismatch must reject loudly.
     const file = workStateFile(dir, issue);
@@ -187,7 +185,10 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
         msg.includes("schemaVersion=99") && msg.includes("expects 1"),
         "schema mismatch error names both versions",
       );
-      assert(msg.includes("PI_ENSEMBLE_WORK_DRIVER=0"), "error surfaces the flag-bypass recovery path");
+      assert(
+        msg.includes("PI_ENSEMBLE_WORK_DRIVER=0"),
+        "error surfaces the flag-bypass recovery path",
+      );
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -381,7 +382,9 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
         // explore (Step 1) → plan (Step 2) → ops branch (Step 3) → developer (Step 4)
         // Halt before adversarial would fire (dispatch #5+).
         if (rolesDispatched.length >= 5) {
-          throw new Error("smoke: halting before adversarial step (would call live runAdversarialLoop)");
+          throw new Error(
+            "smoke: halting before adversarial step (would call live runAdversarialLoop)",
+          );
         }
         return mkResult({
           role: spec.role,
@@ -480,7 +483,10 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
     "**ABORT: Working tree is not clean**\n\n" +
     "Mainline identified: `main`\n\nHowever, the working tree has uncommitted changes (41 untracked files)";
   assert(parseAbort(realAbort) !== undefined, "parseAbort detects the real #553 ABORT message");
-  assert(parseAbort("ABORT: --ff-only refused")?.startsWith("ABORT:") === true, "parseAbort: plain marker");
+  assert(
+    parseAbort("ABORT: --ff-only refused")?.startsWith("ABORT:") === true,
+    "parseAbort: plain marker",
+  );
   assert(parseAbort(undefined) === undefined, "parseAbort: undefined input is undefined");
   assert(parseAbort("") === undefined, "parseAbort: empty input is undefined");
   assert(
@@ -536,7 +542,10 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
     "parseBranchName: markdown bold + backticks",
   );
   assert(parseBranchName(undefined) === undefined, "parseBranchName: undefined input");
-  assert(parseBranchName("Some prose about a branch") === undefined, "parseBranchName: no marker line");
+  assert(
+    parseBranchName("Some prose about a branch") === undefined,
+    "parseBranchName: no marker line",
+  );
   // Multi-line reply ending with the marker — the realistic shape from ops.
   const realistic = [
     "Branch created successfully.",
@@ -580,7 +589,10 @@ function mkResult(overrides: Partial<DispatchResult> = {}): DispatchResult {
     assert(occurrences === 1, "setupWorkspaceTmp is idempotent (no duplicate /tmp/ lines)");
 
     // Pre-existing /tmp/ line is preserved untouched.
-    await fs.writeFile(path.join(dir, ".git", "info", "exclude"), "# user-managed\n/tmp/\nfoo.log\n");
+    await fs.writeFile(
+      path.join(dir, ".git", "info", "exclude"),
+      "# user-managed\n/tmp/\nfoo.log\n",
+    );
     await setupWorkspaceTmp(dir, 999);
     const exclude3 = await fs.readFile(path.join(dir, ".git", "info", "exclude"), "utf8");
     assert(
@@ -843,8 +855,14 @@ branch: feature/issue-553-fix
       ]),
     );
     assert(verdictsByWorkstream["task-a"] === true, "task-a: success recorded");
-    assert(verdictsByWorkstream["task-b"] === false, "task-b: failure recorded (partial-failure aggregate)");
-    assert(verdictsByWorkstream["task-c"] === true, "task-c: success recorded (NOT aborted by task-b failure)");
+    assert(
+      verdictsByWorkstream["task-b"] === false,
+      "task-b: failure recorded (partial-failure aggregate)",
+    );
+    assert(
+      verdictsByWorkstream["task-c"] === true,
+      "task-c: success recorded (NOT aborted by task-b failure)",
+    );
 
     // branches-converged carries the per-branch verdict aggregate.
     const converged = (after?.eventLog ?? []).find((e) => e.kind === "branches-converged");
@@ -877,7 +895,10 @@ branch: feature/issue-553-fix
   ].join("\n");
   assert(parsePrNumber(realistic) === 42, "parsePrNumber: end-of-reply marker line");
   assert(parsePrNumber(undefined) === undefined, "parsePrNumber: undefined input");
-  assert(parsePrNumber("Some prose with PR mentioned but no marker") === undefined, "parsePrNumber: no marker line");
+  assert(
+    parsePrNumber("Some prose with PR mentioned but no marker") === undefined,
+    "parsePrNumber: no marker line",
+  );
   assert(parsePrNumber("pr: not-a-number") === undefined, "parsePrNumber: non-numeric rejected");
 }
 
@@ -891,7 +912,8 @@ branch: feature/issue-553-fix
     "Applied label needs-human-attention.",
   ].join("\n");
   assert(
-    parseHandoffCommentUrl(okReply) === "https://github.com/org/repo/pull/553#issuecomment-2547382109",
+    parseHandoffCommentUrl(okReply) ===
+      "https://github.com/org/repo/pull/553#issuecomment-2547382109",
     "parseHandoffCommentUrl: finds PR comment URL",
   );
   const issueReply = "https://github.com/org/repo/issues/600#issuecomment-99 posted.";
@@ -899,7 +921,10 @@ branch: feature/issue-553-fix
     parseHandoffCommentUrl(issueReply) === "https://github.com/org/repo/issues/600#issuecomment-99",
     "parseHandoffCommentUrl: finds issue comment URL",
   );
-  assert(parseHandoffCommentUrl(undefined) === undefined, "parseHandoffCommentUrl: undefined input");
+  assert(
+    parseHandoffCommentUrl(undefined) === undefined,
+    "parseHandoffCommentUrl: undefined input",
+  );
   assert(
     parseHandoffCommentUrl("ops failed: gh auth missing") === undefined,
     "parseHandoffCommentUrl: no URL → undefined",
@@ -1007,7 +1032,10 @@ branch: feature/issue-553-fix
         // Capture whether the developer prompt mentions the speculative
         // context file (proves the developer knows where to look mid-flight).
         if (opts?.label === "developer" || opts?.label?.startsWith("developer[")) {
-          if (spec.prompt.includes("speculative-default.md") || spec.prompt.includes("speculative-")) {
+          if (
+            spec.prompt.includes("speculative-default.md") ||
+            spec.prompt.includes("speculative-")
+          ) {
             seenPromptHints.push("developer-knows-about-speculative");
           }
         }
@@ -1022,10 +1050,7 @@ branch: feature/issue-553-fix
 
     // Single-workstream develop should have fired BOTH developer AND
     // speculative explore concurrently (Promise.allSettled).
-    assert(
-      seenLabels.includes("developer"),
-      "Pattern 3 (N=1): developer dispatched",
-    );
+    assert(seenLabels.includes("developer"), "Pattern 3 (N=1): developer dispatched");
     assert(
       seenLabels.includes("explore:speculative"),
       "Pattern 3 (N=1): speculative explore dispatched alongside developer",
@@ -1257,10 +1282,7 @@ branch: feature/issue-553-fix
     const after = await readState(dir, 800);
     assert(after?.pipelineState.status === "aborted", "HALT on develop sets status=aborted");
     const kinds = (after?.eventLog ?? []).map((e) => e.kind);
-    assert(
-      kinds.includes("cap-hit"),
-      "HALT on develop synthesises a cap-hit event",
-    );
+    assert(kinds.includes("cap-hit"), "HALT on develop synthesises a cap-hit event");
     const capHit = (after?.eventLog ?? []).find((e) => e.kind === "cap-hit");
     assert(
       capHit?.kind === "cap-hit" && capHit.cap === "developer-timeout",
@@ -1268,8 +1290,8 @@ branch: feature/issue-553-fix
     );
     // The driver must NOT have dispatched adversarial after the develop
     // failure — that's the cascade we're preventing.
-    const adversarialDispatches = seenLabels.filter((l) =>
-      l.startsWith("adversarial") || l === "adversarial_loop",
+    const adversarialDispatches = seenLabels.filter(
+      (l) => l.startsWith("adversarial") || l === "adversarial_loop",
     );
     assert(
       adversarialDispatches.length === 0,
@@ -1370,14 +1392,11 @@ branch: feature/issue-553-fix
     msg.includes("developer subagent hit its wall-clock cap"),
     "renderHandoffUserMessage: explainCap output appears in body",
   );
-  assert(
-    msg.includes("feature/issue-553-fix"),
-    "renderHandoffUserMessage: surfaces branch name",
-  );
+  assert(msg.includes("feature/issue-553-fix"), "renderHandoffUserMessage: surfaces branch name");
   assert(msg.includes("HEAD abc1234"), "renderHandoffUserMessage: surfaces HEAD sha");
   assert(
     msg.includes("modified: src/foo.ts, tests/foo.test.ts") ||
-      msg.includes("src/foo.ts") && msg.includes("tests/foo.test.ts"),
+      (msg.includes("src/foo.ts") && msg.includes("tests/foo.test.ts")),
     "renderHandoffUserMessage: lists modified files",
   );
   assert(
@@ -1418,9 +1437,18 @@ branch: feature/issue-553-fix
     nextStep: "handoff",
   });
   const md = renderHandoffMarkdown(s);
-  assert(md.includes("### What this cap means"), "renderHandoffMarkdown: 'What this cap means' section");
-  assert(md.includes("### Worktree state at handoff"), "renderHandoffMarkdown: 'Worktree state at handoff' section");
-  assert(md.includes("### Concrete recovery commands"), "renderHandoffMarkdown: 'Concrete recovery commands' section");
+  assert(
+    md.includes("### What this cap means"),
+    "renderHandoffMarkdown: 'What this cap means' section",
+  );
+  assert(
+    md.includes("### Worktree state at handoff"),
+    "renderHandoffMarkdown: 'Worktree state at handoff' section",
+  );
+  assert(
+    md.includes("### Concrete recovery commands"),
+    "renderHandoffMarkdown: 'Concrete recovery commands' section",
+  );
   assert(md.includes("### Inspect further"), "renderHandoffMarkdown: 'Inspect further' footer");
   assert(
     md.includes("PI_ENSEMBLE_SPAWN_TIMEOUT_MS_DEVELOPER"),
@@ -1430,21 +1458,31 @@ branch: feature/issue-553-fix
 
 // 23. PR6 — parseExploreVerdict pure helper.
 {
-  assert(parseExploreVerdict("VERDICT: ALREADY_COMPLETE") === "ALREADY_COMPLETE",
-    "parseExploreVerdict: plain ALREADY_COMPLETE");
-  assert(parseExploreVerdict("**VERDICT:** NEEDS_WORK") === "NEEDS_WORK",
-    "parseExploreVerdict: bold-wrapped NEEDS_WORK");
-  assert(parseExploreVerdict("verdict: needs_clarification") === "NEEDS_CLARIFICATION",
-    "parseExploreVerdict: case-insensitive, lower-snake input");
+  assert(
+    parseExploreVerdict("VERDICT: ALREADY_COMPLETE") === "ALREADY_COMPLETE",
+    "parseExploreVerdict: plain ALREADY_COMPLETE",
+  );
+  assert(
+    parseExploreVerdict("**VERDICT:** NEEDS_WORK") === "NEEDS_WORK",
+    "parseExploreVerdict: bold-wrapped NEEDS_WORK",
+  );
+  assert(
+    parseExploreVerdict("verdict: needs_clarification") === "NEEDS_CLARIFICATION",
+    "parseExploreVerdict: case-insensitive, lower-snake input",
+  );
   assert(
     parseExploreVerdict("## Verdict\n\nVERDICT: ALREADY_COMPLETE\n\n## Touchpoints") ===
       "ALREADY_COMPLETE",
     "parseExploreVerdict: embedded under heading, first match wins",
   );
-  assert(parseExploreVerdict("no verdict here") === null,
-    "parseExploreVerdict: missing verdict → null");
-  assert(parseExploreVerdict("VERDICT: NEVER_VALID") === null,
-    "parseExploreVerdict: unknown verdict → null (not coerced)");
+  assert(
+    parseExploreVerdict("no verdict here") === null,
+    "parseExploreVerdict: missing verdict → null",
+  );
+  assert(
+    parseExploreVerdict("VERDICT: NEVER_VALID") === null,
+    "parseExploreVerdict: unknown verdict → null (not coerced)",
+  );
   assert(parseExploreVerdict("") === null, "parseExploreVerdict: empty string → null");
 }
 
@@ -1474,7 +1512,9 @@ branch: feature/issue-553-fix
         if (opts?.label === "ops:handoff") {
           return mkResult({ role: "ops", text: "Posted." });
         }
-        throw new Error(`unexpected dispatch in already-complete smoke: ${spec.role} / ${opts?.label}`);
+        throw new Error(
+          `unexpected dispatch in already-complete smoke: ${spec.role} / ${opts?.label}`,
+        );
       },
     };
     await runWorkDriver(ctx);
@@ -1490,9 +1530,14 @@ branch: feature/issue-553-fix
       "ALREADY_COMPLETE: synthesises cap='explore-already-complete'",
     );
     // The cascade the empirical #533 ran: must NOT have seen plan/branch/develop.
-    const cascadeLabels = seenLabels.filter((l) =>
-      l === "plan" || l === "branch" || l === "developer" || l.startsWith("adversarial") ||
-      l === "commit-pr" || l.startsWith("lens-review"),
+    const cascadeLabels = seenLabels.filter(
+      (l) =>
+        l === "plan" ||
+        l === "branch" ||
+        l === "developer" ||
+        l.startsWith("adversarial") ||
+        l === "commit-pr" ||
+        l.startsWith("lens-review"),
     );
     assert(
       cascadeLabels.length === 0,
@@ -1667,8 +1712,8 @@ branch: feature/issue-553-fix
       "empty-diff: synthesised lens-approved event emitted (so nextStep advances)",
     );
     // No lens children dispatched — the role wouldn't be ops or handoff if so.
-    const lensReviewLabels = seenLabels.filter((l) =>
-      l.startsWith("lens-review") || l.startsWith("code-review-specialist"),
+    const lensReviewLabels = seenLabels.filter(
+      (l) => l.startsWith("lens-review") || l.startsWith("code-review-specialist"),
     );
     assert(
       lensReviewLabels.length === 0,
@@ -1791,10 +1836,7 @@ branch: feature/issue-553-fix
 
     const after = await readState(dir, 900);
     const kinds = (after?.eventLog ?? []).map((e) => e.kind);
-    assert(
-      kinds.includes("branches-converged"),
-      "branches-converged emitted",
-    );
+    assert(kinds.includes("branches-converged"), "branches-converged emitted");
     const capHit = (after?.eventLog ?? []).find((e) => e.kind === "cap-hit");
     assert(
       capHit?.kind === "cap-hit" && capHit.cap === "step-failed:develop",
@@ -2054,7 +2096,8 @@ branch: feature/issue-553-fix
       (e) => e.kind === "branch-completed" && e.step === "adversarial",
     );
     assert(
-      advBranchEvents.length === 3 && advBranchEvents.every((e) => e.kind === "branch-completed" && e.ok),
+      advBranchEvents.length === 3 &&
+        advBranchEvents.every((e) => e.kind === "branch-completed" && e.ok),
       "33a all-approved: 3 branch-completed events for adversarial, all ok",
     );
     assert(
@@ -2135,10 +2178,7 @@ branch: feature/issue-553-fix
 
     const after = await readState(dir, 911);
     const kinds = (after?.eventLog ?? []).map((e) => e.kind);
-    assert(
-      kinds.includes("branches-converged"),
-      "33b mixed: branches-converged emitted",
-    );
+    assert(kinds.includes("branches-converged"), "33b mixed: branches-converged emitted");
     const advRejected = (after?.eventLog ?? []).filter((e) => e.kind === "adversarial-rejected");
     assert(
       advRejected.length === 1,
@@ -2246,7 +2286,9 @@ branch: feature/issue-553-fix
   const result = parsePerIssueVerdicts(text, [561, 562, 563]);
   assert(result.length === 3, "parsePerIssueVerdicts: returns one entry per requested issue");
   assert(
-    result[0]?.issue === 561 && result[0]?.verdict === "NEEDS_WORK" && result[0]?.reason === "fresh bug",
+    result[0]?.issue === 561 &&
+      result[0]?.verdict === "NEEDS_WORK" &&
+      result[0]?.reason === "fresh bug",
     "parsePerIssueVerdicts: #561 NEEDS_WORK + reason captured",
   );
   assert(
@@ -2254,7 +2296,8 @@ branch: feature/issue-553-fix
     "parsePerIssueVerdicts: #562 ALREADY_COMPLETE + reason captured",
   );
   assert(
-    result[2]?.verdict === "NEEDS_CLARIFICATION" && result[2]?.reason.includes("acceptance criteria"),
+    result[2]?.verdict === "NEEDS_CLARIFICATION" &&
+      result[2]?.reason.includes("acceptance criteria"),
     "parsePerIssueVerdicts: #563 NEEDS_CLARIFICATION + reason captured",
   );
   // Missing per-issue line falls back to overall verdict.
@@ -2273,16 +2316,26 @@ branch: feature/issue-553-fix
 
 // 36. PR10 — parseMergeCommit pure helper.
 {
-  assert(parseMergeCommit("merge-commit: abc1234") === "abc1234",
-    "parseMergeCommit: plain marker line captured");
-  assert(parseMergeCommit("**merge-commit:** `deadbee567`") === "deadbee567",
-    "parseMergeCommit: markdown emphasis + backticks tolerated");
-  assert(parseMergeCommit("...preamble...\nmerge-commit: 1234567890abcdef") === "1234567890abcdef",
-    "parseMergeCommit: marker line found inside multi-line reply");
-  assert(parseMergeCommit("no marker") === undefined,
-    "parseMergeCommit: missing marker → undefined");
-  assert(parseMergeCommit(undefined) === undefined,
-    "parseMergeCommit: undefined input → undefined");
+  assert(
+    parseMergeCommit("merge-commit: abc1234") === "abc1234",
+    "parseMergeCommit: plain marker line captured",
+  );
+  assert(
+    parseMergeCommit("**merge-commit:** `deadbee567`") === "deadbee567",
+    "parseMergeCommit: markdown emphasis + backticks tolerated",
+  );
+  assert(
+    parseMergeCommit("...preamble...\nmerge-commit: 1234567890abcdef") === "1234567890abcdef",
+    "parseMergeCommit: marker line found inside multi-line reply",
+  );
+  assert(
+    parseMergeCommit("no marker") === undefined,
+    "parseMergeCommit: missing marker → undefined",
+  );
+  assert(
+    parseMergeCommit(undefined) === undefined,
+    "parseMergeCommit: undefined input → undefined",
+  );
 }
 
 // 37. PR10 — runMerged actually dispatches ops on the happy path; the
@@ -2525,10 +2578,7 @@ branch: feature/issue-553-fix
       `multi-issue mixed: activeIssues = [970] (got ${JSON.stringify(after?.pipelineState.activeIssues)})`,
     );
     const dropped = after?.pipelineState.droppedIssues ?? [];
-    assert(
-      dropped.length === 2,
-      "multi-issue mixed: droppedIssues contains 2 entries (971 + 972)",
-    );
+    assert(dropped.length === 2, "multi-issue mixed: droppedIssues contains 2 entries (971 + 972)");
     assert(
       dropped.find((d) => d.issue === 971)?.verdict === "ALREADY_COMPLETE",
       "multi-issue mixed: #971 dropped as ALREADY_COMPLETE",
@@ -2594,8 +2644,8 @@ branch: feature/issue-553-fix
       "multi-issue all-dropped: activeIssues = [] (all filtered)",
     );
     // No plan / branch / develop dispatches when all issues dropped.
-    const cascadeLabels = seenLabels.filter((l) =>
-      l === "plan" || l === "developer" || l.startsWith("developer["),
+    const cascadeLabels = seenLabels.filter(
+      (l) => l === "plan" || l === "developer" || l.startsWith("developer["),
     );
     assert(
       cascadeLabels.length === 0,
@@ -2760,9 +2810,7 @@ branch: feature/issue-553-fix
     // halt was hit), OR a lens-review dispatch-completed/failed event
     // appears in the log. Both confirm the empty-diff guard did NOT fire.
     assert(
-      lensDispatched ||
-        kinds.includes("dispatch-completed") ||
-        kinds.includes("dispatch-failed"),
+      lensDispatched || kinds.includes("dispatch-completed") || kinds.includes("dispatch-failed"),
       "PR11 §A: runLens did NOT skip on empty diff post-commit (merge-base fetcher saw the feature diff)",
     );
     assert(
@@ -2861,7 +2909,12 @@ branch: feature/issue-553-fix
         lastCompletedStep: "branch",
         worktrees: { default: dir },
         workstreams: {
-          default: { id: "default", scope: "fix the HNSW listener crash", paths: [], outOfScope: [] },
+          default: {
+            id: "default",
+            scope: "fix the HNSW listener crash",
+            paths: [],
+            outOfScope: [],
+          },
         },
         branchName: "feature/issue-476-heal-invalid-hnsw-index",
         activeIssues: [476],
@@ -2906,7 +2959,8 @@ branch: feature/issue-553-fix
       `PR11 §B: developer prompt references active issue #476, NOT primary #479 (got headline: "${developerPrompt.split("\n")[0]}")`,
     );
     assert(
-      developerPrompt.includes("gh issue view 476") && !developerPrompt.includes("gh issue view 479"),
+      developerPrompt.includes("gh issue view 476") &&
+        !developerPrompt.includes("gh issue view 479"),
       "PR11 §B: developer prompt's re-fetch instruction targets active issue #476",
     );
     if (speculativePrompt) {
@@ -3007,7 +3061,9 @@ branch: feature/issue-553-fix
     );
     const empty = after?.pipelineState.emptyBodyIssues ?? [];
     assert(
-      empty.length === 2 && empty.some((e) => e.issue === 861) && empty.some((e) => e.issue === 862),
+      empty.length === 2 &&
+        empty.some((e) => e.issue === 861) &&
+        empty.some((e) => e.issue === 862),
       "PR11 §C: emptyBodyIssues lists exactly the failed fetches (#861, #862)",
     );
     assert(fetchCount === 3, "PR11 §C: fetcher called once per requested issue");
@@ -3028,7 +3084,11 @@ branch: feature/issue-553-fix
       currentStep: "handoff",
       status: "handoff",
       emptyBodyIssues: [
-        { issue: 479, reason: "gh issue view returned empty stdout (possible projectCards GraphQL deprecation, gh extension hijack, or auth lapse)" },
+        {
+          issue: 479,
+          reason:
+            "gh issue view returned empty stdout (possible projectCards GraphQL deprecation, gh extension hijack, or auth lapse)",
+        },
         { issue: 480, reason: "gh issue view returned empty stdout" },
         { issue: 481, reason: "gh issue view returned empty stdout" },
         { issue: 482, reason: "gh issue view returned empty stdout" },
@@ -3132,10 +3192,7 @@ branch: feature/issue-553-fix
       /already terminated as handoff/.test(notify),
       "PR12 §B: notify names the terminal status (handoff)",
     );
-    assert(
-      /--restart/.test(notify),
-      "PR12 §B: notify points at /work --restart as the recovery",
-    );
+    assert(/--restart/.test(notify), "PR12 §B: notify points at /work --restart as the recovery");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -3202,8 +3259,7 @@ branch: feature/issue-553-fix
       "PR12 §A: --restart wipes prior eventLog (no surviving 'adversarial-loop' cap-hit from previous cycle)",
     );
     assert(
-      after?.pipelineState.currentStep !== "handoff" ||
-        after?.pipelineState.status === "aborted",
+      after?.pipelineState.currentStep !== "handoff" || after?.pipelineState.status === "aborted",
       "PR12 §A: --restart resets currentStep away from terminal handoff (or aborts on dispatch-halt)",
     );
   } finally {
@@ -3311,10 +3367,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
     const after = await readState(dir, 920);
     const kinds = (after?.eventLog ?? []).map((e) => e.kind);
-    assert(
-      kinds.includes("step-back-completed"),
-      "PR12 §C: step-back-completed event emitted",
-    );
+    assert(kinds.includes("step-back-completed"), "PR12 §C: step-back-completed event emitted");
     const sb = (after?.eventLog ?? []).find((e) => e.kind === "step-back-completed");
     assert(
       sb?.kind === "step-back-completed" && /Outcomes/.test(sb.sddElement),
@@ -3942,30 +3995,21 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 // tests just call groupIssues() with body maps and assert shape.
 {
   // R5 — Default: two unrelated issues get separate groups.
-  const r5 = groupIssues(
-    [100, 200],
-    {
-      100: "title:\t[100] frontend bug\n\nSomething in the UI",
-      200: "title:\t[200] backend fix\n\nSomething in the API",
-    },
-  );
-  assert(
-    Object.keys(r5.groups).length === 2,
-    "R5 default: two unrelated issues → two groups",
-  );
+  const r5 = groupIssues([100, 200], {
+    100: "title:\t[100] frontend bug\n\nSomething in the UI",
+    200: "title:\t[200] backend fix\n\nSomething in the API",
+  });
+  assert(Object.keys(r5.groups).length === 2, "R5 default: two unrelated issues → two groups");
   assert(
     Object.values(r5.groups).every((g) => g.issues.length === 1),
     "R5 default: each group contains exactly one issue",
   );
 
   // R1 — Explicit link markers merge issues.
-  const r1 = groupIssues(
-    [301, 302],
-    {
-      301: "title:\tsomething\n\nDepends-on: #302 — needs the API change first",
-      302: "title:\tapi change\n\nStandalone body",
-    },
-  );
+  const r1 = groupIssues([301, 302], {
+    301: "title:\tsomething\n\nDepends-on: #302 — needs the API change first",
+    302: "title:\tapi change\n\nStandalone body",
+  });
   assert(
     Object.keys(r1.groups).length === 1,
     "R1 link: depends-on marker merges the two issues into one group",
@@ -3981,29 +4025,20 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
   );
 
   // R1 variant — "Blocked-by" also merges.
-  const r1b = groupIssues(
-    [400, 401],
-    {
-      400: "Blocked-by: #401\n\nWaiting on the other one",
-      401: "Standalone",
-    },
-  );
-  assert(
-    Object.keys(r1b.groups).length === 1,
-    "R1 link: blocked-by marker also merges",
-  );
+  const r1b = groupIssues([400, 401], {
+    400: "Blocked-by: #401\n\nWaiting on the other one",
+    401: "Standalone",
+  });
+  assert(Object.keys(r1b.groups).length === 1, "R1 link: blocked-by marker also merges");
 
   // R2 — Path overlap ≥ 50% merges.
   //
   // Bodies each list 2 file paths; both share 1 → Jaccard = 1/3 ≈ 0.33
   // (does NOT merge). Bumping to 2/2 shared → Jaccard = 1.0 (merges).
-  const r2Merge = groupIssues(
-    [500, 501],
-    {
-      500: "Fix in src/foo/bar.ts and src/foo/baz.ts",
-      501: "Fix in src/foo/bar.ts and src/foo/baz.ts (parallel bug)",
-    },
-  );
+  const r2Merge = groupIssues([500, 501], {
+    500: "Fix in src/foo/bar.ts and src/foo/baz.ts",
+    501: "Fix in src/foo/bar.ts and src/foo/baz.ts (parallel bug)",
+  });
   assert(
     Object.keys(r2Merge.groups).length === 1,
     "R2 path-overlap: identical path sets merge (jaccard=1.0)",
@@ -4013,13 +4048,10 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     "R2 path-overlap: notes surfaces the rule",
   );
 
-  const r2NoMerge = groupIssues(
-    [600, 601],
-    {
-      600: "Fix in src/foo/bar.ts and src/foo/baz.ts and src/foo/qux.ts",
-      601: "Fix in src/foo/bar.ts alone",
-    },
-  );
+  const r2NoMerge = groupIssues([600, 601], {
+    600: "Fix in src/foo/bar.ts and src/foo/baz.ts and src/foo/qux.ts",
+    601: "Fix in src/foo/bar.ts alone",
+  });
   assert(
     Object.keys(r2NoMerge.groups).length === 2,
     "R2 path-overlap: below-threshold overlap does NOT merge (jaccard=1/3)",
@@ -4029,13 +4061,10 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
   //
   // Both issues have a Depends-on link (would merge under R1), but #700
   // has the word "independent" → R3 forces it into its own group.
-  const r3 = groupIssues(
-    [700, 701],
-    {
-      700: "Depends-on: #701\n\nMust ship as an independent PR",
-      701: "Standalone",
-    },
-  );
+  const r3 = groupIssues([700, 701], {
+    700: "Depends-on: #701\n\nMust ship as an independent PR",
+    701: "Standalone",
+  });
   assert(
     Object.keys(r3.groups).length === 2,
     "R3 SPLIT: 'independent' marker overrides R1 link — two groups",
@@ -4046,14 +4075,11 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
   );
 
   // R4 — Subsystem tag prefix in title merges.
-  const r4 = groupIssues(
-    [800, 801, 802],
-    {
-      800: "[frontend] fix broken button\n\nBody",
-      801: "[frontend] fix another button\n\nBody",
-      802: "[docs] typo fix\n\nBody",
-    },
-  );
+  const r4 = groupIssues([800, 801, 802], {
+    800: "[frontend] fix broken button\n\nBody",
+    801: "[frontend] fix another button\n\nBody",
+    802: "[docs] typo fix\n\nBody",
+  });
   assert(
     Object.keys(r4.groups).length === 2,
     "R4 subsystem: [frontend] merges, [docs] stays separate → 2 groups",
@@ -4068,15 +4094,12 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
   //
   // Four issues all linked pairwise via depends-on → one component.
   // MAX_ISSUES_PER_GROUP = 3, so the group of 4 splits into singletons.
-  const oversized = groupIssues(
-    [900, 901, 902, 903],
-    {
-      900: "Depends-on: #901 Depends-on: #902 Depends-on: #903",
-      901: "",
-      902: "",
-      903: "",
-    },
-  );
+  const oversized = groupIssues([900, 901, 902, 903], {
+    900: "Depends-on: #901 Depends-on: #902 Depends-on: #903",
+    901: "",
+    902: "",
+    903: "",
+  });
   assert(
     Object.keys(oversized.groups).length === 4,
     `guardrail: component > ${MAX_ISSUES_PER_GROUP} splits into singletons`,
@@ -4104,10 +4127,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
   // K=0 — empty active list.
   const k0 = groupIssues([], {});
-  assert(
-    Object.keys(k0.groups).length === 0,
-    "K=0: empty active list yields empty groups",
-  );
+  assert(Object.keys(k0.groups).length === 0, "K=0: empty active list yields empty groups");
 
   // Missing body — grouping falls back to R5 (separate groups).
   const noBody = groupIssues([1, 2], { 1: "", 2: "" });
@@ -4122,20 +4142,11 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     fanoutSmall.fanout.mode === "parallel" && fanoutSmall.fanout.concurrencyCap >= 1,
     "fanout: K=2 → parallel mode",
   );
-  const fanoutBig = groupIssues(
-    [1, 2, 3, 4, 5],
-    { 1: "a", 2: "b", 3: "c", 4: "d", 5: "e" },
-  );
-  assert(
-    fanoutBig.fanout.mode === "sequential",
-    "fanout: K > cap (2) → sequential mode",
-  );
+  const fanoutBig = groupIssues([1, 2, 3, 4, 5], { 1: "a", 2: "b", 3: "c", 4: "d", 5: "e" });
+  assert(fanoutBig.fanout.mode === "sequential", "fanout: K > cap (2) → sequential mode");
 
   // Group id convention — group-a, group-b, ... in order.
-  const twoGroups = groupIssues(
-    [1000, 2000],
-    { 1000: "unrelated", 2000: "also unrelated" },
-  );
+  const twoGroups = groupIssues([1000, 2000], { 1000: "unrelated", 2000: "also unrelated" });
   assert(
     Object.keys(twoGroups.groups).sort().join(",") === "group-a,group-b",
     "group id convention: group-a, group-b",
@@ -4398,10 +4409,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
         /outcome-verification gate/.test(text) && /empty diff/.test(text),
         "explainCap verify-failed:develop: names the gate + surfaces the evidence lines",
       );
-      assert(
-        /PI_ENSEMBLE_VERIFY=0/.test(text),
-        "explainCap verify-failed: names the escape hatch",
-      );
+      assert(/PI_ENSEMBLE_VERIFY=0/.test(text), "explainCap verify-failed: names the escape hatch");
     }
   } finally {
     if (prevVerify === undefined) delete process.env.PI_ENSEMBLE_VERIFY;
@@ -4679,9 +4687,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
         await runWorkDriver(ctx).catch(() => {});
         const after = await readState(dir, 993);
         assert(
-          !after?.eventLog.some(
-            (e) => e.kind === "cap-hit" && e.cap === "verify-failed:commit-pr",
-          ),
+          !after?.eventLog.some((e) => e.kind === "cap-hit" && e.cap === "verify-failed:commit-pr"),
           "R4c: missing pr: marker repaired via gh pr list — no verify-failed:commit-pr cap",
         );
         assert(
@@ -4775,8 +4781,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
         const exec: NonNullable<DriverContext["verifyExecFn"]> = async (cmd, o) => {
           calls.push(cmd);
           if (cmd === "git rev-parse HEAD") return { stdout: "base123\n" };
-          if (cmd === "git rev-parse --abbrev-ref HEAD")
-            return { stdout: "feature/issue-994\n" };
+          if (cmd === "git rev-parse --abbrev-ref HEAD") return { stdout: "feature/issue-994\n" };
           if (cmd === "git status --porcelain") {
             const cwd = o?.cwd ?? "";
             if (cwd.endsWith("/wta")) return { stdout: " M src/a.rs\n" };
@@ -4814,7 +4819,9 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
         const after = await readState(dir, 994);
         const mechEvent = after?.eventLog.find(
           (e) =>
-            e.kind === "dispatch-completed" && e.role === "driver" && e.label === "driver:commit-pr",
+            e.kind === "dispatch-completed" &&
+            e.role === "driver" &&
+            e.label === "driver:commit-pr",
         );
         assert(
           mechEvent !== undefined,
@@ -4858,8 +4865,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
         });
         const exec: NonNullable<DriverContext["verifyExecFn"]> = async (cmd, o) => {
           if (cmd === "git rev-parse HEAD") return { stdout: "base123\n" };
-          if (cmd === "git rev-parse --abbrev-ref HEAD")
-            return { stdout: "feature/issue-995\n" };
+          if (cmd === "git rev-parse --abbrev-ref HEAD") return { stdout: "feature/issue-995\n" };
           if (cmd === "git status --porcelain") {
             const cwd = o?.cwd ?? "";
             if (cwd.endsWith("/wta") || cwd.endsWith("/wtb") || cwd.endsWith("/wtc"))
@@ -4926,13 +4932,11 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
         });
         const exec: NonNullable<DriverContext["verifyExecFn"]> = async (cmd, o) => {
           if (cmd === "git rev-parse HEAD") return { stdout: "base123\n" };
-          if (cmd === "git rev-parse --abbrev-ref HEAD")
-            return { stdout: "feature/issue-996\n" };
+          if (cmd === "git rev-parse --abbrev-ref HEAD") return { stdout: "feature/issue-996\n" };
           if (cmd === "git status --porcelain") {
             const cwd = o?.cwd ?? "";
             if (cwd.endsWith("/wtb")) return { stdout: "" }; // task-b clean
-            if (cwd.endsWith("/wta") || cwd.endsWith("/wtc"))
-              return { stdout: " M src/x.rs\n" };
+            if (cwd.endsWith("/wta") || cwd.endsWith("/wtc")) return { stdout: " M src/x.rs\n" };
             return { stdout: "" };
           }
           if (cmd.startsWith("git rev-list --count base123")) return { stdout: "0\n" };
@@ -5052,10 +5056,8 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
                 baseSha: "abc123",
               },
             };
-            const execWithSkipMarkers: NonNullable<DriverContext["verifyExecFn"]> = async (
-              cmd,
-            ) => {
-              if ( cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
+            const execWithSkipMarkers: NonNullable<DriverContext["verifyExecFn"]> = async (cmd) => {
+              if (cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
               if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
               if (cmd.startsWith("git diff")) {
                 return {
@@ -5121,9 +5123,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
               "PR277: net-zero markers (addition + removal) pass gate — net-delta arithmetic is exercised",
             );
             // Also verify net-negative (more removals than additions) does not fail
-            const execWithNetNegative: NonNullable<DriverContext["verifyExecFn"]> = async (
-              cmd,
-            ) => {
+            const execWithNetNegative: NonNullable<DriverContext["verifyExecFn"]> = async (cmd) => {
               if (cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
               if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
               if (cmd.startsWith("git diff")) {
@@ -5163,17 +5163,18 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
                 baseSha: "abc123",
               },
             };
-            const execWithFalsePositives: NonNullable<DriverContext["verifyExecFn"]> =
-              async (cmd) => {
-                if (cmd === "git status --porcelain") return { stdout: "M src/docs.ts\n" };
-                if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
-                if (cmd.startsWith("git diff")) {
-                  return {
-                    stdout: `+// TODO: convert to it.skip\n+console.log('it.skip(')\n+\`it.skip("test")\`\n+'actual code'`,
-                  };
-                }
-                return { stdout: "" };
-              };
+            const execWithFalsePositives: NonNullable<DriverContext["verifyExecFn"]> = async (
+              cmd,
+            ) => {
+              if (cmd === "git status --porcelain") return { stdout: "M src/docs.ts\n" };
+              if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
+              if (cmd.startsWith("git diff")) {
+                return {
+                  stdout: `+// TODO: convert to it.skip\n+console.log('it.skip(')\n+\`it.skip("test")\`\n+'actual code'`,
+                };
+              }
+              return { stdout: "" };
+            };
             const ctx: DriverContext = {
               pi: makeFakePi().pi,
               repoRoot: dir,
@@ -5206,17 +5207,18 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
                 baseSha: "abc123",
               },
             };
-            const execWithMultipleMarkers: NonNullable<DriverContext["verifyExecFn"]> =
-              async (cmd) => {
-                if (cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
-                if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
-                if (cmd.startsWith("git diff")) {
-                  return {
-                    stdout: '+it.skip("test1"); it.skip("test2"); it.skip("test3");\n',
-                  };
-                }
-                return { stdout: "" };
-              };
+            const execWithMultipleMarkers: NonNullable<DriverContext["verifyExecFn"]> = async (
+              cmd,
+            ) => {
+              if (cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
+              if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
+              if (cmd.startsWith("git diff")) {
+                return {
+                  stdout: '+it.skip("test1"); it.skip("test2"); it.skip("test3");\n',
+                };
+              }
+              return { stdout: "" };
+            };
             const ctx: DriverContext = {
               pi: makeFakePi().pi,
               repoRoot: dir,
@@ -5254,9 +5256,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
                 baseSha: "abc123",
               },
             };
-            const execFailingSmoke: NonNullable<DriverContext["verifyExecFn"]> = async (
-              cmd,
-            ) => {
+            const execFailingSmoke: NonNullable<DriverContext["verifyExecFn"]> = async (cmd) => {
               if (cmd === "git status --porcelain") return { stdout: "M src/main.ts\n" };
               if (cmd.startsWith("git diff")) return { stdout: "+new code\n" };
               if (cmd.includes("run smoke")) {
@@ -5310,7 +5310,8 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
             };
             const gate = await verifyStepOutcome(ctx, s, "develop");
             assert(
-              gate.ok && gate.notes.some((n) => /smoke.*not run/.test(n) || /no.*smoke-cmd/.test(n)),
+              gate.ok &&
+                gate.notes.some((n) => /smoke.*not run/.test(n) || /no.*smoke-cmd/.test(n)),
               "PR277: absent smoke-cmd produces note, not failure",
             );
           } finally {
@@ -5356,8 +5357,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
               fsSync.writeFileSync(path.join(dir, ".pi", "smoke-cmd"), "bun run smoke\n");
               const smokeDisabled = await verifyStepOutcome(ctxSmokeDisabled, s, "develop");
               assert(
-                smokeDisabled.ok
-                  && smokeDisabled.notes.some((n) => /PI_ENSEMBLE_SMOKE=0/.test(n)),
+                smokeDisabled.ok && smokeDisabled.notes.some((n) => /PI_ENSEMBLE_SMOKE=0/.test(n)),
                 "PR277: PI_ENSEMBLE_SMOKE=0 disables smoke gate (failing smoke is ignored) and emits disabled note",
               );
             } finally {
@@ -5379,10 +5379,13 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
                   baseSha: "abc123",
                 },
               };
-              const execRatchetDisabled: NonNullable<DriverContext["verifyExecFn"]> = async (cmd) => {
+              const execRatchetDisabled: NonNullable<DriverContext["verifyExecFn"]> = async (
+                cmd,
+              ) => {
                 if (cmd === "git status --porcelain") return { stdout: "M src/test.ts\n" };
                 if (cmd.includes("verify-cmd")) return { stdout: "ok\n" };
-                if (cmd.startsWith("git diff")) return { stdout: '+#[ignore]\n+it.skip("test");\n' }; // Skip markers but ratchet disabled
+                if (cmd.startsWith("git diff"))
+                  return { stdout: '+#[ignore]\n+it.skip("test");\n' }; // Skip markers but ratchet disabled
                 return { stdout: "" };
               };
               const ctxRatchetDisabled: DriverContext = {
@@ -5394,8 +5397,8 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
               };
               const ratchetDisabled = await verifyStepOutcome(ctxRatchetDisabled, s, "develop");
               assert(
-                ratchetDisabled.ok
-                  && ratchetDisabled.notes.some((n) => /PI_ENSEMBLE_SKIP_RATCHET=0/.test(n)),
+                ratchetDisabled.ok &&
+                  ratchetDisabled.notes.some((n) => /PI_ENSEMBLE_SKIP_RATCHET=0/.test(n)),
                 "PR277: PI_ENSEMBLE_SKIP_RATCHET=0 disables skip-ratchet gate and emits disabled note",
               );
             } finally {
@@ -5442,7 +5445,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
   // Shell comment with # prefix — should NOT count.
   assert(
-    countSkipMarkersInDiffLine('+# a shell comment mentioning it.skip(') === 0,
+    countSkipMarkersInDiffLine("+# a shell comment mentioning it.skip(") === 0,
     "R7: shell comment # it.skip( counts 0",
   );
 
@@ -5485,7 +5488,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
   // C-style comment line — should NOT count.
   assert(
-    countSkipMarkersInDiffLine('+// TODO: convert to it.skip(') === 0,
+    countSkipMarkersInDiffLine("+// TODO: convert to it.skip(") === 0,
     "R7: full line // comment counts 0",
   );
 
@@ -5514,10 +5517,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
   );
 
   // @Disabled
-  assert(
-    countSkipMarkersInDiffLine('+@Disabled') === 1,
-    "R7: @Disabled counts 1",
-  );
+  assert(countSkipMarkersInDiffLine("+@Disabled") === 1, "R7: @Disabled counts 1");
 
   // pytest.mark.skip
   assert(
@@ -5526,10 +5526,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
   );
 
   // t.Skip(
-  assert(
-    countSkipMarkersInDiffLine('+t.Skip("no db")') === 1,
-    "R7: t.Skip( counts 1",
-  );
+  assert(countSkipMarkersInDiffLine('+t.Skip("no db")') === 1, "R7: t.Skip( counts 1");
 
   // Negative line (removal) — countSkipMarkersInDiffLine returns positive count,
   // caller applies the sign.
@@ -5546,7 +5543,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
   // F1: pytest.mark.skip at end of line counts 1.
   assert(
-    countSkipMarkersInDiffLine('+pytest.mark.skip') === 1,
+    countSkipMarkersInDiffLine("+pytest.mark.skip") === 1,
     "R7: pytest.mark.skip at end of line counts 1",
   );
 
@@ -5558,20 +5555,17 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
   // F1: @DisabledOnOs should NOT match @Disabled.
   assert(
-    countSkipMarkersInDiffLine('+@DisabledOnOs(OS.WINDOWS)') === 0,
+    countSkipMarkersInDiffLine("+@DisabledOnOs(OS.WINDOWS)") === 0,
     "R7: @DisabledOnOs does NOT match @Disabled (word boundary)",
   );
 
   // F1: @Disabled alone at end of line counts 1.
-  assert(
-    countSkipMarkersInDiffLine('+@Disabled') === 1,
-    "R7: @Disabled at end of line counts 1",
-  );
+  assert(countSkipMarkersInDiffLine("+@Disabled") === 1, "R7: @Disabled at end of line counts 1");
 
   // F1: @Disabled with reason counts 1 — paren is not an identifier char.
   assert(
     countSkipMarkersInDiffLine('+@Disabled("flaky")') === 1,
-    "R7: @Disabled(\"flaky\") counts 1 (paren is boundary)",
+    'R7: @Disabled("flaky") counts 1 (paren is boundary)',
   );
 
   // F5: known limitation — unterminated string on a diff line hides later markers.
@@ -5664,7 +5658,10 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     await runWorkDriver(ctx).catch(() => {});
 
     const after = await readState(dir, 950);
-    assert(branchAttempts === 2, `#297 T1: branch re-dispatched after transient (got ${branchAttempts})`);
+    assert(
+      branchAttempts === 2,
+      `#297 T1: branch re-dispatched after transient (got ${branchAttempts})`,
+    );
     // (The develop-halt throw above produces its own step-failed:develop
     // cap-hit — only the BRANCH step must be cap-free here.)
     assert(
@@ -5672,9 +5669,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
       "#297 T1: no step-failed:branch cap-hit — transient did not abort the branch step",
     );
     assert(
-      (after?.eventLog ?? []).some(
-        (e) => e.kind === "step-started" && e.step === "develop",
-      ),
+      (after?.eventLog ?? []).some((e) => e.kind === "step-started" && e.step === "develop"),
       "#297 T1: cycle advanced past branch to develop",
     );
     assert(
@@ -6148,17 +6143,11 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
     // Verify the commit message contains the lens-fix marker.
     const { stdout: log } = await execp("git log --format=%s -1", { cwd: dir });
-    assert(
-      log.includes("fix(lens)"),
-      `commit message references lens-fix (got: ${log.trim()})`,
-    );
+    assert(log.includes("fix(lens)"), `commit message references lens-fix (got: ${log.trim()})`);
 
     // Verify the committed diff contains the fix.
     const { stdout: diff } = await execp("git diff origin/main..HEAD", { cwd: dir });
-    assert(
-      diff.includes("safeParse"),
-      "committed diff contains the fix from lens-fix",
-    );
+    assert(diff.includes("safeParse"), "committed diff contains the fix from lens-fix");
 
     // Cycle advances past lens-fix to adversarial (which fails without
     // adversarialLoopFn injected) → handoff. The driver committed the
@@ -6294,10 +6283,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     const { stdout: logCount } = await execp("git rev-list --count origin/main..HEAD", {
       cwd: dir,
     });
-    assert(
-      Number.parseInt(logCount.trim(), 10) === 2,
-      "exactly 2 commits (feature + lens-fix)",
-    );
+    assert(Number.parseInt(logCount.trim(), 10) === 2, "exactly 2 commits (feature + lens-fix)");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -6512,7 +6498,10 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
             path.join(dir, "safe-helper.ts"),
             "export const safeParse = (x) => JSON.parse(x);\n",
           );
-          await fs.writeFile(path.join(dir, "feature.txt"), "import { safeParse } from './safe-helper';\n");
+          await fs.writeFile(
+            path.join(dir, "feature.txt"),
+            "import { safeParse } from './safe-helper';\n",
+          );
           return mkResult({
             role: "developer",
             ok: true,
@@ -6550,21 +6539,12 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
     // Verify the committed diff includes the NEW file.
     const { stdout: diff } = await execp("git diff origin/main..HEAD", { cwd: dir });
-    assert(
-      diff.includes("safeParse"),
-      "committed diff includes new file content",
-    );
-    assert(
-      diff.includes("safe-helper.ts"),
-      "committed diff references the new file",
-    );
+    assert(diff.includes("safeParse"), "committed diff includes new file content");
+    assert(diff.includes("safe-helper.ts"), "committed diff references the new file");
 
     // Verify the new file exists in the committed tree.
     const { stdout: lsFiles } = await execp("git ls-files safe-helper.ts", { cwd: dir });
-    assert(
-      lsFiles.trim() === "safe-helper.ts",
-      "new file is tracked in the committed tree",
-    );
+    assert(lsFiles.trim() === "safe-helper.ts", "new file is tracked in the committed tree");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -6703,10 +6683,7 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
     // Verify the driver still committed after adversarial approved.
     const { stdout: log } = await execp("git log --format=%s -1", { cwd: dir });
-    assert(
-      log.includes("fix(lens)"),
-      `commit message references lens-fix (got: ${log.trim()})`,
-    );
+    assert(log.includes("fix(lens)"), `commit message references lens-fix (got: ${log.trim()})`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -6852,17 +6829,11 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
 
     // Verify the commit message contains the lens-fix marker.
     const { stdout: log } = await execp("git log --format=%s -1", { cwd: dir });
-    assert(
-      log.includes("fix(lens)"),
-      `commit message references lens-fix (got: ${log.trim()})`,
-    );
+    assert(log.includes("fix(lens)"), `commit message references lens-fix (got: ${log.trim()})`);
 
     // Verify the committed diff contains the fix.
     const { stdout: diff } = await execp("git diff origin/main..HEAD", { cwd: dir });
-    assert(
-      diff.includes("safeParse"),
-      "committed diff contains the fix from lens-fix",
-    );
+    assert(diff.includes("safeParse"), "committed diff contains the fix from lens-fix");
 
     // Cycle advances past lens-fix to adversarial (which fails without
     // adversarialLoopFn injected) → handoff. The driver committed the
@@ -6886,7 +6857,12 @@ async function testFailureCauseTaxonomy() {
 
   // Helper for dispatch-failed event shape
   const mkEvent = (
-    overrides: Partial<{ kind: string; errorTail?: string; killCause?: string; providerMessage?: string }> = {},
+    overrides: Partial<{
+      kind: string;
+      errorTail?: string;
+      killCause?: string;
+      providerMessage?: string;
+    }> = {},
   ) => ({
     kind: "dispatch-failed" as const,
     errorTail: undefined,
@@ -6977,7 +6953,8 @@ async function testFailureCauseTaxonomy() {
     const reason429 = failureCauseReason(
       mkEvent({
         kind: "dispatch-failed-provider",
-        providerMessage: "Server requested 86399s retry delay (max: 60s). 429 status code (no body)",
+        providerMessage:
+          "Server requested 86399s retry delay (max: 60s). 429 status code (no body)",
       }),
     );
     assert(
@@ -7055,28 +7032,18 @@ async function testFailureCauseTaxonomy() {
         exitCode: 0,
         errorStop: {
           reason: "error",
-          message:
-            "Server requested 86399s retry delay (max: 60s). 429 status code (no body)",
+          message: "Server requested 86399s retry delay (max: 60s). 429 status code (no body)",
         },
         text: "",
       }),
     );
-    assert(
-      report.includes("429"),
-      `429 is named in report: ${report.split("\n")[0]}`,
-    );
-    assert(
-      report.includes("cannot help"),
-      "429 report states retrying cannot help",
-    );
+    assert(report.includes("429"), `429 is named in report: ${report.split("\n")[0]}`);
+    assert(report.includes("cannot help"), "429 report states retrying cannot help");
     assert(
       !report.includes("terminated mid-stream"),
       "429 does NOT emit terminated mid-stream badge",
     );
-    assert(
-      !report.includes("FAILED-PROVIDER-ERROR"),
-      "429 is NOT tagged as FAILED-PROVIDER-ERROR",
-    );
+    assert(!report.includes("FAILED-PROVIDER-ERROR"), "429 is NOT tagged as FAILED-PROVIDER-ERROR");
   }
 
   // --- formatSingleReport: genuine provider error (errorStop, no 429) ---
@@ -7120,10 +7087,7 @@ async function testFailureCauseTaxonomy() {
       report.includes("cancelled") || report.includes("abort"),
       `abort is named distinctly: ${report.split("\n")[0]}`,
     );
-    assert(
-      !report.includes("FAILED-PROVIDER-ERROR"),
-      "abort is NOT tagged as provider error",
-    );
+    assert(!report.includes("FAILED-PROVIDER-ERROR"), "abort is NOT tagged as provider error");
     assert(
       !report.includes("terminated mid-stream"),
       "abort does NOT emit terminated mid-stream badge",
@@ -7177,7 +7141,9 @@ async function testFailureCauseTaxonomy() {
   {
     // Standard 429 message from Pi
     assert(
-      isRateLimit429Msg("Server requested 86399s retry delay (max: 60s). 429 status code (no body)"),
+      isRateLimit429Msg(
+        "Server requested 86399s retry delay (max: 60s). 429 status code (no body)",
+      ),
       "F2: 429 with 'retry delay' + '429 status' is detected",
     );
 
@@ -7200,10 +7166,7 @@ async function testFailureCauseTaxonomy() {
     );
 
     // undefined input
-    assert(
-      !isRateLimit429Msg(undefined),
-      "F2: undefined message is NOT detected as 429",
-    );
+    assert(!isRateLimit429Msg(undefined), "F2: undefined message is NOT detected as 429");
 
     // formatSingleReport for 429 must NOT contain "terminated mid-stream"
     // (this is the user-visible consequence of the lifecycle + report agreement)
@@ -7224,10 +7187,7 @@ async function testFailureCauseTaxonomy() {
       !r429.includes("terminated mid-stream"),
       "F2: 429 report must NOT contain terminated mid-stream",
     );
-    assert(
-      r429.includes("429"),
-      "F2: 429 report MUST name the rate-limit",
-    );
+    assert(r429.includes("429"), "F2: 429 report MUST name the rate-limit");
   }
 }
 
