@@ -25,6 +25,8 @@ import {
   DriverNotImplementedError,
   type DriverContext,
   STEP_FAILURE_POLICY,
+  classifyFailureCause,
+  failureCauseReason,
   captureWorktreeSnapshot,
   explainCap,
   nextStep,
@@ -52,6 +54,7 @@ import {
   teardownWorkspaceTmp,
 } from "../src/work-driver.ts";
 import type { DispatchResult } from "../src/types.ts";
+import { formatSingleReport } from "../src/async-jobs.ts";
 import {
   type WorkState,
   WORK_STATE_SCHEMA_VERSION,
@@ -1231,6 +1234,8 @@ branch: feature/issue-553-fix
             role: "developer",
             ok: false,
             exitCode: 143,
+            killCause: "timeout",
+            killBudgetMs: 1_800_000,
             text: "[pi-ensemble] killed after 1800000ms timeout",
           });
         }
@@ -6871,6 +6876,290 @@ alternativeApproach: Could also split into two issues — one for the impl, one 
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+// ---------------------------------------------------------------------------
+// #308/#309 — Failure cause taxonomy tests
+// ---------------------------------------------------------------------------
+
+async function testFailureCauseTaxonomy() {
+  console.log("--- failure-cause-taxonomy (#308/#309) ---");
+
+  // Helper for dispatch-failed event shape
+  const mkEvent = (
+    overrides: Partial<{ kind: string; errorTail?: string; killCause?: string; providerMessage?: string }> = {},
+  ) => ({
+    kind: "dispatch-failed" as const,
+    errorTail: undefined,
+    killCause: undefined,
+    providerMessage: undefined,
+    ...overrides,
+  });
+
+  // --- classifyFailureCause: timeout self-kill never retries ---
+  {
+    const cls = classifyFailureCause(mkEvent({ killCause: "timeout", kind: "dispatch-failed" }));
+    assert(cls.cause === "self-killed:timeout", "timeout → self-killed:timeout");
+    assert(cls.shouldRetry === false, "timeout → shouldRetry=false");
+    assert(cls.maxRetries === 0, "timeout → maxRetries=0");
+  }
+
+  // --- classifyFailureCause: inactivity retries at most once ---
+  {
+    const cls = classifyFailureCause(mkEvent({ killCause: "inactivity", kind: "dispatch-failed" }));
+    assert(cls.cause === "self-killed:inactivity", "inactivity → self-killed:inactivity");
+    assert(cls.shouldRetry === true, "inactivity → shouldRetry=true");
+    assert(cls.maxRetries === 1, "inactivity → maxRetries=1");
+  }
+
+  // --- classifyFailureCause: abort never retries ---
+  {
+    const cls = classifyFailureCause(mkEvent({ killCause: "abort", kind: "dispatch-failed" }));
+    assert(cls.cause === "self-killed:abort", "abort → self-killed:abort");
+    assert(cls.shouldRetry === false, "abort → shouldRetry=false");
+    assert(cls.maxRetries === 0, "abort → maxRetries=0");
+  }
+
+  // --- classifyFailureCause: 429 rate-limit never retries ---
+  {
+    const cls = classifyFailureCause(
+      mkEvent({
+        kind: "dispatch-failed-provider",
+        providerMessage:
+          "Server requested 86399s retry delay (max: 60s). 429 status code (no body)",
+      }),
+    );
+    assert(cls.cause === "rate-limited:429", "429 → rate-limited:429");
+    assert(cls.shouldRetry === false, "429 → shouldRetry=false");
+    assert(cls.maxRetries === 0, "429 → maxRetries=0");
+  }
+
+  // --- classifyFailureCause: transport severance retries ---
+  {
+    const cls = classifyFailureCause(mkEvent({ kind: "dispatch-failed-provider" }));
+    assert(cls.cause === "provider-severed", "errorStop → provider-severed");
+    assert(cls.shouldRetry === true, "provider-severed → shouldRetry=true");
+    assert(cls.maxRetries >= 2, "provider-severed → maxRetries >= 2 (adversarial needs depth)");
+  }
+
+  // --- classifyFailureCause: generic crash retries once ---
+  {
+    const cls = classifyFailureCause(mkEvent({ errorTail: "segmentation fault" }));
+    assert(cls.cause === "crashed", "generic errorTail → crashed");
+    assert(cls.shouldRetry === true, "crashed → shouldRetry=true");
+    assert(cls.maxRetries === 1, "crashed → maxRetries=1");
+  }
+
+  // --- failureCauseReason: operator-facing strings ---
+  {
+    const reasonTimeout = failureCauseReason(mkEvent({ killCause: "timeout" }));
+    assert(
+      reasonTimeout.includes("wall-clock timeout"),
+      `timeout reason mentions timeout: ${reasonTimeout}`,
+    );
+
+    const reasonInactivity = failureCauseReason(mkEvent({ killCause: "inactivity" }));
+    assert(
+      reasonInactivity.includes("inactivity watchdog"),
+      `inactivity reason mentions inactivity: ${reasonInactivity}`,
+    );
+
+    const reasonAbort = failureCauseReason(mkEvent({ killCause: "abort" }));
+    assert(reasonAbort.includes("abort"), `abort reason mentions abort: ${reasonAbort}`);
+
+    const reason429 = failureCauseReason(
+      mkEvent({
+        kind: "dispatch-failed-provider",
+        providerMessage: "Server requested 86399s retry delay (max: 60s). 429 status code (no body)",
+      }),
+    );
+    assert(
+      reason429.includes("429") && reason429.includes("cannot help"),
+      `429 reason names rate-limit: ${reason429}`,
+    );
+
+    const reasonSevered = failureCauseReason(mkEvent({ kind: "dispatch-failed-provider" }));
+    assert(
+      reasonSevered.includes("provider/transport"),
+      `severed reason names provider error: ${reasonSevered}`,
+    );
+  }
+
+  // --- formatSingleReport: self-killed timeout ---
+  {
+    const report = formatSingleReport(
+      "job-1",
+      "developer",
+      mkResult({
+        ok: false,
+        exitCode: 137,
+        killCause: "timeout",
+        killBudgetMs: 90 * 60 * 1000,
+        text: "",
+      }),
+    );
+    assert(
+      report.includes("self-killed"),
+      `self-kill timeout is tagged distinctly: ${report.split("\n")[0]}`,
+    );
+    assert(
+      !report.includes("terminated mid-stream"),
+      "self-kill timeout does NOT emit terminated mid-stream badge",
+    );
+    assert(
+      !report.includes("FAILED-PROVIDER-ERROR"),
+      "self-kill timeout is NOT tagged as provider error",
+    );
+  }
+
+  // --- formatSingleReport: self-killed inactivity ---
+  {
+    const report = formatSingleReport(
+      "job-2",
+      "ops",
+      mkResult({
+        ok: false,
+        exitCode: 143,
+        killCause: "inactivity",
+        text: "",
+      }),
+    );
+    assert(
+      report.includes("inactivity"),
+      `self-kill inactivity is tagged distinctly: ${report.split("\n")[0]}`,
+    );
+    assert(
+      !report.includes("FAILED-PROVIDER-ERROR"),
+      "self-kill inactivity is NOT tagged as provider error",
+    );
+  }
+
+  // --- formatSingleReport: 429 rate-limit ---
+  {
+    const report = formatSingleReport(
+      "job-3",
+      "developer",
+      mkResult({
+        ok: true,
+        exitCode: 0,
+        errorStop: {
+          reason: "error",
+          message:
+            "Server requested 86399s retry delay (max: 60s). 429 status code (no body)",
+        },
+        text: "",
+      }),
+    );
+    assert(
+      report.includes("429"),
+      `429 is named in report: ${report.split("\n")[0]}`,
+    );
+    assert(
+      report.includes("cannot help"),
+      "429 report states retrying cannot help",
+    );
+    assert(
+      !report.includes("terminated mid-stream"),
+      "429 does NOT emit terminated mid-stream badge",
+    );
+    assert(
+      !report.includes("FAILED-PROVIDER-ERROR"),
+      "429 is NOT tagged as FAILED-PROVIDER-ERROR",
+    );
+  }
+
+  // --- formatSingleReport: genuine provider error (errorStop, no 429) ---
+  {
+    const report = formatSingleReport(
+      "job-4",
+      "developer",
+      mkResult({
+        ok: true,
+        exitCode: 0,
+        errorStop: {
+          reason: "error",
+          message: "TypeError: fetch failed",
+        },
+        text: "partial work output",
+      }),
+    );
+    assert(
+      report.includes("FAILED-PROVIDER-ERROR"),
+      `genuine provider error is tagged: ${report.split("\n")[0]}`,
+    );
+    assert(
+      report.includes("TypeError: fetch failed"),
+      "provider error message is surfaced in report",
+    );
+  }
+
+  // --- formatSingleReport: abort ---
+  {
+    const report = formatSingleReport(
+      "job-5",
+      "ops",
+      mkResult({
+        ok: false,
+        exitCode: 130,
+        killCause: "abort",
+        text: "",
+      }),
+    );
+    assert(
+      report.includes("cancelled") || report.includes("abort"),
+      `abort is named distinctly: ${report.split("\n")[0]}`,
+    );
+    assert(
+      !report.includes("FAILED-PROVIDER-ERROR"),
+      "abort is NOT tagged as provider error",
+    );
+    assert(
+      !report.includes("terminated mid-stream"),
+      "abort does NOT emit terminated mid-stream badge",
+    );
+  }
+
+  // --- F1 regression: failureCauseReason with killCause overrides kind ---
+  // The RETRY_ONCE branch (adversarial/lens-review) now calls
+  // failureCauseReason(tail) instead of the raw "provider error" / "subagent failed"
+  // strings. This ensures killCause is surfaced even when kind is
+  // dispatch-failed-provider (e.g. a 429 or wall-clock self-kill).
+  {
+    // dispatch-failed-provider with killCause:timeout → reason names timeout, NOT "provider error"
+    const timeoutProvider = failureCauseReason(
+      mkEvent({
+        kind: "dispatch-failed-provider",
+        killCause: "timeout",
+      }),
+    );
+    assert(
+      timeoutProvider.includes("wall-clock timeout") || timeoutProvider.includes("killed"),
+      `F1: RETRY_ONCE timeout reason names self-kill (got: ${timeoutProvider})`,
+    );
+    assert(
+      !timeoutProvider.includes("provider error"),
+      `F1: RETRY_ONCE timeout reason must NOT say "provider error" (got: ${timeoutProvider})`,
+    );
+
+    // dispatch-failed with killCause:timeout → reason names timeout, NOT "subagent failed"
+    const timeoutFailed = failureCauseReason(
+      mkEvent({
+        kind: "dispatch-failed",
+        killCause: "timeout",
+        errorTail: "some trailing error text",
+      }),
+    );
+    assert(
+      timeoutFailed.includes("wall-clock timeout") || timeoutFailed.includes("killed"),
+      `F1: RETRY_ONCE timeout (dispatch-failed) reason names self-kill (got: ${timeoutFailed})`,
+    );
+    assert(
+      !timeoutFailed.includes("subagent failed"),
+      `F1: RETRY_ONCE timeout reason must NOT say "subagent failed" (got: ${timeoutFailed})`,
+    );
+  }
+}
+
+await testFailureCauseTaxonomy();
 
 console.log(`\nexit ${exit}`);
 process.exit(exit);

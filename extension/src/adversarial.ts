@@ -136,44 +136,146 @@ export async function runAdversarialLoop(
   };
 
   /**
-   * #298 — a round whose dispatch errored (provider error-stop, pi-ensemble
-   * kill, non-zero exit) produced NO verdict. Pre-#298 the loop fed its
-   * partial text into parseVerdict, whose ISSUES_FOUND default then
-   * manufactured a developer "fix" cycle from garbage findings (empirical:
-   * run ms5udbl0 2026-07-29 — a SIGTERM'd review round spawned a fix +
-   * re-review against an empty diff).
+   * #309 — classify a dispatch result by its ROOT CAUSE so the adversarial
+   * loop can branch on structure (self-kill / 429 / provider-severed) instead
+   * of collapsing everything into "infraFailed". Replaces the old boolean.
    */
-  const infraFailed = (r: DispatchResult): boolean => !r.ok || !!r.errorStop || !!r.killCause;
-  const describeInfra = (r: DispatchResult): string => {
-    if (r.killCause) return `killed by pi-ensemble (${r.killCause})`;
-    if (r.errorStop)
-      return `provider/transport error: ${r.errorStop.message ?? r.errorStop.reason}`;
-    return `failed (exit ${r.exitCode})`;
+  const classifyDispatchOutcome = (
+    r: DispatchResult,
+  ): {
+    infraFailed: boolean;
+    cause:
+      | "success"
+      | "self-killed:timeout"
+      | "self-killed:inactivity"
+      | "self-killed:abort"
+      | "rate-limited:429"
+      | "provider-severed"
+      | "crashed-no-verdict";
+    shouldRetry: boolean;
+    maxRetries: number;
+    headline: string;
+  } => {
+    // killCause (#296) — pi-ensemble itself ended the child. Must check first.
+    if (r.killCause === "timeout") {
+      return {
+        infraFailed: true,
+        cause: "self-killed:timeout",
+        shouldRetry: false,
+        maxRetries: 0,
+        headline:
+          "killed by pi-ensemble (wall-clock timeout) — budget exhausted, retrying cannot help",
+      };
+    }
+    if (r.killCause === "inactivity") {
+      return {
+        infraFailed: true,
+        cause: "self-killed:inactivity",
+        shouldRetry: true,
+        maxRetries: 1,
+        headline: "killed by pi-ensemble (inactivity watchdog)",
+      };
+    }
+    if (r.killCause === "abort") {
+      return {
+        infraFailed: true,
+        cause: "self-killed:abort",
+        shouldRetry: false,
+        maxRetries: 0,
+        headline: "cancelled (abort signal)",
+      };
+    }
+
+    // 429 rate-limit — detected from errorStop.message.
+    if (r.errorStop && /429\s*status|retry delay.*429/i.test(r.errorStop.message ?? "")) {
+      return {
+        infraFailed: true,
+        cause: "rate-limited:429",
+        shouldRetry: false,
+        maxRetries: 0,
+        headline: `provider rate-limited (429) — retrying cannot help (${r.errorStop.message ?? "retry delay requested"})`,
+      };
+    }
+
+    // Provider error-stop (transport severance, provider timeout, etc).
+    if (r.errorStop) {
+      return {
+        infraFailed: true,
+        cause: "provider-severed",
+        shouldRetry: true,
+        maxRetries: 3,
+        headline: `provider/transport error: ${r.errorStop.message ?? r.errorStop.reason}`,
+      };
+    }
+
+    // Non-zero exit with no structured signal — generic crash.
+    if (!r.ok) {
+      return {
+        infraFailed: true,
+        cause: "crashed-no-verdict",
+        shouldRetry: true,
+        maxRetries: 1,
+        headline: `crashed (exit ${r.exitCode ?? "?"}), no verdict produced`,
+      };
+    }
+
+    // Success — no infra failure.
+    return {
+      infraFailed: false,
+      cause: "success" as const,
+      shouldRetry: false,
+      maxRetries: 0,
+      headline: "",
+    };
   };
-  /** One bounded infra-retry per phase; second failure aborts the loop. */
+
+  /**
+   * #308 — retry loop that respects cause-specific depth.
+   * Provider severances get deeper retries (up to maxRetries).
+   * Self-kills and 429 get no retries. Inactivity gets one.
+   */
   const runPhaseWithInfraRetry = async (
     role: "adversarial-developer" | "developer",
     tag: string,
     prompt: string,
     cwd?: string,
   ): Promise<DispatchResult> => {
-    const first = await runPhase(role, tag, prompt, cwd);
-    accumulate(first);
-    if (!infraFailed(first) || signal.aborted) return first;
-    const retry = await runPhase(role, `${tag}-retry`, prompt, cwd);
-    accumulate(retry);
-    return retry;
+    let current = await runPhase(role, tag, prompt, cwd);
+    accumulate(current);
+    let cls = classifyDispatchOutcome(current);
+    if (!cls.infraFailed || signal.aborted) return current;
+    if (!cls.shouldRetry || cls.maxRetries === 0) return current;
+
+    // Retry up to maxRetries for this cause.
+    for (let attempt = 1; attempt <= cls.maxRetries; attempt++) {
+      if (signal.aborted) return current;
+      const retry = await runPhase(
+        role,
+        `${tag}-retry${attempt > 1 ? `-${attempt}` : ""}`,
+        prompt,
+        cwd,
+      );
+      accumulate(retry);
+      cls = classifyDispatchOutcome(retry);
+      if (!cls.infraFailed) return retry;
+      if (!cls.shouldRetry) return retry; // cause changed (e.g. severance → self-kill)
+      current = retry;
+    }
+    return current;
   };
-  const infraFailureResult = (round: number, phase: string, r: DispatchResult): DispatchResult =>
-    synthesizeResult({
+
+  const infraFailureResult = (round: number, phase: string, r: DispatchResult): DispatchResult => {
+    const cls = classifyDispatchOutcome(r);
+    return synthesizeResult({
       ok: false,
       loopOutcome: "infra-failure",
-      text: `Adversarial loop infrastructure failure: round ${round} ${phase} dispatch ${describeInfra(r)} (after one retry). No verdict was produced — this is NOT a review rejection.`,
+      text: `Adversarial loop infrastructure failure: round ${round} ${phase} dispatch ${cls.headline}. No verdict was produced — this is NOT a review rejection.`,
       ms: Date.now() - start,
       usage,
       transcriptPath: lastTranscript,
       model: lastModel,
     });
+  };
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     if (signal.aborted) break;
@@ -183,7 +285,7 @@ export async function runAdversarialLoop(
       buildAdversarialPrompt(params.diff, params.context, round),
       params.workCwd,
     );
-    if (infraFailed(adv)) return infraFailureResult(round, "review", adv);
+    if (classifyDispatchOutcome(adv).infraFailed) return infraFailureResult(round, "review", adv);
 
     const verdict = parseVerdict(adv.text);
     rounds.push({ round, verdict, ms: adv.ms });
@@ -208,7 +310,7 @@ export async function runAdversarialLoop(
       buildFixPrompt(verdict.findings, params.context),
       params.workCwd,
     );
-    if (infraFailed(fix)) return infraFailureResult(round, "fix", fix);
+    if (classifyDispatchOutcome(fix).infraFailed) return infraFailureResult(round, "fix", fix);
   }
 
   const last = rounds[rounds.length - 1];

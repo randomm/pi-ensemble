@@ -115,7 +115,20 @@ For extensions outside the canonical install location (dev-mode, monorepo paths)
 
 ## 4. Pi compatibility (load-bearing)
 
-The extension depends on Pi's CLI flags, JSON event stream shape, and `ExtensionAPI` surface. The pin in `extension/package.json` (`@earendil-works/pi-coding-agent: ~0.75.3`) is **deliberate**, not a default.
+The extension depends on Pi's CLI flags, JSON event stream shape, and `ExtensionAPI` surface. The pin in `extension/package.json` (`@earendil-works/pi-coding-agent: ~0.75.3`) is **deliberate**, not a default. But understanding what it actually protects — and what it does not — is critical.
+
+### What the pin protects
+
+1. **Type-checking.** Every import of `@earendil-works/pi-coding-agent` across the extension source is `import type` — erased at compile time, zero runtime footprint. The pin ensures the extension's types match 0.75.3's shape. That's it.
+2. **pi-tui widget code.** `@earendil-works/pi-tui` has value imports (`Text`, `SelectList`, `Container` in `lifecycle-events.ts`, `model-picker.ts`, `dispatch-deck.ts`) that resolve to the pinned 0.75.3 code at runtime. So 0.75.3 TUI widgets render inside whatever Pi version the user actually runs. This IS a real runtime footprint.
+
+### What the pin does NOT protect
+
+The runtime `ExtensionAPI` surface. `@earendil-works/pi-coding-agent` is a devDependency; it cannot fence runtime. `spawnSpecialist` re-invokes `process.argv[1]` — the **running pi binary** — never the pinned package. The extension is typed against 0.75.3 but called with the installed Pi's ExtensionAPI. If the user's Pi drifts past 0.75.3 (e.g. runtime 0.82.1), the pin is silent. Shape changes in the ExtensionAPI or CLI flags will only surface as runtime errors, not type errors.
+
+### The uncovered risk: runtime drift
+
+The actual risk is the runtime Pi version advancing while the pin sits still. That is exactly the current state: runtime 0.82.1 vs pin `~0.75.3`, never validated together. The only detector is `test-pi-shape-live.ts`, but it is gated on a deliberate pin bump that may never happen. If nobody bumps the pin, the check never runs, and drift accumulates silently.
 
 ### Shapes we depend on
 
@@ -135,8 +148,6 @@ Don't assume these are stable across Pi versions — verify when bumping:
 2. Bump in `extension/package.json` (e.g. `~0.75.3` → `~0.76.0`).
 3. Run **live** smoke tests on the new version (offline tests won't catch shape changes):
    - `bun run smoke-tests/test-pi-shape-live.ts` — load-bearing shape assertions (#7). Spawns a trivial PONG child and verifies the event shapes (`agent_end`, `message_end.message.role/usage`, `content[].type`, `model`) we depend on.
-   - `bun run smoke-tests/test-spawn.ts` — single-child spawn end-to-end.
-   - `bun run smoke-tests/test-parallel.ts` — 3 concurrent children.
    - `bun run smoke-tests/test-progress-live.ts` — multi-turn `onProgress` cadence.
    - `bun run smoke-tests/test-lens-review-live.ts` — six-pass review against a synthetic diff.
 4. Update `CHANGELOG.md`'s "Tested against pi X.Y.Z" line.
