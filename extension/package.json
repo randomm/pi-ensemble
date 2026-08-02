@@ -34,7 +34,7 @@
     "test": "bun run smoke-tests/test-command-flow.ts && bun run smoke-tests/test-lens-review.ts && bun run smoke-tests/test-models.ts"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.32.0"
+    "@sinclair/typebox": "^0.34.52"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
