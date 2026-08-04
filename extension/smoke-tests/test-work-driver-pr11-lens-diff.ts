@@ -14,7 +14,7 @@ import path from "node:path";
 import { type DriverContext } from "../src/work-driver-context.ts";
 import { runWorkDriver } from "../src/work-driver.ts";
 import { initialState, readState, writeState } from "../src/workflow-state.ts";
-import { mkLensSummary } from "./test-helpers.ts";
+import { mkLensSummary, setupSpawnGuard } from "./test-helpers.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
@@ -75,13 +75,7 @@ process.env.PI_ENSEMBLE_INACTIVITY_TIMEOUT_MS = "2000";
 // gate tests re-enable it with an injected verifyExecFn.
 process.env.PI_ENSEMBLE_VERIFY = "0";
 
-// PI_ENSEMBLE_FORBID_LIVE_SPAWN=1 prevents accidental live spawns in
-// offline tests. PI_ENSEMBLE_SPAWN_TIMEOUT_MS=2000 is retained as
-// defence-in-depth (bounds any accidental bypass of the FORBID guard).
-
-process.env.PI_ENSEMBLE_FORBID_LIVE_SPAWN = "1";
-
-
+setupSpawnGuard();
 
 // 43. PR11 — runLens uses merge-base diff (origin/<base>..HEAD), not
 // `git diff HEAD`. Empirical /work 533+557 (v10r 2026-06-25): pre-PR11
