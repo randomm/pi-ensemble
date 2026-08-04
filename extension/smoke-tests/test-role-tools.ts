@@ -12,6 +12,7 @@
  */
 
 import { buildChildArgs } from "../src/spawn.ts";
+import { type ResolvedModelChoice } from "../src/models.ts";
 import { excludeToolListFor, excludeToolsFor } from "../src/role-tools.ts";
 
 let exit = 0;
@@ -33,7 +34,7 @@ function excludeToolsValueFromArgs(args: string[]): string | undefined {
 // Shared test fixtures.
 const TEST_PROMPT = "/tmp/pi-ensemble-test-prompt.md";
 const TEST_TRANSCRIPT = "/tmp/pi-ensemble-test-transcript.json";
-const TEST_MODEL = { model: undefined, provider: undefined };
+const TEST_MODEL: ResolvedModelChoice = { provider: undefined, model: undefined, source: "default" };
 
 // ============================================================
 // CHILD ARGV ASSERTIONS — the fix for #339

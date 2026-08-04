@@ -50,7 +50,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { resolveModel } from "./models.ts";
+import { type ResolvedModelChoice, resolveModel } from "./models.ts";
 import { type BrokerHandle, startBroker } from "./permission-broker.ts";
 import { isParentInTrustMode, makeBrokerDeps } from "./permission-guard.ts";
 import type { PiJsonEvent, SpawnOptions } from "./pi-event-shapes.ts";
@@ -77,25 +77,35 @@ import type { DispatchResult, DispatchSpec } from "./types.ts";
 
 export { buildCwdHint, makeRunId };
 
-function buildChildArgsBase(): string[] {
-  return ["--mode", "rpc", "--no-extensions"];
-}
+const CHILD_ARGS_BASE = ["--mode", "rpc", "--no-extensions"] as const;
 
 /**
  * Build the complete child argument list for spawning a subagent Pi process.
  * Used by `spawnSpecialist` and exported for smoke-test verification.
+ *
+ * Argument order is load-bearing:
+ *   - `--provider` must precede `--model` so Pi disambiguates against the
+ *     provider catalog (custom providers need explicit provider IDs).
+ *   - Extension `--extension` flags are appended after model flags so Pi
+ *     resolves the model before extensions can override it.
  */
 export function buildChildArgs(
   role: string,
   tmpPromptFile: string,
   transcriptPath: string,
-  modelChoice: { provider?: string; model?: string },
+  modelChoice: ResolvedModelChoice,
   subagentGuardEnabled: boolean,
   extraArgs?: string[],
 ): string[] {
-  const args = buildChildArgsBase();
+  const args: string[] = [...CHILD_ARGS_BASE];
+  // `--mode rpc` keeps stdin open for JSON command injection
+  // ({type:"prompt"|"steer"|"abort"|"follow_up"}); this is the foundation
+  // for dispatch_steer (#152) and all async push-callback flows.
   args.push("--session", transcriptPath);
   args.push("--append-system-prompt", tmpPromptFile);
+  // `--exclude-tools` requires Pi >= 0.83.0; with pin at ~0.82.0 the
+  // flag is accepted by 0.82.x but was unknown in 0.75.x (caused
+  // immediate child exit). Verified by test-role-tools.ts smoke test.
   const excludedTools = excludeToolsFor(role);
   if (excludedTools) {
     args.push("--exclude-tools", excludedTools);
