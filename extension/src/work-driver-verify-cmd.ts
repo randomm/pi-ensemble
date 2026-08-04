@@ -9,6 +9,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+/** Read the first non-empty, non-comment line from a config file. */
+export function readFirstConfigLine(content: string): string | undefined {
+  return content
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0 && !l.startsWith("#"));
+}
+
 /**
  * PR17 — Discover the project's verify command (typecheck/test) for the
  * driver-side outcome-verification gate.
@@ -36,10 +44,7 @@ export async function verifyCmdFor(repoRoot: string): Promise<string | undefined
       .catch(() => false);
   try {
     const raw = await fs.readFile(path.join(repoRoot, ".pi", "verify-cmd"), "utf8");
-    const line = raw
-      .split("\n")
-      .map((l) => l.trim())
-      .find((l) => l.length > 0 && !l.startsWith("#"));
+    const line = readFirstConfigLine(raw);
     if (line) return line;
   } catch {
     // No explicit file — try derivation.

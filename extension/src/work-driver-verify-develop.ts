@@ -10,7 +10,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { DriverContext } from "./work-driver-context.ts";
 import { countSkipMarkersInDiffLine } from "./work-driver-skip-ratchet.ts";
-import { verifyCmdFor } from "./work-driver-verify-cmd.ts";
+import { readFirstConfigLine, verifyCmdFor } from "./work-driver-verify-cmd.ts";
 import type { WorkState } from "./workflow-state.ts";
 
 /** PR17 — bounded wall-clock for the verify command (default 10 min). */
@@ -18,6 +18,22 @@ function verifyTimeoutMs(): number {
   const env = Number(process.env.PI_ENSEMBLE_VERIFY_TIMEOUT_MS);
   if (Number.isFinite(env) && env > 0) return env;
   return 10 * 60_000;
+}
+
+/** PR338 — validate a git SHA before shell interpolation. */
+const VALID_SHA_RE = /^[0-9a-f]{40}$/;
+function isValidSha(s: string | undefined): s is string {
+  return typeof s === "string" && VALID_SHA_RE.test(s);
+}
+
+/** PR338 — format an exec error with bounded output tail. */
+function formatExecError(
+  e: Error & { stdout?: string; stderr?: string; killed?: boolean },
+  timeoutMsg: string,
+  failMsg: string,
+): string {
+  const tail = `${e.stdout ?? ""}\n${e.stderr ?? ""}`.trim().slice(-1500);
+  return e.killed ? timeoutMsg : `${failMsg}: ${tail || e.message?.slice(0, 300)}`;
 }
 
 /**
@@ -53,7 +69,7 @@ export async function verifyDevelopOutcome(
     } catch (err) {
       notes.push(`git status failed in ${id} (${(err as Error).message?.slice(0, 100)})`);
     }
-    if (!changed && baseSha) {
+    if (!changed && isValidSha(baseSha)) {
       try {
         const { stdout } = await execFn(`git rev-list --count ${baseSha}..HEAD`, {
           cwd,
@@ -96,11 +112,12 @@ export async function verifyDevelopOutcome(
         });
       } catch (err) {
         const e = err as Error & { stdout?: string; stderr?: string; killed?: boolean };
-        const tail = `${e.stdout ?? ""}\n${e.stderr ?? ""}`.trim().slice(-1500);
         failures.push(
-          e.killed
-            ? `verify command \`${cmd}\` exceeded its ${Math.round(verifyTimeoutMs() / 60000)}-min timeout in ${cwd}`
-            : `verify command \`${cmd}\` failed in ${cwd}: ${tail || e.message?.slice(0, 300)}`,
+          formatExecError(
+            e,
+            `verify command \`${cmd}\` exceeded its ${Math.round(verifyTimeoutMs() / 60000)}-min timeout in ${cwd}`,
+            `verify command \`${cmd}\` failed in ${cwd}`,
+          ),
         );
       }
     }
@@ -118,7 +135,8 @@ export async function verifyDevelopOutcome(
     for (const cwd of changedWorktrees) {
       let diffContent = "";
       try {
-        const { stdout } = await execFn(`git diff ${baseSha ?? "HEAD"} -U0`, {
+        const baseRef = isValidSha(baseSha) ? baseSha : "HEAD";
+        const { stdout } = await execFn(`git diff ${baseRef} -U0`, {
           cwd,
           timeout: verifyTimeoutMs(),
           maxBuffer: 64 * 1024 * 1024,
@@ -156,11 +174,7 @@ export async function verifyDevelopOutcome(
     try {
       const smokeFile = path.join(ctx.repoRoot, ".pi", "smoke-cmd");
       const content = await fs.readFile(smokeFile, "utf8");
-      const firstLine = content
-        .split("\n")
-        .map((l) => l.trim())
-        .find((l) => l.length > 0 && !l.startsWith("#"));
-      smokeCmd = firstLine;
+      smokeCmd = readFirstConfigLine(content);
     } catch {
       // No smoke-cmd file — not a failure, just a note
     }
@@ -173,14 +187,12 @@ export async function verifyDevelopOutcome(
         });
       } catch (err) {
         const e = err as Error & { stdout?: string; stderr?: string; killed?: boolean };
-        const tail = `${e.stdout ?? ""}
-${e.stderr ?? ""}`
-          .trim()
-          .slice(-1500);
         failures.push(
-          e.killed
-            ? `smoke: command \`${smokeCmd}\` exceeded its ${Math.round(verifyTimeoutMs() / 60000)}-min timeout`
-            : `smoke: command \`${smokeCmd}\` failed: ${tail || e.message?.slice(0, 300)}`,
+          formatExecError(
+            e,
+            `smoke: command \`${smokeCmd}\` exceeded its ${Math.round(verifyTimeoutMs() / 60000)}-min timeout`,
+            `smoke: command \`${smokeCmd}\` failed`,
+          ),
         );
       }
     } else {
