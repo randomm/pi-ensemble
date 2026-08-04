@@ -14,6 +14,7 @@ import path from "node:path";
 import { type DriverContext } from "../src/work-driver-context.ts";
 import { runWorkDriver } from "../src/work-driver.ts";
 import { initialState, readState, writeState } from "../src/workflow-state.ts";
+import { mkLensSummary } from "./test-helpers.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
@@ -80,23 +81,7 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
 
 process.env.PI_ENSEMBLE_FORBID_LIVE_SPAWN = "1";
 
-// Fake LensReviewSummary builder for injection into lensReviewFn.
-function mkLensSummary(
-  overrides: Partial<{
-    verdict: string;
-    findings: any[];
-    totalFindings: number;
-  }> = {},
-) {
-  return {
-    verdict: "APPROVED",
-    totalFindings: 0,
-    bySeverity: { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 },
-    lenses: [],
-    findings: [],
-    ...overrides,
-  };
-}
+
 
 // 43. PR11 — runLens uses merge-base diff (origin/<base>..HEAD), not
 // `git diff HEAD`. Empirical /work 533+557 (v10r 2026-06-25): pre-PR11

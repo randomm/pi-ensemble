@@ -13,6 +13,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { LensReviewSummary } from "./lens-review.ts";
 import type { DispatchResult } from "./types.ts";
 import type { WorkState, WorkStep } from "./workflow-state.ts";
 
@@ -219,32 +220,7 @@ export interface DriverContext {
     context?: string;
     cwd?: string;
     signal?: AbortSignal;
-  }) => Promise<{
-    verdict: string;
-    totalFindings: number;
-    bySeverity: Record<string, number>;
-    lenses: Array<{
-      lens: string;
-      ok: boolean;
-      ms: number;
-      findings: Array<{
-        severity: string;
-        path: string;
-        line?: number;
-        title: string;
-        lens: string;
-      }>;
-      attempts: number;
-      blocked: boolean;
-    }>;
-    findings: Array<{
-      severity: string;
-      path: string;
-      line?: number;
-      title: string;
-      lens: string;
-    }>;
-  }>;
+  }) => Promise<LensReviewSummary>;
 }
 
 /** Decide the next step from the current step + just-appended events. */
