@@ -74,6 +74,30 @@ process.env.PI_ENSEMBLE_INACTIVITY_TIMEOUT_MS = "2000";
 // gate tests re-enable it with an injected verifyExecFn.
 process.env.PI_ENSEMBLE_VERIFY = "0";
 
+// PI_ENSEMBLE_FORBID_LIVE_SPAWN=1 prevents accidental live spawns in
+// offline tests. PI_ENSEMBLE_SPAWN_TIMEOUT_MS=2000 is retained as
+// defence-in-depth (bounds any accidental bypass of the FORBID guard).
+
+process.env.PI_ENSEMBLE_FORBID_LIVE_SPAWN = "1";
+
+// Fake LensReviewSummary builder for injection into lensReviewFn.
+function mkLensSummary(
+  overrides: Partial<{
+    verdict: string;
+    findings: any[];
+    totalFindings: number;
+  }> = {},
+) {
+  return {
+    verdict: "APPROVED",
+    totalFindings: 0,
+    bySeverity: { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 },
+    lenses: [],
+    findings: [],
+    ...overrides,
+  };
+}
+
 // 46. Issue #305 — driver commits after a successful lens-fix.
 //
 // Pre-seed the cycle at lens-fix with a lens-issues-found event.
@@ -182,6 +206,9 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
           loopOutcome: "approved",
           text: "Adversarial APPROVED.",
         });
+      },
+      lensReviewFn: async () => {
+        return mkLensSummary({ verdict: "APPROVED" });
       },
     };
 
@@ -333,14 +360,43 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
           text: "Adversarial APPROVED.",
         });
       },
+      lensReviewFn: async () => {
+        return mkLensSummary({ verdict: "APPROVED" });
+      },
     };
 
     await runWorkDriver(ctx).catch(() => {});
 
+    const after = await readState(dir, 307);
+    const kinds = (after?.eventLog ?? []).map((e) => e.kind);
+
+    // Falsifiability: lens-review outcome must reach the eventLog.
+    // If lensReviewFn were missing and FORBID_LIVE_SPAWN=1 were set,
+    // runLens would catch the throw and emit a dispatch-failed event on
+    // step lens-review — confirming the injection seam is wired.
+    assert(
+      kinds.includes("lens-approved") ||
+        kinds.includes("lens-issues-found") ||
+        kinds.includes("dispatch-failed"),
+      "lens-review outcome reached the eventLog (lens-approved, lens-issues-found, or dispatch-failed)",
+    );
+    // Distinguish: was lens-review reached and threw, or never reached?
+    if (
+      !kinds.includes("lens-approved") &&
+      !kinds.includes("lens-issues-found")
+    ) {
+      const lensFailed = (after?.eventLog ?? []).find(
+        (e) => e.kind === "dispatch-failed" && e.step === "lens-review",
+      );
+      assert(
+        lensFailed !== undefined,
+        "lens-review was never reached — injection may not be wired or cycle halted early",
+      );
+    }
+
     // After lens-fix → commit → adversarial-approved → nextStep = lens-review.
     // The committed diff should contain the fix — this is the input
-    // runLens would read for round 2. Full lens-review dispatch is not
-    // exercised here (runLensReview spawns real Pi children, not mocked).
+    // runLens would read for round 2.
     const { stdout: diff } = await execp("git diff origin/main..HEAD", { cwd: dir });
     assert(
       diff.includes("safeParse"),

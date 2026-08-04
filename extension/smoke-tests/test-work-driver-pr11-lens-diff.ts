@@ -74,6 +74,30 @@ process.env.PI_ENSEMBLE_INACTIVITY_TIMEOUT_MS = "2000";
 // gate tests re-enable it with an injected verifyExecFn.
 process.env.PI_ENSEMBLE_VERIFY = "0";
 
+// PI_ENSEMBLE_FORBID_LIVE_SPAWN=1 prevents accidental live spawns in
+// offline tests. PI_ENSEMBLE_SPAWN_TIMEOUT_MS=2000 is retained as
+// defence-in-depth (bounds any accidental bypass of the FORBID guard).
+
+process.env.PI_ENSEMBLE_FORBID_LIVE_SPAWN = "1";
+
+// Fake LensReviewSummary builder for injection into lensReviewFn.
+function mkLensSummary(
+  overrides: Partial<{
+    verdict: string;
+    findings: any[];
+    totalFindings: number;
+  }> = {},
+) {
+  return {
+    verdict: "APPROVED",
+    totalFindings: 0,
+    bySeverity: { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 },
+    lenses: [],
+    findings: [],
+    ...overrides,
+  };
+}
+
 // 43. PR11 — runLens uses merge-base diff (origin/<base>..HEAD), not
 // `git diff HEAD`. Empirical /work 533+557 (v10r 2026-06-25): pre-PR11
 // the empty-diff guard fired POST-commit on every cycle because the
@@ -149,6 +173,9 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
       repoRoot: dir,
       issue: 820,
       issueBodyFetcherFn: mockIssueBodyOk,
+      lensReviewFn: async () => {
+        return mkLensSummary({ verdict: "ISSUES_FOUND", findings: [], totalFindings: 0 });
+      },
       dispatchFn: async (_pi, spec, opts) => {
         if (spec.role === "code-review-specialist") {
           lensDispatched = true;

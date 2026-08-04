@@ -74,6 +74,30 @@ process.env.PI_ENSEMBLE_INACTIVITY_TIMEOUT_MS = "2000";
 // gate tests re-enable it with an injected verifyExecFn.
 process.env.PI_ENSEMBLE_VERIFY = "0";
 
+// PI_ENSEMBLE_FORBID_LIVE_SPAWN=1 prevents accidental live spawns in
+// offline tests. PI_ENSEMBLE_SPAWN_TIMEOUT_MS=2000 is retained as
+// defence-in-depth (bounds any accidental bypass of the FORBID guard).
+
+process.env.PI_ENSEMBLE_FORBID_LIVE_SPAWN = "1";
+
+// Fake LensReviewSummary builder for injection into lensReviewFn.
+function mkLensSummary(
+  overrides: Partial<{
+    verdict: string;
+    findings: any[];
+    totalFindings: number;
+  }> = {},
+) {
+  return {
+    verdict: "APPROVED",
+    totalFindings: 0,
+    bySeverity: { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 },
+    lenses: [],
+    findings: [],
+    ...overrides,
+  };
+}
+
 // 48b. Issue #305 — adversarial receives lens-fix diff BEFORE commit.
 //
 // Proves the fix: commit AFTER adversarial-approved (changed in this PR)
@@ -182,6 +206,9 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
           loopOutcome: "approved",
           text: "Adversarial APPROVED.",
         });
+      },
+      lensReviewFn: async () => {
+        return mkLensSummary({ verdict: "APPROVED" });
       },
     };
 
@@ -324,6 +351,9 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
           loopOutcome: "approved",
           text: "Adversarial APPROVED.",
         });
+      },
+      lensReviewFn: async () => {
+        return mkLensSummary({ verdict: "APPROVED" });
       },
     };
 

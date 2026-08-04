@@ -207,6 +207,44 @@ export interface DriverContext {
       shell?: string;
     },
   ) => Promise<{ stdout: string; stderr?: string }>;
+  /**
+   * Optional injection point for tests: replace runLensReview with a fake.
+   * Production callers omit this — runLens uses the real runLensReview.
+   * Mirrors `adversarialLoopFn` for symmetry, but returns
+   * `LensReviewSummary` (verdict, totalFindings, bySeverity, lenses,
+   * findings), NOT `DispatchResult`.
+   */
+  lensReviewFn?: (opts: {
+    diff: string;
+    context?: string;
+    cwd?: string;
+    signal?: AbortSignal;
+  }) => Promise<{
+    verdict: string;
+    totalFindings: number;
+    bySeverity: Record<string, number>;
+    lenses: Array<{
+      lens: string;
+      ok: boolean;
+      ms: number;
+      findings: Array<{
+        severity: string;
+        path: string;
+        line?: number;
+        title: string;
+        lens: string;
+      }>;
+      attempts: number;
+      blocked: boolean;
+    }>;
+    findings: Array<{
+      severity: string;
+      path: string;
+      line?: number;
+      title: string;
+      lens: string;
+    }>;
+  }>;
 }
 
 /** Decide the next step from the current step + just-appended events. */
