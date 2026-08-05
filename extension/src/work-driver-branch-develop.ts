@@ -22,7 +22,7 @@ import {
 } from "./work-driver-prompts-early.ts";
 import { verifyStepOutcome } from "./work-driver-verify.ts";
 import { activeIssuesOf, scratchDir } from "./work-driver-workspace.ts";
-import { type PipelineState, type WorkState, appendEvent } from "./workflow-state.ts";
+import { type WorkState, appendEvent } from "./workflow-state.ts";
 
 const execp = promisify(exec);
 
@@ -73,9 +73,7 @@ export async function runBranch(
   // parsed reply if git is unavailable.
   const branch = actualBranch ?? reportedBranch;
   // #292 — emit a plumb-report if reported-vs-actual mismatch.
-  // Append the event FIRST, then spread the updated state for mutation.
   if (actualBranch && reportedBranch && actualBranch !== reportedBranch) {
-    const reportAt = Date.now();
     const body = [
       "[ensemble:plumb]",
       "category: scope-ambiguity",
@@ -90,25 +88,11 @@ export async function runBranch(
       step: "branch",
       role: "ops",
       body,
-      at: reportAt,
+      at: now,
     });
   }
   const ps: typeof next.pipelineState = { ...next.pipelineState };
   if (branch) ps.branchName = branch;
-  if (actualBranch && reportedBranch && actualBranch !== reportedBranch) {
-    const lastEvent = next.eventLog[next.eventLog.length - 1];
-    if (lastEvent && lastEvent.kind === "plumb-report") {
-      ps.plumbReports = [
-        ...ps.plumbReports,
-        {
-          step: "branch",
-          role: "ops",
-          body: lastEvent.body,
-          at: lastEvent.at,
-        },
-      ];
-    }
-  }
   // Parse worktree assignments (PR3 multi-workstream). For N=1 default
   // workstream, ops doesn't create an actual worktree — driver records
   // `{default: ctx.repoRoot}` so downstream Steps 4/5/7 use the same
