@@ -72,12 +72,10 @@ export async function runBranch(
   // Determine the branch name: git-resolved (source of truth), fallback to
   // parsed reply if git is unavailable.
   const branch = actualBranch ?? reportedBranch;
-  const ps: typeof next.pipelineState = { ...next.pipelineState };
-  if (branch) ps.branchName = branch;
   // #292 — emit a plumb-report if reported-vs-actual mismatch.
-  const plumbReports: PipelineState["plumbReports"] = [...ps.plumbReports];
+  // Append the event FIRST, then spread the updated state for mutation.
   if (actualBranch && reportedBranch && actualBranch !== reportedBranch) {
-    const now = Date.now();
+    const reportAt = Date.now();
     const body = [
       "[ensemble:plumb]",
       "category: scope-ambiguity",
@@ -87,16 +85,30 @@ export async function runBranch(
       `actual (git rev-parse --abbrev-ref HEAD): ${actualBranch}`,
       "The driver uses the git-resolved branch. Verify the ops dispatch executed the intended branch creation.",
     ].join("\n");
-    plumbReports.push({ step: "branch", role: "ops", body, at: now });
     next = appendEvent(next, {
       kind: "plumb-report",
       step: "branch",
       role: "ops",
       body,
-      at: now,
+      at: reportAt,
     });
   }
-  ps.plumbReports = plumbReports;
+  const ps: typeof next.pipelineState = { ...next.pipelineState };
+  if (branch) ps.branchName = branch;
+  if (actualBranch && reportedBranch && actualBranch !== reportedBranch) {
+    const lastEvent = next.eventLog[next.eventLog.length - 1];
+    if (lastEvent && lastEvent.kind === "plumb-report") {
+      ps.plumbReports = [
+        ...ps.plumbReports,
+        {
+          step: "branch",
+          role: "ops",
+          body: lastEvent.body,
+          at: lastEvent.at,
+        },
+      ];
+    }
+  }
   // Parse worktree assignments (PR3 multi-workstream). For N=1 default
   // workstream, ops doesn't create an actual worktree — driver records
   // `{default: ctx.repoRoot}` so downstream Steps 4/5/7 use the same
@@ -118,8 +130,10 @@ export async function runBranch(
       maxBuffer: 64 * 1024,
     });
     if (stdout.trim()) ps.baseSha = stdout.trim();
-  } catch {
-    trace("work-driver: baseSha capture failed (verify gate falls back to porcelain-only)");
+  } catch (err) {
+    trace(
+      `work-driver: baseSha capture failed: ${(err as Error).message?.slice(0, 200)} (verify gate falls back to porcelain-only)`,
+    );
   }
   return { ...next, pipelineState: ps };
 }
