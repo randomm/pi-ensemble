@@ -86,6 +86,13 @@ export interface DispatchResult {
   loopOutcome?: "approved" | "rejected" | "infra-failure";
   /** The budget (ms) that expired for killCause "timeout"/"inactivity". */
   killBudgetMs?: number;
+  /**
+   * Set when the model emitted thinking blocks but no text blocks (issue #5).
+   * Some thinking-heavy models (e.g. cerebras/gpt-oss-120b on trivial prompts)
+   * produce only thinking content without text output. Lens-review treats this
+   * as a parse failure eligible for retry.
+   */
+  thinkingOnly?: boolean;
 }
 
 /**
