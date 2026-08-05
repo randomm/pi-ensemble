@@ -6,16 +6,10 @@
  * pattern: direct execution of enumerable git/gh operations; fallback
  * to LLM ops dispatch on any mechanized failure.
  *
- * Merge method resolves from `<repoRoot>/.pi/merge-method` (single
- * token: `squash` | `merge` | `rebase`), defaulting to `squash` when
- * absent. AGENTS.md / CONTRIBUTING.md are deliberately NOT consulted —
- * they are free-prose files unversioned, unvalidatable, and differently
- * structured in every repo. A structured file pi-ensemble owns replaces
- * the guesswork.
+ * Merge method is derived from GitHub repo settings via `gh repo view`.
+ * GitHub is authoritative and cannot drift — no local config file needed.
  */
 
-import fs from "node:fs/promises";
-import path from "node:path";
 import { trace } from "./trace.ts";
 import { mechanizeOpsEnabled } from "./work-driver-commit.ts";
 import type { DriverContext } from "./work-driver-context.ts";
@@ -25,86 +19,43 @@ import type { WorkState } from "./workflow-state.ts";
 /** Valid merge methods — maps to `gh pr merge` flags. */
 export type MergeMethod = "squash" | "merge" | "rebase";
 
-const VALID_METHODS: readonly MergeMethod[] = ["squash", "merge", "rebase"] as const;
-
-/** Map merge method to its `gh pr merge` flag key for pre-check. */
-const METHOD_TO_CHECK_KEY: Record<MergeMethod, string> = {
-  squash: "squashMergeAllowed",
-  merge: "mergeCommitAllowed",
-  rebase: "rebaseMergeAllowed",
-};
-
 /**
- * Resolve the merge method for the target repo.
+ * Derive the merge method from GitHub repo settings.
  *
- * 1. Read `<repoRoot>/.pi/merge-method` — single token file.
- * 2. If absent, default to `squash`.
- * 3. If present but unrecognised, return `{ ok: false }` — the caller
- *    halts with a cap-hit rather than silently defaulting.
- */
-export async function resolveMergeMethod(
-  repoRoot: string,
-): Promise<{ method: MergeMethod } | { ok: false; reason: string }> {
-  const filePath = path.join(repoRoot, ".pi", "merge-method");
-  try {
-    const content = (await fs.readFile(filePath, "utf8")).trim();
-    if (VALID_METHODS.includes(content as MergeMethod)) {
-      return { method: content as MergeMethod };
-    }
-    return {
-      ok: false,
-      reason: `unrecognised merge method in .pi/merge-method: "${content}" (expected: ${VALID_METHODS.join(", ")})`,
-    };
-  } catch (err) {
-    // File absent — default to squash.
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return { method: "squash" };
-    }
-    // Other read error — treat as absent (default squash).
-    trace(
-      `work-driver: failed to read .pi/merge-method, defaulting to squash: ${(err as Error).message}`,
-    );
-    return { method: "squash" };
-  }
-}
-
-/**
- * Pre-check that the target repo allows the requested merge method.
+ * Makes ONE `gh repo view` call and applies precedence:
+ *   1. `squashMergeAllowed` → squash
+ *   2. `mergeCommitAllowed` → merge
+ *   3. `rebaseMergeAllowed` → rebase
+ *   4. All false / all null / call fails → fallback
  *
- * Three outcomes:
- *   - Field explicitly `false` → `{ disallowed: true }` — cap-hit halt.
- *   - Field is `null` → `{ fallback: true }` — log note, fall back to LLM.
- *   - Call fails (network, auth, rate limit) → `{ fallback: true }` — never halt on transient.
- *   - Field is `true` → `{ ok: true }` — proceed.
+ * Squash is preferred when multiple are allowed — matches common default
+ * and this project's convention.
  */
-export async function checkMergeMethodAllowed(
-  method: MergeMethod,
+export async function deriveMergeMethod(
   execFn: VerifyExecFn,
   repoRoot: string,
-): Promise<
-  { ok: true } | { fallback: true; note: string } | { disallowed: true; method: MergeMethod }
-> {
-  const checkKey = METHOD_TO_CHECK_KEY[method];
+): Promise<{ method: MergeMethod } | { fallback: true; note: string }> {
   try {
     const { stdout } = await execFn(
       "gh repo view --json squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed",
       { cwd: repoRoot, maxBuffer: 64 * 1024 },
     );
     const parsed = JSON.parse(stdout);
-    const value = parsed[checkKey];
 
-    if (value === false) {
-      return { disallowed: true, method };
+    if (parsed.squashMergeAllowed === true) {
+      return { method: "squash" };
     }
-    if (value === null) {
-      return {
-        fallback: true,
-        note: `gh repo view returned null for ${checkKey} (archived repo, Enterprise config, or pending transfer) — falling back to LLM dispatch`,
-      };
+    if (parsed.mergeCommitAllowed === true) {
+      return { method: "merge" };
     }
-    return { ok: true };
+    if (parsed.rebaseMergeAllowed === true) {
+      return { method: "rebase" };
+    }
+    return {
+      fallback: true,
+      note: `no merge method permitted by repo settings (squashMergeAllowed=${parsed.squashMergeAllowed}, mergeCommitAllowed=${parsed.mergeCommitAllowed}, rebaseMergeAllowed=${parsed.rebaseMergeAllowed}) — falling back to LLM dispatch`,
+    };
   } catch (err) {
-    // Infra failure — fall back to LLM. Never halt on transient.
     return {
       fallback: true,
       note: `gh repo view failed (${(err as Error).message?.slice(0, 120)}) — falling back to LLM dispatch`,
@@ -185,7 +136,7 @@ export async function executeAndVerifyMerge(
 }
 
 /**
- * Mechanized merge: resolve method → pre-check → execute → verify.
+ * Mechanized merge: derive method → execute → verify.
  *
  * ANY failure returns `{ok: false, reason}` — the caller in runMerged
  * emits a plumb-report and falls back to the LLM ops dispatch.
@@ -195,7 +146,7 @@ export async function executeAndVerifyMerge(
  *
  * On success, returns the resolved merge method (for the merged event
  * and any fallback dispatch that follows) plus any notes from the
- * pre-check (e.g., "gh repo view returned null" when fallback was used).
+ * derive step.
  */
 export async function mechanizedMerge(
   ctx: DriverContext,
@@ -205,11 +156,13 @@ export async function mechanizedMerge(
   | { ok: false; reason: string; method?: MergeMethod }
 > {
   if (!mechanizeOpsEnabled()) {
-    // Even when mechanized ops is disabled, resolve the merge method
-    // so the fallback LLM dispatch gets the correct method in its prompt.
-    const methodResult = await resolveMergeMethod(ctx.repoRoot);
-    const method = "method" in methodResult ? methodResult.method : "squash";
-    return { ok: false, reason: "PI_ENSEMBLE_MECHANIZE_OPS=0 — mechanized ops disabled", method };
+    // Mechanized ops disabled — return squash as the prompt hint.
+    // The LLM has AGENTS.md in context and will use the repo's actual policy.
+    return {
+      ok: false,
+      reason: "PI_ENSEMBLE_MECHANIZE_OPS=0 — mechanized ops disabled",
+      method: "squash",
+    };
   }
 
   const execFn = ctx.verifyExecFn;
@@ -225,37 +178,24 @@ export async function mechanizedMerge(
     return { ok: false, reason: "prNumber not set in pipeline state" };
   }
 
-  const notes: string[] = [];
-
-  // 1. Resolve merge method.
-  const methodResult = await resolveMergeMethod(ctx.repoRoot);
-  if (!("method" in methodResult)) {
-    return { ok: false, reason: methodResult.reason };
-  }
-  const method = methodResult.method;
-
-  // 2. Pre-check: does the repo allow this method? — use `in` to narrow
-  // the discriminated union (checkMergeMethodAllowed returns three structurally
-  // distinct objects without a shared discriminant field).
-  const preCheck = await checkMergeMethodAllowed(method, execFn, ctx.repoRoot);
-  if ("disallowed" in preCheck) {
-    return {
-      ok: false,
-      reason: `repo does not allow ${method} merges (${METHOD_TO_CHECK_KEY[preCheck.method]} = false)`,
-      method,
-    };
-  }
-  if ("fallback" in preCheck) {
-    notes.push(preCheck.note);
-    trace(`work-driver: merge pre-check fallback: ${preCheck.note}`);
+  // Derive merge method from GitHub repo settings.
+  const methodResult = await deriveMergeMethod(execFn, ctx.repoRoot);
+  if ("fallback" in methodResult) {
+    trace(`work-driver: merge method fallback: ${methodResult.note}`);
+    return { ok: false, reason: methodResult.note };
   }
 
-  // 3. Execute and verify the merge.
-  const mergeResult = await executeAndVerifyMerge(prNumber, method, execFn, ctx.repoRoot);
+  // Execute and verify the merge.
+  const mergeResult = await executeAndVerifyMerge(
+    prNumber,
+    methodResult.method,
+    execFn,
+    ctx.repoRoot,
+  );
   if (!("merged" in mergeResult)) {
-    return { ok: false, reason: mergeResult.reason, method };
+    return { ok: false, reason: mergeResult.reason, method: methodResult.method };
   }
 
-  trace(`work-driver: PR #${prNumber} merged via --${method} ✓`);
-  return { ok: true, method, notes };
+  trace(`work-driver: PR #${prNumber} merged via --${methodResult.method} ✓`);
+  return { ok: true, method: methodResult.method, notes: [] };
 }

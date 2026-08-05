@@ -235,10 +235,10 @@ export async function runSingleDispatch(
  * actually merges via mechanized merge (or LLM fallback) and restores
  * the local checkout to an up-to-date mainline.
  *
- * Mechanized path (default): resolve merge method from .pi/merge-method,
- * pre-check repo allows it, execute `gh pr merge`, verify MERGED via
- * `gh pr view`, restore checkout. Fallback to LLM ops dispatch on any
- * mechanized failure (plumb-report emitted). Escape hatch:
+ * Mechanized path (default): derive merge method from GitHub repo
+ * settings, execute `gh pr merge`, verify MERGED via `gh pr view`,
+ * restore checkout. Fallback to LLM ops dispatch on any mechanized
+ * failure (plumb-report emitted). Escape hatch:
  * PI_ENSEMBLE_MECHANIZE_OPS=0 forces LLM path.
  *
  * Restoration runs INSIDE runMerged, before routeStepOutcome persists

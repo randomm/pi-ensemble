@@ -157,17 +157,12 @@ export function inlineLensFixPrompt(findings: string, scratchDirAbs: string): st
 
 /**
  * Step 9 (Merge) ops prompt — fallback path when mechanized merge
- * can't execute (pre-check null, infra failure, or mechanized ops
+ * can't execute (derive fallback, infra failure, or mechanized ops
  * disabled).
  *
- * Merge method resolution order:
- *   1. `<repoRoot>/.pi/merge-method` (single token: squash | merge | rebase)
- *   2. Default: `squash`
- *
- * AGENTS.md / CONTRIBUTING.md are deliberately NOT consulted — they are
- * free-prose files that vary per project and cannot be machine-validated.
- * The resolved method is passed as a parameter; this prompt must NOT
- * instruct the agent to choose or override it.
+ * Merge method is derived from GitHub repo settings; the resolved
+ * method is passed as a parameter and this prompt must NOT instruct
+ * the agent to choose or override it.
  */
 export function inlineMergePrompt(
   issues: number[],

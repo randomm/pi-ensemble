@@ -2,22 +2,21 @@
 /**
  * Smoke test for mechanized merge + checkout restoration (issue #323).
  *
- * Covers: resolveMergeMethod, checkMergeMethodAllowed, executeAndVerifyMerge,
- * mechanizedMerge, restoreCheckout, inlineMergePrompt with mergeMethod
- * parameter, and the merged step's full flow including fallback dispatch and
+ * Covers: deriveMergeMethod, executeAndVerifyMerge, mechanizedMerge,
+ * restoreCheckout, inlineMergePrompt with mergeMethod parameter,
+ * and the merged step's full flow including fallback dispatch and
  * crash-resume idempotency. No real Pi spawn; all calls are mocked.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DriverContext } from "../src/work-driver-context.ts";
 import { type VerifyExecFn, restoreCheckout } from "../src/work-driver-git.ts";
 import {
-  checkMergeMethodAllowed,
+  deriveMergeMethod,
   executeAndVerifyMerge,
   mechanizedMerge,
-  resolveMergeMethod,
 } from "../src/work-driver-merged-mechanized.ts";
 import { inlineMergePrompt } from "../src/work-driver-prompts-late.ts";
 import { runWorkDriver } from "../src/work-driver.ts";
@@ -110,53 +109,43 @@ process.env.PI_ENSEMBLE_INACTIVITY_TIMEOUT_MS = "2000";
 process.env.PI_ENSEMBLE_VERIFY = "0";
 setupSpawnGuard();
 
-// ---- resolveMergeMethod tests ----
+// ---- deriveMergeMethod tests ----
 
 {
-  const run = async (file: string | undefined, expect: string, desc: string) => {
-    const dir = mkdtempSync(path.join(tmpdir(), "mm-"));
-    try {
-      if (file !== undefined) {
-        mkdirSync(path.join(dir, ".pi"), { recursive: true });
-        writeFileSync(path.join(dir, ".pi", "merge-method"), file);
-      }
-      const r = await resolveMergeMethod(dir);
-      assert("method" in r && r.method === expect, `resolveMergeMethod: ${desc}`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  };
-  await run("squash\n", "squash", "reads squash from .pi/merge-method");
-  await run(undefined, "squash", "defaults to squash when absent");
-  await run("rebase", "rebase", "reads rebase from .pi/merge-method");
-  {
-    const dir = mkdtempSync(path.join(tmpdir(), "mm-"));
-    try {
-      mkdirSync(path.join(dir, ".pi"), { recursive: true });
-      writeFileSync(path.join(dir, ".pi", "merge-method"), "fast-forward\n");
-      const r = await resolveMergeMethod(dir);
-      assert(
-        "ok" in r && r.ok === false && r.reason.includes("unrecognised"),
-        "resolveMergeMethod: halts on unrecognised token",
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
+  const { fn } = mkExec({
+    "gh repo view": {
+      stdout: '{"squashMergeAllowed":true,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}',
+    },
+  });
+  const r = await deriveMergeMethod(fn, "/fake");
+  assert("method" in r && r.method === "squash", "deriveMergeMethod: squash preferred when all allowed");
 }
-
-// ---- checkMergeMethodAllowed tests ----
-
 {
   const { fn } = mkExec({
     "gh repo view": {
       stdout: '{"squashMergeAllowed":false,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}',
     },
   });
-  assert(
-    (await checkMergeMethodAllowed("squash", fn, "/fake")).disallowed === true,
-    "pre-check: explicit false → disallowed",
-  );
+  const r = await deriveMergeMethod(fn, "/fake");
+  assert("method" in r && r.method === "merge", "deriveMergeMethod: squash false, merge true → merge");
+}
+{
+  const { fn } = mkExec({
+    "gh repo view": {
+      stdout: '{"squashMergeAllowed":false,"mergeCommitAllowed":false,"rebaseMergeAllowed":true}',
+    },
+  });
+  const r = await deriveMergeMethod(fn, "/fake");
+  assert("method" in r && r.method === "rebase", "deriveMergeMethod: squash+merge false, rebase true → rebase");
+}
+{
+  const { fn } = mkExec({
+    "gh repo view": {
+      stdout: '{"squashMergeAllowed":false,"mergeCommitAllowed":false,"rebaseMergeAllowed":false}',
+    },
+  });
+  const r = await deriveMergeMethod(fn, "/fake");
+  assert("fallback" in r && r.fallback === true, "deriveMergeMethod: all false → fallback");
 }
 {
   const { fn } = mkExec({
@@ -164,30 +153,15 @@ setupSpawnGuard();
       stdout: '{"squashMergeAllowed":null,"mergeCommitAllowed":null,"rebaseMergeAllowed":null}',
     },
   });
-  assert(
-    (await checkMergeMethodAllowed("squash", fn, "/fake")).fallback === true,
-    "pre-check: null field → fallback",
-  );
+  const r = await deriveMergeMethod(fn, "/fake");
+  assert("fallback" in r && r.fallback === true, "deriveMergeMethod: all null → fallback");
 }
 {
   const { fn } = mkExec({
     "gh repo view": { error: true, stderr: "network error" },
   });
-  assert(
-    (await checkMergeMethodAllowed("squash", fn, "/fake")).fallback === true,
-    "pre-check: infra failure → fallback",
-  );
-}
-{
-  const { fn } = mkExec({
-    "gh repo view": {
-      stdout: '{"squashMergeAllowed":true,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}',
-    },
-  });
-  assert(
-    (await checkMergeMethodAllowed("squash", fn, "/fake")).ok === true,
-    "pre-check: true → proceed",
-  );
+  const r = await deriveMergeMethod(fn, "/fake");
+  assert("fallback" in r && r.fallback === true, "deriveMergeMethod: gh throws → fallback");
 }
 
 // ---- executeAndVerifyMerge tests ----
@@ -291,6 +265,7 @@ setupSpawnGuard();
       r.ok === false && r.reason.includes("PI_ENSEMBLE_MECHANIZE_OPS=0"),
       "mechanizedMerge: PI_ENSEMBLE_MECHANIZE_OPS=0 bypass",
     );
+    assert(r.method === "squash", "mechanizedMerge: disabled path returns squash hint");
   } finally {
     process.env.PI_ENSEMBLE_MECHANIZE_OPS = orig;
   }
@@ -301,7 +276,7 @@ setupSpawnGuard();
     let vc = 0;
     const base = mkExec({
       "gh pr merge": { stdout: "Merged" },
-      "gh repo view": { stdout: '{"squashMergeAllowed":true}' },
+      "gh repo view": { stdout: '{"squashMergeAllowed":true,"mergeCommitAllowed":false,"rebaseMergeAllowed":false}' },
     });
     const exec: VerifyExecFn = async (cmd) => {
       if (cmd.includes("gh pr view")) {
@@ -317,7 +292,7 @@ setupSpawnGuard();
     const r = await mechanizedMerge({ repoRoot: dir, issue: 100, pi: mkPi(), verifyExecFn: exec }, {
       pipelineState: { prNumber: 999 },
     } as unknown as WorkState);
-    assert(r.ok === true && r.method === "squash", "mechanizedMerge: happy path squash");
+    assert(r.ok === true && r.method === "squash", "mechanizedMerge: happy path squash from repo settings");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -325,12 +300,10 @@ setupSpawnGuard();
 {
   const dir = mkdtempSync(path.join(tmpdir(), "mm-rebase-"));
   try {
-    mkdirSync(path.join(dir, ".pi"), { recursive: true });
-    writeFileSync(path.join(dir, ".pi", "merge-method"), "rebase");
     let mergeCmd = "";
     let vc = 0;
     const base = mkExec({
-      "gh repo view": { stdout: '{"rebaseMergeAllowed":true}' },
+      "gh repo view": { stdout: '{"squashMergeAllowed":false,"mergeCommitAllowed":false,"rebaseMergeAllowed":true}' },
     });
     const exec: VerifyExecFn = async (cmd) => {
       if (cmd.includes("gh pr view")) {
@@ -350,11 +323,11 @@ setupSpawnGuard();
     } as unknown as WorkState);
     assert(
       r.ok === true && r.method === "rebase",
-      "mechanizedMerge: .pi/merge-method override reads rebase",
+      "mechanizedMerge: rebase derived from repo settings",
     );
     assert(
       mergeCmd.includes("--rebase"),
-      "mechanizedMerge: resolved method reaches gh pr merge --rebase",
+      "mechanizedMerge: derived method reaches gh pr merge --rebase",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -362,14 +335,16 @@ setupSpawnGuard();
 }
 {
   const { fn } = mkExec({
-    "gh repo view": { stdout: '{"squashMergeAllowed":false}' },
+    "gh repo view": {
+      stdout: '{"squashMergeAllowed":false,"mergeCommitAllowed":false,"rebaseMergeAllowed":false}',
+    },
   });
   const r = await mechanizedMerge(mkCtx(100, fn), {
     pipelineState: { prNumber: 999 },
   } as unknown as WorkState);
   assert(
-    r.ok === false && r.reason.includes("does not allow"),
-    "mechanizedMerge: explicit false disallowance halts",
+    r.ok === false && r.reason.includes("no merge method permitted"),
+    "mechanizedMerge: all methods false → fallback",
   );
 }
 
@@ -386,7 +361,7 @@ function mkExecFull(calls: string[], branch: string, throwFirstView: boolean): V
       return { stdout: "MERGED\n" };
     }
     if (cmd.includes("gh pr merge")) return { stdout: "Merged" };
-    if (cmd.includes("gh repo view")) return { stdout: '{"squashMergeAllowed":true}' };
+    if (cmd.includes("gh repo view")) return { stdout: '{"squashMergeAllowed":true,"mergeCommitAllowed":false,"rebaseMergeAllowed":false}' };
     if (cmd.includes("git symbolic-ref")) return { stdout: "origin/main\n" };
     if (cmd.includes("git rev-parse")) return { stdout: `${branch}\n` };
     return { stdout: "" };
@@ -398,8 +373,6 @@ function mkExecFull(calls: string[], branch: string, throwFirstView: boolean): V
   const dir = mkdtempSync(path.join(tmpdir(), "wd-full-"));
   try {
     mkdirSync(path.join(dir, ".git", "info"), { recursive: true });
-    mkdirSync(path.join(dir, ".pi"), { recursive: true });
-    writeFileSync(path.join(dir, ".pi", "merge-method"), "squash");
     await writeState(dir, mkState(960, 9601, "feature/issue-960"));
     const calls: string[] = [];
     await runWorkDriver(
@@ -428,8 +401,6 @@ function mkExecFull(calls: string[], branch: string, throwFirstView: boolean): V
   const dir = mkdtempSync(path.join(tmpdir(), "wd-fallback-"));
   try {
     mkdirSync(path.join(dir, ".git", "info"), { recursive: true });
-    mkdirSync(path.join(dir, ".pi"), { recursive: true });
-    writeFileSync(path.join(dir, ".pi", "merge-method"), "merge");
     await writeState(dir, mkState(961, 9611, "feature/issue-961"));
     process.env.PI_ENSEMBLE_MECHANIZE_OPS = "0";
     let capturedPrompt = "";
@@ -449,8 +420,8 @@ function mkExecFull(calls: string[], branch: string, throwFirstView: boolean): V
     );
     process.env.PI_ENSEMBLE_MECHANIZE_OPS = undefined;
     assert(
-      capturedPrompt.includes("--merge --delete-branch"),
-      "T19: prompt carries resolved merge method",
+      capturedPrompt.includes("--squash --delete-branch"),
+      "T19: prompt carries squash as default hint when mechanized ops disabled",
     );
     assert(!/adjust the flags/i.test(capturedPrompt), "T19: no escape clause in prompt");
     const after = await readState(dir, 961);
