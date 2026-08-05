@@ -89,8 +89,9 @@ export interface DispatchResult {
   /**
    * Set when the model emitted thinking blocks but no text blocks (issue #5).
    * Some thinking-heavy models (e.g. cerebras/gpt-oss-120b on trivial prompts)
-   * produce only thinking content without text output. Lens-review treats this
-   * as a parse failure eligible for retry.
+   * produce only thinking content without text output. This is informational —
+   * the resolved text field contains a clear "(thinking content only - no text output)"
+   * message to distinguish this from actual "no output".
    */
   thinkingOnly?: boolean;
 }

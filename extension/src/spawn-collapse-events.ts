@@ -96,8 +96,7 @@ export function collapseEvents(
       : undefined;
 
   // Construct the text field. For thinking-only output, use a clear message
-  // that distinguishes this case from actual "no output". This message is
-  // what the lens-review parser sees; treat as parse failure for retry.
+  // that distinguishes this case from actual "no output".
   const resolvedText = thinkingOnly
     ? "(thinking content only - no text output)"
     : text || stderr || "(no output)";
