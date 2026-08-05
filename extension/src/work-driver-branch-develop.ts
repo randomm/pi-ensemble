@@ -77,6 +77,7 @@ export async function runBranch(
   // #292 — emit a plumb-report if reported-vs-actual mismatch.
   const plumbReports: PipelineState["plumbReports"] = [...ps.plumbReports];
   if (actualBranch && reportedBranch && actualBranch !== reportedBranch) {
+    const now = Date.now();
     const body = [
       "[ensemble:plumb]",
       "category: scope-ambiguity",
@@ -86,15 +87,16 @@ export async function runBranch(
       `actual (git rev-parse --abbrev-ref HEAD): ${actualBranch}`,
       "The driver uses the git-resolved branch. Verify the ops dispatch executed the intended branch creation.",
     ].join("\n");
-    plumbReports.push({ step: "branch", role: "ops", body, at: Date.now() });
+    plumbReports.push({ step: "branch", role: "ops", body, at: now });
     next = appendEvent(next, {
       kind: "plumb-report",
       step: "branch",
       role: "ops",
       body,
-      at: Date.now(),
+      at: now,
     });
   }
+  ps.plumbReports = plumbReports;
   // Parse worktree assignments (PR3 multi-workstream). For N=1 default
   // workstream, ops doesn't create an actual worktree — driver records
   // `{default: ctx.repoRoot}` so downstream Steps 4/5/7 use the same
@@ -119,7 +121,6 @@ export async function runBranch(
   } catch {
     trace("work-driver: baseSha capture failed (verify gate falls back to porcelain-only)");
   }
-  ps.plumbReports = plumbReports;
   return { ...next, pipelineState: ps };
 }
 
