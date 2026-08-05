@@ -352,7 +352,9 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
         });
         const mechCalls: string[] = [];
         const exec: NonNullable<DriverContext["verifyExecFn"]> = async (cmd, o) => {
-          if (cmd === "git rev-parse --abbrev-ref HEAD") mechCalls.push(cmd);
+          // #292 — runBranch now calls git rev-parse --abbrev-ref HEAD for
+          // branch verification. Return a valid branch so runBranch completes.
+          if (cmd === "git rev-parse --abbrev-ref HEAD") return { stdout: "feature/issue-997\n" };
           if (cmd === "git rev-parse HEAD") return { stdout: "base123\n" };
           if (cmd === "git status --porcelain") {
             const cwd = o?.cwd ?? "";
