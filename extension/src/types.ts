@@ -86,6 +86,9 @@ export interface DispatchResult {
   loopOutcome?: "approved" | "rejected" | "infra-failure";
   /** The budget (ms) that expired for killCause "timeout"/"inactivity". */
   killBudgetMs?: number;
+  /** #5 — set when the model produced thinking blocks but no text blocks.
+   * Lens-review treats thinking-only as a parse failure (eligible for retry). */
+  thinkingOnly?: boolean;
 }
 
 /**

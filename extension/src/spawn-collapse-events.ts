@@ -35,6 +35,9 @@ export function collapseEvents(
   let provider: string | undefined;
   let api: string | undefined;
 
+  // Track whether we've seen any thinking blocks vs text blocks (#5).
+  let hasThinkingBlock = false;
+
   for (const msg of messages) {
     if (msg.role !== "assistant") continue;
     turns++;
@@ -58,13 +61,16 @@ export function collapseEvents(
         textParts.push(block.text);
       } else if (block.type === "toolCall") {
         toolUses.push(block);
+      } else if (block.type === "thinking") {
+        hasThinkingBlock = true;
       }
     }
   }
 
   // Join with double-newline so distinct text blocks across turns (separated
   // by tool calls in between) stay visually delimited instead of concatenated.
-  const text = textParts.filter((t) => t.trim()).join("\n\n");
+  const textPartsFiltered = textParts.filter((t) => t.trim());
+  const hasText = textPartsFiltered.length > 0;
 
   // Detect synthetic error-stop: pi-ai providers turn HTTP timeouts and
   // transport failures into an assistant message with `stopReason: "error"`
@@ -80,10 +86,20 @@ export function collapseEvents(
       ? { reason: "error", message: lastAssistant.errorMessage }
       : undefined;
 
+  // Detect thinking-only output (#5): some thinking-heavy models (e.g.
+  // cerebras/gpt-oss-120b on trivial prompts) produce a thinking block but
+  // no text block. Surface this clearly instead of returning "(no output)"
+  // which reads like a bug. Lens-review treats thinking-only as a parse
+  // failure (eligible for retry).
+  const thinkingOnly = hasThinkingBlock && !hasText;
+  const text = thinkingOnly
+    ? "(model produced only thinking output, no text)"
+    : textPartsFiltered.join("\n\n") || stderr || "(no output)";
+
   return {
     role,
     ok: exitCode === 0 && !errorStop,
-    text: text || stderr || "(no output)",
+    text,
     toolUses,
     ms,
     exitCode,
@@ -92,5 +108,6 @@ export function collapseEvents(
     provider,
     api,
     errorStop,
+    thinkingOnly,
   };
 }
