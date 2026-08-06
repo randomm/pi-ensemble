@@ -266,8 +266,20 @@ function testGenericWideningAny() {
 +  result: Result<any>,
 `;
   const findings = scanTypeWidening(diff);
-  assert.strictEqual(findings.length, 1);
-  assert.strictEqual(findings[0].kind, "generic-widening");
+  // The seven pattern classes are independent detectors, not a partition:
+  // `Result<any>` is BOTH type erasure to `any` and generic widening to
+  // `T<any>`, so both fire on the one line. Asserting `length === 1` claimed
+  // an exclusivity the module never documented. Pin the overlap instead, so
+  // it is intended behaviour rather than an accident nobody looked at.
+  const generic = findings.filter((f) => f.kind === "generic-widening");
+  assert.strictEqual(generic.length, 1, "exactly one generic-widening finding");
+  assert.strictEqual(generic[0].after, "Result<any>");
+  assert.strictEqual(generic[0].file, "src/types.ts");
+  assert.ok(
+    findings.some((f) => f.kind === "type-erasure"),
+    "type-erasure co-fires on `any` — overlapping classifiers are by design",
+  );
+  assert.strictEqual(findings.length, 2, "and no OTHER class fires on this line");
   console.log("✓ testGenericWideningAny");
 }
 
@@ -399,3 +411,13 @@ export async function run() {
   testLineNumberTracking();
   console.log("\n✓ All invariant-scan tests passed");
 }
+
+
+// The invocation. Without it this file defines its tests and executes none:
+// `bun run` prints nothing and exits 0, so the suite counted it as passing
+// while the subsystem had zero coverage. A gate that cannot fail is worse
+// than no gate — EPIC #328, reproduced inside #279 itself.
+run().catch((err: unknown) => {
+  console.error(`\n✗ ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+  process.exit(1);
+});

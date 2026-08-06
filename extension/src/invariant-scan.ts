@@ -52,12 +52,27 @@ function parseDiffLine(
   line: string,
   currentFile: { file: string | null; hunkLine: number | undefined },
 ): { file: string | null; line: number | undefined } {
-  // File headers: `--- a/path/to/file` or `+++ b/path/to/file`
-  const fileMatch = line.match(/^(---| \+\+\+) (?:a\/)?(.+)$/);
-  if (fileMatch?.[2]) {
-    currentFile.file = fileMatch[2];
+  // File headers: `--- a/path/to/file` or `+++ b/path/to/file`.
+  //
+  // The `+++` (post-change) path is authoritative, because every finding
+  // describes the state AFTER the change — on a rename the `---` path no
+  // longer exists, so reporting it points the reviewer at a file that is not
+  // there. The `---` path is kept only as the fallback for deletions, where
+  // `+++` is `/dev/null`.
+  //
+  // Two bugs lived in the old pattern: a stray space in the alternation
+  // (`(---| \+\+\+)`) meant `+++` never matched at all, and the prefix strip
+  // was `(?:a\/)?`, which would have left `b/` on the path even if it had.
+  const fileMatch = line.match(/^(---|\+\+\+) (?:[ab]\/)?(.+)$/);
+  const matchedPath = fileMatch?.[2];
+  if (matchedPath) {
+    if (fileMatch?.[1] === "+++") {
+      if (matchedPath !== "/dev/null") currentFile.file = matchedPath;
+    } else if (matchedPath !== "/dev/null") {
+      currentFile.file = matchedPath;
+    }
     currentFile.hunkLine = undefined;
-    return { file: fileMatch[2], line: undefined };
+    return { file: currentFile.file, line: undefined };
   }
   // Hunk header: `@@ -<start>,<count> +<start>,<count> @@`
   const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)/);
@@ -92,6 +107,46 @@ function parseDiffLine(
  *
  * The scanner is routes-only — it does not fail the cycle.
  */
+/**
+ * Added-line text for each hunk, in hunk order.
+ *
+ * Hunk-scoped rather than whole-diff: a `const` removed in one function and an
+ * unrelated `const` added a hundred lines away are different facts, and
+ * matching across the whole file would suppress genuine removals.
+ */
+function collectHunkAddedLines(lines: string[]): string[][] {
+  const out: string[][] = [];
+  let current: string[] | undefined;
+  for (const line of lines) {
+    if (line.startsWith("@@")) {
+      current = [];
+      out.push(current);
+      continue;
+    }
+    if (current && line.startsWith("+") && !line.startsWith("+++")) {
+      current.push(line.slice(1));
+    }
+  }
+  return out;
+}
+
+/**
+ * Did `token` actually disappear in this hunk?
+ *
+ * True when no added line in the hunk still contains it. Errs toward
+ * SUPPRESSING the finding when the hunk is unknown — a route-only scanner that
+ * cries wolf gets ignored, which costs more than the occasional missed
+ * widening.
+ */
+function stillGone(hunkAdded: string[][], hunkIndex: number, token: string): boolean {
+  const added = hunkAdded[hunkIndex];
+  if (!added) return true;
+  const needle = token.trim();
+  if (!needle) return true;
+  const re = new RegExp(`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+  return !added.some((l) => re.test(l));
+}
+
 export function scanTypeWidening(diff: string): WideningFinding[] {
   const findings: WideningFinding[] = [];
   const lines = diff.split("\n");
@@ -99,8 +154,20 @@ export function scanTypeWidening(diff: string): WideningFinding[] {
     file: null,
     hunkLine: undefined,
   };
+  // Added-line text per hunk, indexed by the hunk each line belongs to.
+  //
+  // The "removed X" classes (readonly/const, assert, pub, mut) are about a
+  // guard DISAPPEARING. Judged one line at a time they instead fire whenever
+  // the keyword merely appears on a `-` line — so `-  const x: string` /
+  // `+  const x: string | null` reported a removed `const` that is plainly
+  // still there. Since the scanner routes into the ARCHITECTURE lens, that is
+  // a noise pump: nearly every touched `const` line in a TS diff would carry
+  // a spurious finding.
+  const hunkAdded = collectHunkAddedLines(lines);
+  let hunkIndex = -1;
 
   for (const rawLine of lines) {
+    if (rawLine.startsWith("@@")) hunkIndex += 1;
     const { file, line } = parseDiffLine(rawLine, currentFile);
     if (!file || !file.match(/\.(rs|ts|tsx|js|jsx)$/)) {
       continue; // Only scan Rust and TS files
@@ -158,7 +225,11 @@ export function scanTypeWidening(diff: string): WideningFinding[] {
 
     // Pattern 3: Removed mutability guards (readonly, final, const, NOT NULL)
     const removedMutabilityMatch = codeLine.match(/\b(?:readonly|final|const|NOT NULL)\b/);
-    if (removedMutabilityMatch && !isAdded) {
+    if (
+      removedMutabilityMatch &&
+      !isAdded &&
+      stillGone(hunkAdded, hunkIndex, removedMutabilityMatch[0])
+    ) {
       findings.push({
         file,
         line,
@@ -182,7 +253,7 @@ export function scanTypeWidening(diff: string): WideningFinding[] {
     const removedAssertMatch = codeLine.match(
       /\b(?:assert!\(|debug_assert!\(|invariant\(|assert\()/,
     );
-    if (removedAssertMatch && !isAdded) {
+    if (removedAssertMatch && !isAdded && stillGone(hunkAdded, hunkIndex, removedAssertMatch[0])) {
       findings.push({
         file,
         line,
@@ -194,7 +265,7 @@ export function scanTypeWidening(diff: string): WideningFinding[] {
     // Pattern 6: Removed `pub` (Rust)
     if (file.endsWith(".rs")) {
       const removedPubMatch = codeLine.match(/\bpub\s+(?:fn|struct|enum|trait|mod)\s+/);
-      if (removedPubMatch && !isAdded) {
+      if (removedPubMatch && !isAdded && stillGone(hunkAdded, hunkIndex, "pub")) {
         findings.push({
           file,
           line,
@@ -205,7 +276,7 @@ export function scanTypeWidening(diff: string): WideningFinding[] {
 
       // Pattern 7: Removed `mut` (Rust)
       const removedMutMatch = codeLine.match(/\bmut\s+/);
-      if (removedMutMatch && !isAdded) {
+      if (removedMutMatch && !isAdded && stillGone(hunkAdded, hunkIndex, "mut")) {
         findings.push({
           file,
           line,
