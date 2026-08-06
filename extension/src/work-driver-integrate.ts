@@ -128,10 +128,15 @@ export async function integrate(execFn: ExecFn, opts: IntegrateOpts): Promise<In
       cwd: repoRoot,
       maxBuffer: 1024 * 1024,
     });
-    if (rootStatus.trim()) {
-      const files = rootStatus
-        .split("\n")
-        .filter((l) => l.trim())
+    // `.worktrees/` is the driver's own scaffolding, not operator residue.
+    // `.git/info/exclude` normally hides it; this filter is the backstop for
+    // when that write failed, because treating it as dirt would block every
+    // integration forever.
+    const rootDirt = rootStatus
+      .split("\n")
+      .filter((l) => l.trim() && !/^..\s+"?\.worktrees\//.test(l));
+    if (rootDirt.length > 0) {
+      const files = rootDirt
         .slice(0, 10)
         .map((l) => l.slice(3))
         .join(", ");
@@ -216,6 +221,36 @@ export async function integrate(execFn: ExecFn, opts: IntegrateOpts): Promise<In
       cwd: repoRoot,
       maxBuffer: 1024 * 1024,
     });
+
+    // Advance each worktree to the commit its work just became.
+    //
+    // Without this the worktree keeps the slice staged, so the NEXT
+    // integration re-captures the same patch — which either fails to apply
+    // (already present) or re-commits stale content. That is precisely how a
+    // lens-fix round would have silently shipped the pre-fix version.
+    //
+    // `reset --hard` is safe here specifically because everything porcelain
+    // listed was staged and applied a moment ago: the commit is a superset of
+    // the worktree's state, so nothing can be lost.
+    const { stdout: newHead } = await execFn("git rev-parse HEAD", {
+      cwd: repoRoot,
+      maxBuffer: 64 * 1024,
+    });
+    const headSha = newHead.trim();
+    if (headSha) {
+      for (const id of applied) {
+        const wt = worktrees[id];
+        if (!wt) continue;
+        await execFn(`git reset --hard ${JSON.stringify(headSha)}`, {
+          cwd: wt,
+          maxBuffer: 256 * 1024,
+        }).catch((err) =>
+          trace(
+            `work-driver: integrate — could not advance worktree '${id}' to ${headSha.slice(0, 8)}: ${(err as Error).message?.slice(0, 160)}`,
+          ),
+        );
+      }
+    }
     return { ok: true, workstreams: applied, empty: false };
   } catch (err) {
     const e = err as Error & { stderr?: string };

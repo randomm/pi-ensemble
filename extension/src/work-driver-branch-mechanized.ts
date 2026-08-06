@@ -24,6 +24,8 @@
  * behind.
  */
 
+import fs from "node:fs/promises";
+import path from "node:path";
 import { trace } from "./trace.ts";
 import type { ExecFn } from "./worktree.ts";
 import { worktreeCreate } from "./worktree.ts";
@@ -79,6 +81,38 @@ export async function detectMainline(execFn: ExecFn, repoRoot: string): Promise<
   return "main";
 }
 
+/**
+ * Keep `.worktrees/` out of the repo's own `git status`.
+ *
+ * Written to `.git/info/exclude` (per-clone) rather than `.gitignore`
+ * (committed) so the driver never alters the project's tracked shape — the
+ * same convention AGENTS.md §7 already mandates for `tmp/`.
+ *
+ * Not cosmetic: without it, the very worktrees this step creates read as
+ * untracked residue at repoRoot, and `integrate()`'s dirty-root preflight
+ * refuses to run — every cycle, forever. Caught by the real-git test, missed
+ * by the mocked one, which is the whole argument for having both.
+ */
+export async function ensureWorktreesExcluded(execFn: ExecFn, repoRoot: string): Promise<void> {
+  const excludePath = path.join(repoRoot, ".git", "info", "exclude");
+  try {
+    const existing = await fs.readFile(excludePath, "utf8").catch(() => "");
+    if (/^\.worktrees\/?$/m.test(existing)) return;
+    await fs.mkdir(path.dirname(excludePath), { recursive: true });
+    const sep = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+    await fs.appendFile(
+      excludePath,
+      `${sep}# pi-ensemble /work driver (#287) — per-cycle worktrees\n.worktrees/\n`,
+      "utf8",
+    );
+  } catch (err) {
+    // Best-effort: the preflight filters `.worktrees/` defensively too.
+    trace(
+      `work-driver: could not update .git/info/exclude: ${(err as Error).message?.slice(0, 120)}`,
+    );
+  }
+}
+
 export interface MechanizedBranchResult {
   branchName: string;
   baseSha: string;
@@ -104,6 +138,7 @@ export async function mechanizedBranchSetup(
   workstreamIds: string[],
   issueTitle: string | undefined,
 ): Promise<MechanizedBranchResult> {
+  await ensureWorktreesExcluded(execFn, repoRoot);
   const mainline = await detectMainline(execFn, repoRoot);
   await execFn(`git fetch origin ${JSON.stringify(mainline)}`, {
     cwd: repoRoot,
