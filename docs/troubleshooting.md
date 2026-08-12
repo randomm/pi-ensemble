@@ -107,6 +107,14 @@ Revise the issue body (`/plan`) and re-run with `--restart`.
 
 **Now:** both failure signals route identically — back to `develop` within the retry budget, then to handoff at the cap.
 
+### `/work` refuses a PR number at commit-pr
+
+The gate now requires the PR to be **open** and to have this cycle's branch as its head. Previously it only checked that `gh pr view <N>` did not error, which proved a PR with that number exists — not that it belongs to this cycle. If you see this, the ops reply's `pr:` marker named a PR from a different branch, or one that is already closed or merged. Check `gh pr list --head <branch>`.
+
+### `/work` halts at the branch step naming the mainline
+
+The branch step recorded whatever branch `repoRoot` was on, and that value becomes the branch the cycle force-pushes to. If an ops child creates the branch and then returns `repoRoot` to `main`, the cycle would have adopted `main`. It now halts. Re-run with `--restart` after checking `git -C <repo> branch --show-current`.
+
 ### A merged PR reported a failed cycle
 
 **Symptom:** `gh` shows the PR merged, the driver shows `step-failed:merged` and hands off; the worktree is not torn down and the checkout is not restored.

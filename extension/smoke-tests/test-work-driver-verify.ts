@@ -16,6 +16,15 @@ import { explainCap } from "../src/work-driver-explain.ts";
 import { verifyCmdFor, verifyStepOutcome } from "../src/work-driver-verify.ts";
 import { initialState } from "../src/workflow-state.ts";
 
+/**
+ * The branch these fixtures put on the cycle.
+ *
+ * `gh pr view` is now asked for `state,headRefName`, and the gate refuses a PR
+ * whose head is not this cycle's branch — existing was never proof the number
+ * belonged to this cycle. A fake that reports only `state` is a pre-fix fake.
+ */
+const BRANCH_UNDER_TEST = "feature/issue-999";
+
 let exit = 0;
 function assert(cond: boolean, msg: string) {
   if (cond) console.log(`✓ ${msg}`);
@@ -213,7 +222,8 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
         const zeroCommits: NonNullable<DriverContext["verifyExecFn"]> = async (cmd) => {
           if (cmd.startsWith("git symbolic-ref")) return { stdout: "main\n" };
           if (cmd.startsWith("git rev-list --count")) return { stdout: "0\n" };
-          if (cmd.startsWith("gh pr view")) return { stdout: '{"state":"OPEN"}' };
+          if (cmd.startsWith("gh pr view"))
+            return { stdout: JSON.stringify({ state: "OPEN", headRefName: BRANCH_UNDER_TEST }) };
           return { stdout: "" };
         };
         const zeroGate = await verifyStepOutcome(mkCtx(dir, zeroCommits), s, "commit-pr");
@@ -227,7 +237,8 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
         const happy: NonNullable<DriverContext["verifyExecFn"]> = async (cmd) => {
           if (cmd.startsWith("git symbolic-ref")) return { stdout: "main\n" };
           if (cmd.startsWith("git rev-list --count")) return { stdout: "2\n" };
-          if (cmd.startsWith("gh pr view")) return { stdout: '{"state":"OPEN"}' };
+          if (cmd.startsWith("gh pr view"))
+            return { stdout: JSON.stringify({ state: "OPEN", headRefName: BRANCH_UNDER_TEST }) };
           return { stdout: "" };
         };
         const happyGate = await verifyStepOutcome(mkCtx(dir, happy), s, "commit-pr");
@@ -243,7 +254,8 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
           if (cmd.startsWith("git symbolic-ref")) return { stdout: "main\n" };
           if (cmd.startsWith("git rev-list --count")) return { stdout: "2\n" };
           if (cmd.startsWith("gh pr list")) return { stdout: "789\n" };
-          if (cmd.startsWith("gh pr view")) return { stdout: '{"state":"OPEN"}' };
+          if (cmd.startsWith("gh pr view"))
+            return { stdout: JSON.stringify({ state: "OPEN", headRefName: BRANCH_UNDER_TEST }) };
           return { stdout: "" };
         };
         const adoptGate = await verifyStepOutcome(mkCtx(dir, adopt), sNoPr, "commit-pr");

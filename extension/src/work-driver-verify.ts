@@ -148,6 +148,48 @@ function verifyGateEnabled(): boolean {
  * erroring at repoRoot) are notes, not failures — same no-false-alarm
  * stance as verifyConsolidation.
  */
+/** The fields of `gh pr view --json state,headRefName` this gate reads. */
+export interface PrView {
+  state?: string;
+  headRefName?: string;
+}
+
+/**
+ * Is this the PR this cycle opened?
+ *
+ * Fails CLOSED on anything unreadable. Unlike the review threshold — where
+ * silent doctrine is the normal case and the default applies — this guards the
+ * one irreversible act in the cycle, so an answer it cannot understand is a
+ * refusal rather than a shrug.
+ */
+export function judgePrIdentity(
+  branchName: string | undefined,
+  view: PrView | undefined,
+): { ok: true } | { ok: false; failure: string } {
+  if (!branchName) {
+    return { ok: false, failure: "cannot be bound to this cycle: no branch was recorded" };
+  }
+  if (!view?.headRefName) {
+    return {
+      ok: false,
+      failure: "returned no headRefName, so it cannot be bound to this cycle's branch",
+    };
+  }
+  if (view.headRefName !== branchName) {
+    return {
+      ok: false,
+      failure: `is opened against \`${view.headRefName}\`, not this cycle's branch \`${branchName}\` — the number does not belong to this cycle`,
+    };
+  }
+  if (view.state !== "OPEN") {
+    return {
+      ok: false,
+      failure: `is ${view.state ?? "in an unreported state"}, not OPEN — there is nothing here left to merge`,
+    };
+  }
+  return { ok: true };
+}
+
 export async function verifyStepOutcome(
   ctx: DriverContext,
   state: WorkState,
@@ -215,16 +257,29 @@ export async function verifyStepOutcome(
     }
   }
   if (prToCheck !== undefined) {
+    // The number may have come from an ops child's reply. Asking whether it
+    // resolves proves only that SOME PR has that number — in a busy repo the
+    // numbers around a real PR are all live PRs, so a plausible mistake is a
+    // valid one. Bind it to the branch instead: that is driver-computed, and
+    // `gh pr create --head` opened the PR against exactly it.
+    let view: PrView | undefined;
     try {
-      await execFn(`gh pr view ${prToCheck} --json state`, {
+      const { stdout } = await execFn(`gh pr view ${prToCheck} --json state,headRefName`, {
         cwd: ctx.repoRoot,
         maxBuffer: 256 * 1024,
       });
+      view = JSON.parse(stdout) as PrView;
     } catch (err) {
       const e = err as Error & { stderr?: string };
       failures.push(
         `PR #${prToCheck} does not resolve via \`gh pr view\`: ${(e.stderr ?? e.message ?? "").slice(0, 200)}`,
       );
+    }
+    if (view !== undefined) {
+      const identity = judgePrIdentity(state.pipelineState.branchName, view);
+      if (!identity.ok && identity.failure) {
+        failures.push(`PR #${prToCheck} ${identity.failure}`);
+      }
     }
   }
   return { ok: failures.length === 0, failures, notes, adoptedPrNumber };

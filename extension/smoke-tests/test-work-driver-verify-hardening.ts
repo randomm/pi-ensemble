@@ -245,7 +245,8 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
           if (cmd === "git status --porcelain") return { stdout: " M src/lib.rs\n" };
           if (cmd.startsWith("git rev-list --count")) return { stdout: "0\n" };
           if (cmd.startsWith("git symbolic-ref")) return { stdout: "main\n" };
-          if (cmd.startsWith("gh pr view")) return { stdout: '{"state":"OPEN"}' };
+          if (cmd.startsWith("gh pr view"))
+            return { stdout: JSON.stringify({ state: "OPEN", headRefName: "feature/issue-991" }) };
           return { stdout: "" };
         };
         const ctx: DriverContext = {
@@ -315,7 +316,8 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
           if (cmd.startsWith("git rev-list --count")) return { stdout: "2\n" };
           if (cmd.startsWith("git symbolic-ref")) return { stdout: "main\n" };
           if (cmd.startsWith("gh pr list")) return { stdout: "789\n" };
-          if (cmd.startsWith("gh pr view")) return { stdout: '{"state":"OPEN"}' };
+          if (cmd.startsWith("gh pr view"))
+            return { stdout: JSON.stringify({ state: "OPEN", headRefName: "feature/issue-993" }) };
           return { stdout: "" };
         };
         const ctx: DriverContext = {
