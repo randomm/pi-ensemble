@@ -356,10 +356,10 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
       }
     }
   } finally {
-    if (prevVerify === undefined) delete process.env.PI_ENSEMBLE_VERIFY;
+    if (prevVerify === undefined) process.env.PI_ENSEMBLE_VERIFY = undefined;
     else process.env.PI_ENSEMBLE_VERIFY = prevVerify;
     process.env.PI_ENSEMBLE_VERIFY = "0";
-    if (prevSpec === undefined) delete process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE;
+    if (prevSpec === undefined) process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE = undefined;
     else process.env.PI_ENSEMBLE_SKIP_SPECULATIVE_EXPLORE = prevSpec;
   }
 }

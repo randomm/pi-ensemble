@@ -70,14 +70,44 @@ export async function verifyConsolidation(
       // No paths declared → can't verify; skip (don't false-alarm).
       continue;
     }
-    const anyPresent = ws.paths.some((p) =>
-      Array.from(changedFiles).some((f) => f === p || f.startsWith(`${p}/`)),
-    );
+    const anyPresent = ws.paths.some((raw) => {
+      const p = normaliseDeclaredPath(raw);
+      if (!p) return false;
+      return Array.from(changedFiles).some((f) => f === p || f.startsWith(`${p}/`));
+    });
     if (!anyPresent) {
       missing.push({ id, paths: ws.paths });
     }
   }
   return { missing };
+}
+
+/**
+ * A declared path as `git` would spell it.
+ *
+ * `paths` is prose from the plan step, not `git` output, and — measured across
+ * the real state files on this host — it carries annotations the planner added
+ * for a human reader:
+ *
+ *     "extension/src/work-driver-verify-cmd.ts (new)"
+ *     "extension/src/role-tools.ts (no changes)"
+ *
+ * Compared by exact equality against `git diff --name-only`, neither ever
+ * matches, so the workstream reads as MISSING even when its files changed. The
+ * failure is one-directional — a false alarm at commit-pr, never a false pass —
+ * which is why it went unnoticed.
+ *
+ * A trailing parenthetical is stripped; one INSIDE a name ("notes (draft).md")
+ * is not, because that is a real filename.
+ */
+export function normaliseDeclaredPath(raw: string): string {
+  return raw
+    .trim()
+    .replace(/\s*\([^()]*\)\s*$/, "")
+    .replace(/^[`*\s]+|[`*\s]+$/g, "")
+    .replace(/^\.\//, "")
+    .replace(/\/+$/, "")
+    .trim();
 }
 
 /** PR17 — escape hatch: PI_ENSEMBLE_VERIFY=0 disables the outcome gate. */

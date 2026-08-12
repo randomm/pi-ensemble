@@ -11,7 +11,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { type DriverContext } from "../src/work-driver-context.ts";
+import type { DriverContext } from "../src/work-driver-context.ts";
 import { explainCap } from "../src/work-driver-explain.ts";
 import { verifyCmdFor, verifyStepOutcome } from "../src/work-driver-verify.ts";
 import { initialState } from "../src/workflow-state.ts";
@@ -310,7 +310,7 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
       assert(/PI_ENSEMBLE_VERIFY=0/.test(text), "explainCap verify-failed: names the escape hatch");
     }
   } finally {
-    if (prevVerify === undefined) delete process.env.PI_ENSEMBLE_VERIFY;
+    if (prevVerify === undefined) process.env.PI_ENSEMBLE_VERIFY = undefined;
     else process.env.PI_ENSEMBLE_VERIFY = prevVerify;
     // Restore the top-of-file default for any code that runs after.
     process.env.PI_ENSEMBLE_VERIFY = "0";

@@ -86,6 +86,19 @@ Check the raw transcript under `~/.pi/agent/ensemble-runs/<date>/` before conclu
 
 ## Review gates
 
+### The six-pass review said APPROVED but nothing looks reviewed
+
+A lens that exits 0 without calling `report_finding` used to be indistinguishable from one that reviewed carefully and found nothing, so a silent review reported APPROVED. It now reports `REVIEW_INCOMPLETE` unless every lens produced either findings or a closing summary. If you see REVIEW_INCOMPLETE with no obvious failure, check the lens transcripts under `~/.pi/agent/ensemble-runs/<date>/` — a lens that returned only thinking content is the usual cause.
+
+### `/work` parks at explore saying the spec is underspecified
+
+Two new checks can park here, both because explore did not produce a decision the driver can act on:
+
+- **No deliverables.** `INTENT-VERDICT: proceed` with an empty `### Deliverables` section now parks rather than planning against nothing. Acceptance criteria are *not* required — `proceed-with-assumptions` is the supported path for a defensible gap.
+- **No signal at all.** A reply with neither a `## Spec` block nor a legacy `EXPLORE-VERDICT` token parks instead of advancing. On a single-issue cycle the prompt does not ask for the legacy token, so a missing `## Spec` block means the driver has nothing to read.
+
+Revise the issue body (`/plan`) and re-run with `--restart`.
+
 ### A cycle merged even though the full verification failed
 
 **Symptom:** `.pi/verify-cmd-full` fails (typecheck, lint, or a fixture suite) and the cycle still reports MERGED.
