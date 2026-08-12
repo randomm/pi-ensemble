@@ -53,6 +53,7 @@
 import * as lifecycle from "./lifecycle-events.ts";
 import { trace } from "./trace.ts";
 import { runAdversarial } from "./work-driver-adversarial.ts";
+import { checkAttentionLabel } from "./work-driver-attention.ts";
 import { runBranch, runDevelop } from "./work-driver-branch-develop.ts";
 import { runCommitPr } from "./work-driver-commit.ts";
 import { type DriverContext, STEP_ORDINAL, nextStep } from "./work-driver-context.ts";
@@ -63,6 +64,7 @@ import { runHandoff } from "./work-driver-handoff.ts";
 import { runLens, runLensFix } from "./work-driver-lens.ts";
 import { runMerged } from "./work-driver-merged.ts";
 import { runPlan } from "./work-driver-plan.ts";
+import { claimCycle } from "./work-driver-registry.ts";
 import {
   classifyRunningState,
   clearForResume,
@@ -155,7 +157,31 @@ export class DriverNotImplementedError extends Error {
  * absorb that case, and silently continuing past an unimplemented step would
  * be worse than stopping.
  */
+/**
+ * Run one /work cycle, holding an in-process claim on every issue it covers.
+ *
+ * The claim closes a hole the on-disk owner check structurally cannot: that
+ * check excludes `owner.pid === selfPid` so a driver can resume its own crashed
+ * state, which means two cycles started from the SAME process never refuse each
+ * other. Harmless while only a human typing `/work` could start one; not
+ * harmless once a tool can, because an LLM can call a tool twice.
+ */
 export async function runWorkDriver(ctx: DriverContext): Promise<void> {
+  const claimed = claimCycle(ctx.issue, ctx.issues);
+  if (!claimed.ok) {
+    ctx.pi.sendUserMessage(
+      `pi-ensemble: /work for issue #${ctx.issue} refused — issue #${claimed.conflictIssue} is already being worked by the cycle for #${claimed.heldByCycle} in this session. Two drivers on one branch interleave commits and produce a PR nobody can review. Wait for it to finish, or check /work-status.`,
+    );
+    return;
+  }
+  try {
+    await runWorkDriverInner(ctx);
+  } finally {
+    claimed.claim.release();
+  }
+}
+
+async function runWorkDriverInner(ctx: DriverContext): Promise<void> {
   // PR12 — `/work N --restart`: skip readState and start fresh from
   // `initialState(issue)`. Used after the operator revises the issue
   // body via /plan (or gh issue edit) following a prior terminal cycle
@@ -190,6 +216,23 @@ export async function runWorkDriver(ctx: DriverContext): Promise<void> {
       `pi-ensemble: /work for issue #${ctx.issue} already terminated as ${terminalStatus}. To start a fresh cycle (e.g., after revising the issue via /plan), re-run with --restart:\n  /work ${ctx.issue} --restart\nOr rm ${workStateDir(ctx.repoRoot)}/${ctx.issue}.json manually. The prior cycle's event log is preserved in the state file until you restart or remove it.`,
     );
     return;
+  }
+
+  // #408 — the driver has always WRITTEN `needs-human-attention` and never read
+  // it back, so /work on a handed-off issue quietly reran the whole pipeline
+  // and produced the same handoff again. Checked before any dispatch is paid
+  // for. `--restart` is the override: it already means "I revised the issue".
+  {
+    const attention = await checkAttentionLabel(ctx.repoRoot, ctx.issue, {
+      restart: ctx.restart === true,
+    });
+    if (attention.refuse && attention.message) {
+      ctx.pi.sendUserMessage(attention.message);
+      return;
+    }
+    if (!attention.checked) {
+      trace(`work-driver: needs-human-attention check did not run for #${ctx.issue}`);
+    }
   }
 
   // #382 — a `running` state file means one of three things, and the driver
