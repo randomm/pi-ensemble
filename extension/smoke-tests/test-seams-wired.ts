@@ -77,6 +77,17 @@ const SEAMS: Seam[] = [
     canary: { symbol: "vipuneChildEnv", importer: "spawn.ts" },
   },
   {
+    // Shipped in v0.12.32 with no caller at all. `/audit` is now that caller
+    // (memory-panel.ts), so it is enforced from here on.
+    file: "memory-stats.ts",
+    pending: {},
+    testOnly: {
+      renderMemoryStats: "the /audit panel renders its own framing; this is the raw dump",
+      defaultDbPath: "resolved inside readMemoryStats; asserted directly",
+    },
+    canary: { symbol: "readMemoryStats", importer: "memory-panel.ts" },
+  },
+  {
     file: "retry-config-check.ts",
     pending: {},
     testOnly: {
@@ -171,26 +182,30 @@ for (const seam of SEAMS) {
   if (pendingCount) console.log(`  … ${pendingCount} export(s) still awaiting a caller`);
 }
 
-// -------------------------------------------------- the seams not yet declared
+// ------------------------------------ nothing else is quietly shipping dead
 
 {
-  // `memory-stats.ts` is the open case: shipped in v0.12.32 with no caller, and
-  // due to be wired into /audit. It is deliberately NOT in SEAMS yet — adding it
-  // there while it is still dead would fail this suite. When /audit calls it,
-  // add it, and this assertion flips to enforce that it stays called.
-  const memoryStats = allFiles.find((f) => f.name === "memory-stats.ts");
-  const callers =
-    allFiles.filter(
-      (f) => f.name !== "memory-stats.ts" && /from "\.\/memory-stats\.ts"/.test(f.text),
-    ) ?? [];
-  if (memoryStats && callers.length > 0) {
-    assert(
-      SEAMS.some((s) => s.file === "memory-stats.ts"),
-      "memory-stats.ts now HAS a caller — add it to SEAMS so it cannot go dead again",
+  // A module whose ONLY importer is a smoke test is the exact shape all three
+  // seams above had when they shipped. Report any such module, so the next one
+  // is noticed at the gate rather than three releases later.
+  const declared = new Set(SEAMS.map((s) => s.file));
+  const orphans: string[] = [];
+  for (const f of allFiles) {
+    if (declared.has(f.name) || f.name === "index.ts" || f.name === "types.ts") continue;
+    if (!/^export /m.test(f.text)) continue;
+    const spec = f.name.replace(".ts", "\\.ts");
+    const imported = allFiles.some(
+      (o) => o.name !== f.name && new RegExp(`from "\\./${spec}"`).test(o.text),
     );
-  } else {
-    console.log("\n── memory-stats.ts\n  … still unwired (pending the /audit panel) — not yet enforced");
+    const testImported = testFiles.some((t) => new RegExp(`/${spec}"`).test(t));
+    if (!imported && testImported) orphans.push(f.name);
   }
+  assert(
+    orphans.length === 0,
+    `no module is reachable ONLY from its own tests${
+      orphans.length ? ` — dead in production: ${orphans.join(", ")}` : ""
+    }`,
+  );
 }
 
 console.log(`\nexit ${exit}`);

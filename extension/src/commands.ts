@@ -40,6 +40,7 @@ import type {
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { notifyAgent } from "./agent-message.ts";
+import { buildMemoryPanel } from "./memory-panel.ts";
 import { GLOBAL_KEY, getAllOverrides } from "./model-config.ts";
 import { modelConfigSnapshot } from "./models.ts";
 import { armPmMode, isPmModeActive, peekDoctrinePending, takeDoctrinePending } from "./pm-mode.ts";
@@ -165,7 +166,14 @@ export function registerCommands(pi: ExtensionAPI) {
           ctx.ui.notify(`pi-ensemble: ${(err as Error).message}`, "error");
           return;
         }
-        const expanded = expandArgs(body, args);
+        let expanded = expandArgs(body, args);
+        // #422 — /audit gains a memory section. `memory-stats.ts` shipped in
+        // v0.12.32 with no caller; this is it. Appended, never substituted: a
+        // repo with no memory store gets a byte-identical message.
+        if (name === "audit") {
+          const panel = await buildMemoryPanel(await resolveRepoRoot(ctx.cwd));
+          if (panel) expanded = `${expanded}\n\n---\n\n${panel}`;
+        }
         if (!ctx.isIdle()) {
           ctx.ui.notify(
             `pi-ensemble: agent is busy — try /${name} again when idle, or use /steer for an inline nudge`,
