@@ -1,0 +1,23 @@
+# Provenance: Research Audit – Vipune/pi‑ensemble Gap Research
+
+- **Date:** 2026‑08‑10
+- **Rounds:** 1 (audit)
+- **Artifacts audited:**
+  - outputs/longterm-memory-multiagent-llm.md
+  - outputs/compare-vipune-memory.md
+  - outputs/vipune-pi-ensemble-gap.md
+  - Corresponding .provenance.md files
+  - outputs/.plans/audit-vipune-gap-research.md
+- **Sources consulted:** All URLs cited in the three briefs (verified reachable).
+- **Method:**
+  - Read briefs to extract quantitative claims and benchmark definitions.
+  - Compared claims against cited URLs via `fetch_content` to check presence/absence of supporting text.
+  - Inspected code‑search grounding in gap analysis brief.
+  - Compiled discrepancy list with severity classification.
+- **Issues identified:**
+  - Critical: 0
+  - High: 2 (quantitative claims without inline citations; benchmark definitions without source anchoring)
+  - Medium: 3 (negative code‑search claim not grounded; feature claims lack precise anchors; open questions not tied to literature)
+  - Low: 2 (provenance logs lack section details; search scope not documented)
+- **Recommendations:** See `outputs/vipune-research-audit.md`.
+- **Verification:** Audit artifacts self‑consistent; all cited URLs reachable.

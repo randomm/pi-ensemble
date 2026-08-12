@@ -1,0 +1,109 @@
+{
+  "runId": "23e37a58",
+  "agent": "researcher",
+  "task": "Read the plan file outputs/.plans/longterm-memory-multiagent-llm.md and gather token-efficiency strategies (e.g., summarization, hierarchical memory, caching, chunking) used for long-term memory in multi-agent LLM harnesses. Summarize methods, performance trade‑offs, and cite sources (2022‑2026). Write to outputs/.drafts/longterm-memory-multiagent-llm-t2-research.md.\n\n---\nUpdate progress at: /Users/janni/.config/opencode/pi-ensemble/.pi-subagents/artifacts/progress/23e37a58/progress.md\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/janni/.config/opencode/pi-ensemble/.pi-subagents/artifacts/outputs/23e37a58/parallel-0/1-researcher/research.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 1,
+  "usage": {
+    "input": 20510,
+    "output": 5995,
+    "cacheRead": 569376,
+    "cacheWrite": 0,
+    "cost": 0.0066735,
+    "turns": 33
+  },
+  "model": "nebius/openai/gpt-oss-120b:high",
+  "attemptedModels": [
+    "nebius/openai/gpt-oss-120b:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "nebius/openai/gpt-oss-120b:high",
+      "success": false,
+      "exitCode": 1,
+      "error": "Agent 'researcher' requested unavailable child tools: hf_dataset_info, hf_repo_files, hf_repo_read_file, parallel_search, parallel_fetch, parallel_research.\nThe `tools` field is a strict allowlist; it does not load extension code.\nFor extension tools, add the provider path to `subagentOnlyExtensions` (child-only), `extensions`, or as a path-like entry in `tools`, while keeping each registered tool name in `tools`.\nFor MCP tools, verify the MCP adapter configuration and selected tool names. For builtin tools, verify the name against the installed Pi version.",
+      "usage": {
+        "input": 20510,
+        "output": 5995,
+        "cacheRead": 569376,
+        "cacheWrite": 0,
+        "cost": 0.0066735,
+        "turns": 33
+      }
+    }
+  ],
+  "durationMs": 103488,
+  "toolCount": 52,
+  "error": "Agent 'researcher' requested unavailable child tools: hf_dataset_info, hf_repo_files, hf_repo_read_file, parallel_search, parallel_fetch, parallel_research.\nThe `tools` field is a strict allowlist; it does not load extension code.\nFor extension tools, add the provider path to `subagentOnlyExtensions` (child-only), `extensions`, or as a path-like entry in `tools`, while keeping each registered tool name in `tools`.\nFor MCP tools, verify the MCP adapter configuration and selected tool names. For builtin tools, verify the name against the installed Pi version.",
+  "launchContractDigest": "7baf7dfcce311444ace6b3065f4a28dc39de4760f63b59df5f99b98bcb14409d",
+  "launchResolvedExtensions": {
+    "version": 1,
+    "source": "launch-resolved",
+    "disableAmbientExtensions": false,
+    "runtime": [
+      "sha256:d920259618363f1c"
+    ],
+    "configured": [],
+    "effective": [
+      "sha256:d920259618363f1c"
+    ],
+    "omitted": {
+      "runtime": 0,
+      "configured": 0,
+      "effective": 0
+    }
+  },
+  "acceptance": {
+    "status": "rejected",
+    "evidenceStatus": "rejected",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [
+      {
+        "id": "attestation",
+        "status": "failed",
+        "message": "Structured acceptance report not found."
+      }
+    ],
+    "verifyRuns": [],
+    "childReportParseError": "Structured acceptance report not found."
+  },
+  "transcriptPath": "/Users/janni/.config/opencode/pi-ensemble/.pi-subagents/artifacts/23e37a58_researcher_1_transcript.jsonl",
+  "timestamp": 1786360814070
+}

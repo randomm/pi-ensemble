@@ -1,0 +1,34 @@
+# Provenance: Deep Analysis and Synthesis of pi-ensemble Memory Architecture
+
+- **Date:** 2026‑08‑10
+- **Rounds:** 2 (initial research → deep dive into pi-ensemble codebase)
+- **Sources consulted:**
+  - Harness tools: agentmemory, Alaz, MAG, PMB, recall-echo (web search + fetch)
+  - Vipune: README, agent-integration docs (GitHub fetch + local read)
+  - pi-ensemble local files:
+    - extension/src/vipune.ts (13KB wrapper)
+    - agents-base/*.md (6 role definitions)
+    - modules/core/vipune-*.md (3 memory modules)
+    - manifests/*.manifest (6 manifest files)
+    - skill/vipune/SKILL.md (17KB bundled skill)
+    - issue #394 (gh issue view)
+  - Bash grep searches for integration verification
+- **Key discoveries:**
+  - TypeScript wrapper exists but is NOT imported in driver code
+  - Issue #394 specification exists but R1–R4 read legs are unverified
+  - Modular doctrine is complete (light/baseline/heavy tiers assembled via manifests)
+  - Bundled skill exists with failure-mode catalog and trigger conditions
+  - No automatic hooks, no MCP, no benchmarks, no git-aware learning
+  - pi-ensemble uses only ~15% of Vipune's features despite detailed specification
+- **Sources accepted:** All reachable URLs; all local files verified.
+- **Sources rejected:** None.
+- **Verification:** PASS — claims grounded in local code inspection, grep evidence, and documentation.
+- **Plans:**
+  - outputs/.plans/longterm-memory-agentic-harnesses-vipune-pi-ensemble.md
+- **Research files:**
+  - outputs/.drafts/harness-memory-research.md
+  - outputs/.drafts/vipune-features-verified.md
+  - outputs/.drafts/pi-ensemble-vipune-usage-recheck.md
+  - outputs/deep-analysis-pi-ensemble-memory-complete.md (NEW)
+  - outputs/longterm-memory-agentic-harnesses-vipune-pi-ensemble.md (REVISED)
+  - outputs/.drafts/longterm-memory-agentic-verification.md (to be created)

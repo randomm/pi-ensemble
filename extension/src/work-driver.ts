@@ -10,7 +10,7 @@
  *   2. dispatches subagents directly via `dispatchCore()` (ownerKind:driver),
  *   3. persists every transition to `.pi/work-state/<issue>.json` via
  *      `writeState()`,
- *   4. surfaces step-level progress to the user by `pi.sendUserMessage()` —
+ *   4. surfaces step-level progress to the user by `notifyAgent()` —
  *      PM stays as the chat-side reporter, not the loop runner.
  *
  * ## Design axioms (from the determinism research synthesis)
@@ -50,6 +50,7 @@
  * imports and dispatches to them.
  */
 
+import { notifyAgent } from "./agent-message.ts";
 import * as lifecycle from "./lifecycle-events.ts";
 import { trace } from "./trace.ts";
 import { runAdversarial } from "./work-driver-adversarial.ts";
@@ -169,7 +170,8 @@ export class DriverNotImplementedError extends Error {
 export async function runWorkDriver(ctx: DriverContext): Promise<void> {
   const claimed = claimCycle(ctx.issue, ctx.issues);
   if (!claimed.ok) {
-    ctx.pi.sendUserMessage(
+    notifyAgent(
+      ctx.pi,
       `pi-ensemble: /work for issue #${ctx.issue} refused — issue #${claimed.conflictIssue} is already being worked by the cycle for #${claimed.heldByCycle} in this session. Two drivers on one branch interleave commits and produce a PR nobody can review. Wait for it to finish, or check /work-status.`,
     );
     return;
@@ -212,7 +214,8 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<void> {
   // and PM ended up recommending /do as a workaround.
   if (state.pipelineState.status !== "running" && ctx.restart !== true) {
     const terminalStatus = state.pipelineState.status;
-    ctx.pi.sendUserMessage(
+    notifyAgent(
+      ctx.pi,
       `pi-ensemble: /work for issue #${ctx.issue} already terminated as ${terminalStatus}. To start a fresh cycle (e.g., after revising the issue via /plan), re-run with --restart:\n  /work ${ctx.issue} --restart\nOr rm ${workStateDir(ctx.repoRoot)}/${ctx.issue}.json manually. The prior cycle's event log is preserved in the state file until you restart or remove it.`,
     );
     return;
@@ -227,7 +230,7 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<void> {
       restart: ctx.restart === true,
     });
     if (attention.refuse && attention.message) {
-      ctx.pi.sendUserMessage(attention.message);
+      notifyAgent(ctx.pi, attention.message);
       return;
     }
     if (!attention.checked) {
@@ -243,11 +246,11 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<void> {
   if (resumeEnabled() && ctx.restart !== true) {
     const verdict = classifyRunningState(state);
     if (verdict.action === "refuse") {
-      ctx.pi.sendUserMessage(explainRefusal(ctx.issue, verdict.ownerPid));
+      notifyAgent(ctx.pi, explainRefusal(ctx.issue, verdict.ownerPid));
       return;
     }
     if (verdict.action === "resume") {
-      ctx.pi.sendUserMessage(explainResume(ctx.issue, verdict.step, verdict.jobIds.length));
+      notifyAgent(ctx.pi, explainResume(ctx.issue, verdict.step, verdict.jobIds.length));
       // The orphaned `dispatch-started` events stay in the log — they are the
       // only record that a dispatch was paid for and lost.
       state = clearForResume(state);
@@ -260,7 +263,8 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<void> {
   if (inconsistencies.length > 0) {
     const detail = inconsistencies.join("\n  - ");
     trace(`work-driver: state inconsistencies detected for issue ${ctx.issue}:\n  - ${detail}`);
-    ctx.pi.sendUserMessage(
+    notifyAgent(
+      ctx.pi,
       `pi-ensemble /work driver halted on issue #${ctx.issue}: state-file inconsistencies detected.\n  - ${detail}\nInspect ${workStateDir(ctx.repoRoot)}/${ctx.issue}.json or rm to start fresh (your git work is unaffected; only the workflow tracker state is removed).`,
     );
     return;
@@ -292,7 +296,8 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<void> {
         pipelineState: { ...state.pipelineState, status: "aborted" },
       };
       await writeState(ctx.repoRoot, state);
-      ctx.pi.sendUserMessage(
+      notifyAgent(
+        ctx.pi,
         `pi-ensemble /work driver aborted on issue #${ctx.issue}: transition safety limit reached. ` +
           `Inspect ${workStateDir(ctx.repoRoot)}/${ctx.issue}.json for the state.`,
       );
@@ -336,7 +341,8 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<void> {
           stepRound,
           ctx.issue,
         );
-        ctx.pi.sendUserMessage(
+        notifyAgent(
+          ctx.pi,
           `pi-ensemble /work driver halted: step "${err.step}" is not implemented in this build. This is a bug — the state file at .pi/work-state/ has the full cycle for the report.`,
         );
         return;
@@ -357,7 +363,8 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<void> {
         stepRound,
         ctx.issue,
       );
-      ctx.pi.sendUserMessage(
+      notifyAgent(
+        ctx.pi,
         `pi-ensemble /work driver aborted on step "${step}" for issue #${ctx.issue}: ` +
           `${(err as Error).message}`,
       );
@@ -413,9 +420,10 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<void> {
   // this was a mid-flight failure or a cap-hit, and renderHandoffUserMessage
   // distinguishes them.
   if (final === "merged") {
-    ctx.pi.sendUserMessage(`pi-ensemble /work for issue #${ctx.issue} — MERGED ✓`);
+    notifyAgent(ctx.pi, `pi-ensemble /work for issue #${ctx.issue} — MERGED ✓`);
   } else if (final === "handoff" || final === "aborted") {
-    ctx.pi.sendUserMessage(
+    notifyAgent(
+      ctx.pi,
       renderHandoffUserMessage(state, ctx.repoRoot, scratchDir(ctx.repoRoot, ctx.issue)),
     );
   }
