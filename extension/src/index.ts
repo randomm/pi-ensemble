@@ -12,6 +12,7 @@ import * as lifecycle from "./lifecycle-events.ts";
 import { loadOverrides } from "./model-config.ts";
 import { registerModelPicker } from "./model-picker.ts";
 import { registerPermissionGuard } from "./permission-guard.ts";
+import { warnIfRetryConfigTooLow } from "./retry-config-check.ts";
 import { registerCheckReviewCapTool } from "./review-cap.ts";
 import { pruneOldRuns, registerRunsCommand } from "./runs.ts";
 import { registerSandboxFsGuard } from "./sandbox-fs-guard.ts";
@@ -38,6 +39,9 @@ export default async function (pi: ExtensionAPI) {
   }
   // Load persisted model overrides BEFORE any spawn can ask for a model.
   await loadOverrides();
+  // The whole retry story assumes a provider's `retry-after` is honoured. That
+  // depends on a setting pi-ensemble does not own, so say so when it is not.
+  void warnIfRetryConfigTooLow();
   registerDispatchTools(pi);
   registerDispatchStatusTool(pi);
   registerDispatchPeekTool(pi);
