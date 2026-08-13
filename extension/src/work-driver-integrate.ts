@@ -23,8 +23,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { trace } from "./trace.ts";
-import type { WorkState } from "./workflow-state-schema.ts";
 import { stagePorcelainPaths } from "./work-driver-stage.ts";
+import type { WorkState } from "./workflow-state-schema.ts";
 import type { ExecFn } from "./worktree.ts";
 
 /**
