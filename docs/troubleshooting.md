@@ -753,6 +753,16 @@ Without `--restart`, re-invoking `/work N` on a terminal-state file now emits a 
 
 `--restart` only wipes the driver's state file (`.pi/work-state/N.json`). Worktrees and feature branches from the prior cycle are NOT removed — the branch step will detect existing branches at runtime (ops checks out + resets, or ABORTs cleanly with the error). If you want a fully clean slate, also `rm -rf .worktrees/issue-N-*` and `git branch -D feature/issue-N-*` before re-running.
 
+### `integration-verify-failed` — the consolidated tree does not build
+
+`commit-pr` runs the project's `.pi/verify-cmd` against the **integrated** tree, between the commit and the push. Everything upstream saw one workstream in isolation: the develop gate ran inside a single worktree and adversarial reviewed a single worktree's diff. Two workstreams that each pass alone can still fail together — one renames or deletes what another still refers to — and that defect is *created* by integration, so integration is the only place it can be caught.
+
+When it fires, **nothing was pushed and no PR exists**. The failing output is in the plumb-report on the handoff. Typical cause: one workstream moved or removed a symbol another still calls. Fix the interaction and re-run.
+
+Unlike other `commit-pr` failures this does **not** fall back to the LLM ops dispatch. That fallback exists to absorb environment variance (an apply conflict, a rejected push); "this does not build" is a verdict, and letting ops push the identical tree would make the gate one that cannot fail.
+
+Projects with no `.pi/verify-cmd` skip the check entirely and are unaffected.
+
 ### How a subagent's life is bounded
 
 Two mechanisms, and only one of them is meant to fire in normal operation.

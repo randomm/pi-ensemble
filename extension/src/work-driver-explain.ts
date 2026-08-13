@@ -116,6 +116,8 @@ export function explainCap(
       const elem = sb?.sddElement ?? "(spec element not specified)";
       return `explore stepped back and identified a spec-level gap in **${elem}** — the lens-review fix loop kept flagging the same shape across rounds (MAST 41.77% — spec-level problem fingerprint). The handoff body includes a proposed revision. After updating the issue (via /plan or \`gh issue edit\`), re-run with \`/work N --restart\` to start a fresh cycle against the revised spec`;
     }
+    case "integration-verify-failed":
+      return "the consolidated tree failed the project's verify command, so nothing was pushed. Each workstream passed its own develop gate in its own worktree; the combination does not build — which is a defect integration CREATED, and the only place it can be caught. The failing output is in the plumb-report above. Recover by fixing the interaction (typically one workstream renamed or moved something another still refers to) and re-running";
     case "commit-pr-incomplete-consolidation": {
       const missing = state.pipelineState.incompleteConsolidation ?? [];
       const which =

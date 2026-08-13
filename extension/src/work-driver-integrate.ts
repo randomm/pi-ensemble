@@ -212,13 +212,46 @@ export interface IntegrateOpts {
    * touches only the worktree that had findings.
    */
   requireAllNonEmpty?: boolean;
+  /**
+   * The project's verify command, run against the CONSOLIDATED tree between
+   * the commit and the push.
+   *
+   * Every gate before this one saw a single workstream in isolation: the
+   * develop gate ran inside one worktree, and adversarial reviewed one
+   * worktree's diff. Nothing had ever compiled the combination — the first
+   * build of the integrated tree happened at `ci`, after six lenses had
+   * already spent up to two hours reviewing it. Two workstreams that each
+   * verify alone can still fail together (one renames what the other calls),
+   * and that failure is created BY integration, so integration is where it
+   * has to be caught.
+   *
+   * Omitted (or absent from the project) means the check is skipped, exactly
+   * as before — a project with no verify command is not newly blocked.
+   */
+  verifyCmd?: string;
+  /** Executor for `verifyCmd`. Defaults to `execFn`; tests inject. */
+  verifyExecFn?: ExecFn;
+  /** Wall-clock for `verifyCmd`. */
+  verifyTimeoutMs?: number;
 }
 
 export type IntegrateResult =
   | { ok: true; workstreams: string[]; empty: false }
   /** Nothing to integrate — every worktree was clean. Not an error. */
   | { ok: true; workstreams: []; empty: true }
-  | { ok: false; reason: string; conflictPatch?: string };
+  | {
+      ok: false;
+      reason: string;
+      conflictPatch?: string;
+      /**
+       * Set when the CONSOLIDATED tree failed the project's verify command.
+       * Callers must not launder this into a judgmental retry: the LLM
+       * commit-pr fallback exists to absorb environment variance (an apply
+       * conflict, a rejected push), and a tree that does not build is a
+       * verdict. Treating them alike makes the gate one that cannot fail.
+       */
+      failure?: "verify";
+    };
 
 /**
  * Consolidate every worktree onto the feature branch at repoRoot.
@@ -374,11 +407,42 @@ export async function integrate(execFn: ExecFn, opts: IntegrateOpts): Promise<In
     }
     if (applied.length === 0) return { ok: true, workstreams: [], empty: true };
 
-    // 4. Commit + push.
+    // 4. Commit.
     await execFn(
       `git commit -m ${JSON.stringify(opts.commitTitle)} -m ${JSON.stringify(opts.commitBody)}`,
       { cwd: repoRoot, maxBuffer: 256 * 1024 },
     );
+
+    // 5. Verify the CONSOLIDATED tree before it becomes a PR. See `verifyCmd`.
+    //    Rolling back on failure is safe: the worktrees still hold every
+    //    workstream's staged work — they are only advanced past it after a
+    //    successful push, below.
+    if (opts.verifyCmd) {
+      const verifyExec = opts.verifyExecFn ?? execFn;
+      let failure: string | undefined;
+      try {
+        await verifyExec(opts.verifyCmd, {
+          cwd: repoRoot,
+          maxBuffer: 8 * 1024 * 1024,
+          timeout: opts.verifyTimeoutMs,
+        });
+      } catch (err) {
+        const e = err as Error & { stderr?: string; stdout?: string };
+        failure = (e.stderr || e.stdout || e.message || "").toString().trim();
+      }
+      if (failure !== undefined) {
+        await restoreRoot();
+        return {
+          ok: false,
+          failure: "verify",
+          reason:
+            `the consolidated tree fails the project's verify command (\`${opts.verifyCmd}\`), so it was not pushed. ` +
+            `Each workstream passed alone; the combination does not. Tail: ${failure.slice(-600)}`,
+        };
+      }
+    }
+
+    // 6. Push.
     await execFn(`git push -u origin ${JSON.stringify(branchName)}`, {
       cwd: repoRoot,
       maxBuffer: 1024 * 1024,
