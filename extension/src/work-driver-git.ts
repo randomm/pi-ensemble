@@ -107,10 +107,12 @@ export async function detectMainline(
  *
  * `git branch -d` (lowercase) is used deliberately — on a squash-merged
  * branch the SHAs differ and -d refuses. This is expected; we report
- * but do NOT escalate to `-D`. The local branch is a known leftover and
- * can be removed with a later `git branch -D <mergedBranch>` sweep, which
- * is out of scope for this function because a naive `[gone]`/`--merged`
- * sweep would also delete local branches that have no upstream at all.
+ * but do NOT escalate to `-D` (the PR body says the branch is gone, and
+ * force-deleting locally would hide that the refusal is the normal
+ * outcome). The leftover is removed later, by hand: `git branch -D
+ * <mergedBranch>`. An automated sweep is out of scope for this function
+ * because a naive `[gone]`/`--merged` sweep would also delete local
+ * branches that have no upstream at all.
  *
  * Returns an array of notes (informational messages, not errors).
  * Every step is individually caught: a fetch failure, a checkout failure,
