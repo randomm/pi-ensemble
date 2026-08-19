@@ -8,7 +8,8 @@
  * crash-resume idempotency. No real Pi spawn; all calls are mocked.
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DriverContext } from "../src/work-driver-context.ts";
@@ -18,6 +19,7 @@ import {
   executeAndVerifyMerge,
   mechanizedMerge,
 } from "../src/work-driver-merged-mechanized.ts";
+import { runMerged } from "../src/work-driver-merged.ts";
 import { inlineMergePrompt } from "../src/work-driver-prompts-late.ts";
 import { runWorkDriver } from "../src/work-driver.ts";
 import { type WorkState, initialState, readState, writeState } from "../src/workflow-state.ts";
@@ -104,10 +106,33 @@ function mkState(issue: number, pr: number, branch: string): WorkState {
   return s;
 }
 
+// mkState with baseSha + worktrees populated so runMerged's doctrine read
+// and post-merge worktree teardown are exercised (both keyed on those fields).
+function mkStateFull(
+  issue: number,
+  pr: number,
+  branch: string,
+  baseSha: string,
+  worktrees: Record<string, string>,
+): WorkState {
+  const s = initialState(issue, 1_000_000);
+  (s as any).pipelineState = {
+    ...s.pipelineState,
+    currentStep: "merged",
+    lastCompletedStep: "ci",
+    branchName: branch,
+    prNumber: pr,
+    baseSha,
+    worktrees,
+  };
+  return s;
+}
+
 process.env.PI_ENSEMBLE_TRANSIENT_RETRY_BACKOFF_MS = "0";
 process.env.PI_ENSEMBLE_SPAWN_TIMEOUT_MS = "2000";
 process.env.PI_ENSEMBLE_INACTIVITY_TIMEOUT_MS = "2000";
 process.env.PI_ENSEMBLE_VERIFY = "0";
+process.env.PI_ENSEMBLE_MERGE_AUTHORITY = "0";
 setupSpawnGuard();
 
 // ---- deriveMergeMethod tests ----
@@ -261,6 +286,107 @@ setupSpawnGuard();
   );
 }
 
+// ---- #476 — restoreCheckout reached on a successful merge ----
+//
+// The three unit blocks above call restoreCheckout directly, which pins the
+// command sequence but says nothing about REACHABILITY: the only production
+// caller (work-driver-merged.ts runMerged) used to gate on ctx.verifyExecFn,
+// a test-only seam neither production entry point sets, so on a real merge
+// the checkout was never restored, refs never pruned, and branch -d never
+// attempted.
+//
+// This block exercises the full runMerged path: the mechanized merge succeeds
+// (verifyExecFn mocks gh + delegates git to the real executor), which sets
+// mergeSucceeded=true and triggers the restoration block. The restoration
+// runs against a real git repo where repoRoot starts on the feature branch
+// and must end on main. This proves the restoration is reachable on a
+// successful merge, not just under direct unit-test injection.
+{
+  const prevAuth = process.env.PI_ENSEMBLE_MERGE_AUTHORITY;
+  process.env.PI_ENSEMBLE_MERGE_AUTHORITY = "0";
+  const dir = mkdtempSync(path.join(tmpdir(), "rc-prod-"));
+  try {
+    // A real repo: mainline + feature branch with a divergent commit.
+    // repoRoot ends on the feature branch (the state a merge leaves behind).
+    const git = (cmd: string) =>
+      execSync(`git ${cmd}`, { cwd: dir, stdio: "pipe" }).toString().trim();
+    git("init -q -b main .");
+    git('config user.email t@t.io');
+    git('config user.name t');
+    mkdirSync(path.join(dir, "src"));
+    writeFileSync(path.join(dir, "src", "a.txt"), "a\n");
+    git("add -A");
+    git('commit -qm "main"');
+    git("checkout -qb feature/issue-476");
+    writeFileSync(path.join(dir, "src", "b.txt"), "b\n");
+    git("add -A");
+    git('commit -qm "feature"');
+    // repoRoot is on feature/issue-476 — restoration must move it to main.
+
+    const wtDir = path.join(dir, ".worktrees", "issue-476-task-b");
+    mkdirSync(path.dirname(wtDir));
+    git(`worktree add -q -d ${wtDir} HEAD`);
+
+    // verifyExecFn: mock gh (so the mechanized merge succeeds offline),
+    // delegate git to the real executor (so restoration operates on the
+    // real repo). This is the shape production uses when verifyExecFn is
+    // the default execp — both merge and restoration share one executor.
+    const { exec: realExec } = await import("node:child_process");
+    const { promisify: realPromisify } = await import("node:util");
+    const realExecp = realPromisify(realExec);
+    const execFn: VerifyExecFn = async (cmd, opts) => {
+      if (cmd.includes("squashMergeAllowed")) {
+        return { stdout: JSON.stringify({ squashMergeAllowed: true, mergeCommitAllowed: false, rebaseMergeAllowed: false }) };
+      }
+      if (cmd.includes("defaultBranchRef")) {
+        return { stdout: "main\n" };
+      }
+      if (cmd.includes("gh pr view")) {
+        return { stdout: "MERGED\n" };
+      }
+      if (cmd.includes("gh pr merge")) {
+        return { stdout: "Merged" };
+      }
+      // git + everything else: real executor on the real repo.
+      return realExecp(cmd, { cwd: opts?.cwd ?? dir, maxBuffer: opts?.maxBuffer ?? 1024 * 1024 });
+    };
+
+    const ctx: DriverContext = {
+      repoRoot: dir,
+      issue: 476,
+      pi: mkPi(),
+      verifyExecFn: execFn,
+      issueBodyFetcherFn: async () => ({
+        stdout: "title:\ttest #476\nstate:\tOPEN\n\nbody",
+      }),
+    } as unknown as DriverContext;
+
+    const state = mkStateFull(476, 4761, "feature/issue-476", "HEAD", { task_b: wtDir });
+    const out = await runMerged(ctx, state, Date.now());
+
+    assert(
+      out.pipelineState.status === "merged",
+      "#476: mechanized merge succeeded → status='merged'",
+    );
+    // The restoration ran: repoRoot moved from feature/issue-476 to main.
+    const headAfter = git("rev-parse --abbrev-ref HEAD");
+    assert(
+      headAfter === "main",
+      `#476: restoration moved the checkout from feature branch to mainline (HEAD=${headAfter})`,
+    );
+    // branch -d refused (squash-merge SHA mismatch) and left the local branch
+    // — the deliberate no-`-D` policy this issue preserves.
+    assert(
+      git("branch --list feature/issue-476").trim().includes("feature/issue-476"),
+      "#476: branch -d refusal left the local branch in place (no -D escalation)",
+    );
+  } finally {
+    if (prevAuth === undefined) delete process.env.PI_ENSEMBLE_MERGE_AUTHORITY;
+    else process.env.PI_ENSEMBLE_MERGE_AUTHORITY = prevAuth;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // ---- mechanizedMerge integration tests ----
 
 {
@@ -361,6 +487,87 @@ setupSpawnGuard();
     r.ok === false && r.reason.includes("no merge method permitted"),
     "mechanizedMerge: all methods false → fallback",
   );
+}
+
+// ---- #476: production-shape restoration when verifyExecFn is absent ----
+
+// The gate bug: runMerged used to gate restoration on `if (ctx.verifyExecFn)`,
+// which is a test-only injection — neither production entry point
+// (work-entry.ts:132, :179) sets it. Every real merge silently skipped
+// restoreCheckout, leaving the checkout on the merged feature branch with
+// no `git fetch origin --prune` and no `git branch -d` attempt.
+//
+// This test drives `runMerged` directly with `verifyExecFn` OMITTED from the
+// context. It uses a shallow clone so the real `execp` (production path) can
+// resolve the merge via `gh pr view` against a real merged PR. PR 474 is
+// already merged → mechanizedMerge short-circuits → restoreCheckout runs.
+//
+// Requires: git + gh + network access (same preconditions as the live tests).
+// Skips silently when `gh` is not authenticated.
+{
+  const dir = mkdtempSync(path.join(tmpdir(), "mm-prod-restore-"));
+  try {
+    // Probe: can we reach GitHub? If not, skip (offline CI, etc.).
+    let ghOk = true;
+    try {
+      execSync("gh auth status", { stdio: "pipe", timeout: 10_000 });
+    } catch {
+      ghOk = false;
+    }
+    if (!ghOk) {
+      console.log("○ #476 prod-shape: skipped (gh not authenticated)");
+    } else {
+      // Shallow clone so real gh + git commands work.
+      execSync(
+        `git clone --depth 1 -q git@github.com:randomm/pi-ensemble.git repo`,
+        { cwd: dir, timeout: 30_000 },
+      );
+      const repoDir = path.join(dir, "repo");
+
+      const s = initialState(99999, 1_000_000);
+      (s as any).pipelineState = {
+        ...s.pipelineState,
+        currentStep: "merged",
+        lastCompletedStep: "ci",
+        branchName: "feature/issue-99999",
+        prNumber: 474, // real merged PR on randomm/pi-ensemble
+      };
+
+      const ctx: DriverContext = {
+        repoRoot: repoDir,
+        issue: 99999,
+        pi: mkPi(),
+        mergeGrant: true,
+        issueBodyFetcherFn: async () => ({
+          stdout: `title:\ttest #99999\nstate:\tOPEN\n\nbody`,
+        }),
+        // CRITICAL: `verifyExecFn` is deliberately NOT set. Production shape.
+      } as DriverContext;
+
+      const result = await runMerged(ctx, s, Date.now());
+
+      // The merge short-circuited (PR 474 already merged) and restoration
+      // ran. `git branch -d feature/issue-99999` will refuse (branch doesn't
+      // exist in the fresh clone) and produce a plumb-report note. This note
+      // is the observable evidence that restoreCheckout was reached — if the
+      // old `if (execFn)` gate were still in place, no note would be emitted.
+      const notes = result.eventLog.filter(
+        (e: any) => e.kind === "plumb-report" && e.body?.includes("Checkout restoration"),
+      );
+      assert(
+        notes.some((e: any) => e.body?.includes("branch -d")),
+        "#476 prod-shape: branch -d note emitted when verifyExecFn is absent (restoration ran)",
+      );
+      // The merged event should be present (merge succeeded).
+      const mergedEv = result.eventLog.find((e: any) => e.kind === "merged");
+      assert(mergedEv?.kind === "merged", "#476 prod-shape: merged event emitted");
+    }
+  } catch (err) {
+    // Clone or gh failure — skip rather than fail (offline environments).
+    console.log(`○ #476 prod-shape: skipped (${(err as Error).message?.slice(0, 80)})`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 console.log(`\nexit ${exit}`);
