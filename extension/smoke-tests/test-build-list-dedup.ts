@@ -27,8 +27,13 @@
  *   times — one per branch — or more for `*`, which is legitimately used
  *   elsewhere in the same file, e.g. the bash-default checks).
  * - **Refactored** (task-a): the sets exist once each as single-line array
- *   literals — `TOOL_KEYS='["read","write",…]'`, `NO…
- *   members, no additions, no omissions — and the inline jq copies are gone
+ *   literals inside the capability function —
+ *   `local TOOL_KEYS='["read","write",…]'` and
+ *   `local NON_TOOL_KEYS='["read","write",…]'` (the `local` scoping and the
+ *   indentation are the shell style the refactor actually uses; the matchers
+ *   accept them via `(?:^|\s)(?:local\s+)?` rather than a line anchor). The
+ *   members are asserted verbatim — no reordering, no additions, no omissions
+ *   — and the inline jq copies are gone
  *   (zero `then "key"` and `.key != "key"` occurrences for every member
  *   except `*`, which the jq predicates still use directly).
  *
@@ -100,12 +105,22 @@ function selectCount(key: string): number {
 }
 
 function isRefactored(): boolean {
-  return /^TOOL_KEYS=/.test(body, "m") && /^NON_TOOL_KEYS=/.test(body, "m");
+  return (
+    /(?:^|\s)(?:local\s+)?TOOL_KEYS=/.test(body, "m") &&
+    /(?:^|\s)(?:local\s+)?NON_TOOL_KEYS=/.test(body, "m")
+  );
 }
 
-/** Extract a single-line `NAME='["a","b",…]'` array literal as its members. */
+/**
+ * Extract a single-line array literal as its members.
+ * The `(?:^|\s)(?:local\s+)?` prefix matches both the column-0 form
+ * and the `local`-scoped, indented form build.sh uses inside the
+ * capability function.
+ */
 function extractArray(name: string): string[] {
-  const m = body.match(new RegExp(`^${name}='(\\[.*?])'\\s*$`, "m"));
+  const m = body.match(
+    new RegExp(`(?:^|\\s)(?:local\\s+)?${name}='(\\[.*?])'\\s*$`, "m"),
+  );
   if (!m) return [];
   const parsed = JSON.parse(m[1]) as unknown;
   return Array.isArray(parsed) ? (parsed as string[]) : [];
@@ -115,7 +130,9 @@ if (isRefactored()) {
   // ---------------------- refactored: single-line array literals (task-a)
 
   for (const name of ["TOOL_KEYS", "NON_TOOL_KEYS"]) {
-    const m = body.match(new RegExp(`^${name}='\\[[^\\n]*\\]'\\s*$`, "m"));
+    const m = body.match(
+      new RegExp(`(?:^|\\s)(?:local\\s+)?${name}='\\[[^\\n]*\\]'\\s*$`, "m"),
+    );
     assert(m !== null, `${name} is a single-line array literal in build.sh`);
   }
 
