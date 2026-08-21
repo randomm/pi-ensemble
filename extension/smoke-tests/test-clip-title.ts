@@ -69,8 +69,6 @@ assert(!clipped.includes("commit subject"), "the tail beyond the boundary is abs
 
 // budget+1: one over the pass-through line
 eq(clipTitle("b".repeat(64) + "w", 64), "b".repeat(63) + "…", "65-char single token: degenerate mid-word cut at 63 + ellipsis");
-// wait — "b"*64+"w" has no whitespace, so it is the degenerate case. Check the
-// over-budget WITH-boundary budget+1 case separately:
 eq(
   clipTitle("c".repeat(63) + " " + "d".repeat(20), 64),
   "c".repeat(63) + "…",

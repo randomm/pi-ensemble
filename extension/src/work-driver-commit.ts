@@ -35,19 +35,18 @@ import type { WorkState } from "./workflow-state.ts";
 
 const execp = promisify(exec);
 
-/**
- * #507 — clip a PR title / commit subject to a code-unit budget at a word
- * boundary, with a single U+2026 ellipsis. The PR title feeds BOTH `git
- * commit -m` and `gh pr create --title`, and under squash-merge the title
- * becomes the commit subject on main — a mid-word cut reaches CHANGELOG.md
- * and release notes by two routes. The budget is 64, not 72: the subject
- * convention is ≤ 72 chars and GitHub's squash-merge appends
- * ` (#<prNumber>)` (8 code units, unknown at title-construction time).
- *
- * No lone surrogate is ever produced in the output: a cut that would fall
- * between the two halves of a surrogate pair is backed off (rule 4) so the
- * pair is dropped whole rather than leaving a dangling high half.
- */
+// #507 — clip a PR title / commit subject to a code-unit budget at a word
+// boundary, with a single U+2026 ellipsis. The PR title feeds BOTH `git
+// commit -m` and `gh pr create --title`, and under squash-merge the title
+// becomes the commit subject on main — a mid-word cut reaches CHANGELOG.md
+// and release notes by two routes. The budget is 64, not 72: the subject
+// convention is ≤ 72 chars and GitHub's squash-merge appends
+// ` (#<prNumber>)` (8 code units, unknown at title-construction time).
+//
+// No lone surrogate is ever produced in the output: a cut that would leave a
+// high half dangling (the pair straddles the cut, or the cut lands on the
+// high half with its low half in the prefix) is backed off one code unit so
+// the pair is dropped whole rather than split.
 export function clipTitle(raw: string, budget: number): string {
   if (raw.length <= budget) return raw;
   let cut = budget - 1; // reserve one code unit for the ellipsis

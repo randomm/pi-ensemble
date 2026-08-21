@@ -172,7 +172,7 @@ function commitPrConflictedState(): WorkState {
     schemaVersion: 1,
     resumable: false,
     issue: 481,
-    createdAt: 1,
+    startedAt: 1,
     updatedAt: 2,
     pipelineState: {
       status: "handoff",
@@ -215,8 +215,7 @@ function commitPrConflictedState(): WorkState {
         nextStep: "handoff",
       },
     ],
-    // biome-ignore lint/suspicious/noExplicitAny: partial fixture; renderers read a subset
-  } as any;
+  };
 }
 
 {

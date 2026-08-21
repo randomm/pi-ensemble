@@ -8,6 +8,7 @@
  * terminal renderer, GitHub body via work-driver-handoff-markdown.ts).
  */
 
+import { commitPrRootBlurb } from "./work-driver-commit-inspect.ts";
 import { MAX_CI_RETRIES, MAX_REVIEW_ROUNDS } from "./work-driver-context.ts";
 import { type ParkReason, explainPark } from "./work-driver-intent.ts";
 import { explainMergeHold } from "./work-driver-merge-authority.ts";
@@ -138,12 +139,11 @@ export function explainCap(
       // Cap-gated: this cap is the ONLY one whose recovery commands render
       // the `git apply` path the blurb references, so the blurb must not leak
       // into caps whose recovery commands differ.
-      const root = state.pipelineState.commitPrRoot;
-      const rootBlurb = root
-        ? ` repoRoot is on \`${root.branch}\` with ${root.stagedCount} staged file(s)${root.unmergedPaths.length > 0 ? ` and ${root.unmergedPaths.length} UNMERGED path(s) (${root.unmergedPaths.join(", ")})` : ""} — ${root.unmergedPaths.length > 0 ? "resolve those conflicts (the handoff body names each path and the clearing command) before any `git apply` will run" : "the recovery commands below apply as-is"}.`
-        : state.pipelineState.commitPrRootError
-          ? ` The repoRoot state inspection failed (${state.pipelineState.commitPrRootError}) — run \`git status\` before the recovery commands.`
-          : "";
+      const rootBlurb = commitPrRootBlurb(
+        state.pipelineState.commitPrRoot,
+        state.pipelineState.commitPrRootError,
+        "the recovery commands below apply as-is",
+      );
       return `commit-pr's post-dispatch consolidation gate detected that the committed diff is missing files from these workstreams: ${which}. Ops committed a partial slice — the developers' work in the missing worktrees is uncommitted on disk. Pre-PR14 this would have merged silently (v0.12.13 /work 577 closed an issue with 1 of 3 workstreams' changes shipped). The driver halted before merge; recover by collecting the missing diffs from \`.worktrees/issue-N-<id>\` and re-running, or take over the integration manually.${rootBlurb}`;
     }
     case "verify-failed:commit-pr": {
@@ -151,12 +151,11 @@ export function explainCap(
       // incomplete-consolidation cap, so the recorded repoRoot state applies
       // to its recovery too. The blurb stays cap-scoped: it only appends from
       // the cases whose recovery commands reference the recorded state.
-      const root = state.pipelineState.commitPrRoot;
-      const rootBlurb = root
-        ? ` repoRoot is on \`${root.branch}\` with ${root.stagedCount} staged file(s)${root.unmergedPaths.length > 0 ? ` and ${root.unmergedPaths.length} UNMERGED path(s) (${root.unmergedPaths.join(", ")})` : ""} — ${root.unmergedPaths.length > 0 ? "resolve those conflicts (the handoff body names each path and the clearing command) before any `git apply` will run" : "the recovery commands below apply as-is"}.`
-        : state.pipelineState.commitPrRootError
-          ? ` The repoRoot state inspection failed (${state.pipelineState.commitPrRootError}) — run \`git status\` before the recovery commands.`
-          : "";
+      const rootBlurb = commitPrRootBlurb(
+        state.pipelineState.commitPrRoot,
+        state.pipelineState.commitPrRootError,
+        "the recovery commands below apply as-is",
+      );
       return `the driver's outcome-verification gate rejected the commit-pr step's "done" claim — the committed + pushed + PR-opened claim is not backed by executed evidence. The per-check findings are in the handoff body; inspect the recorded repoRoot state there and re-run.${rootBlurb}`;
     }
     case "integration-verify-failed": {
@@ -167,10 +166,11 @@ export function explainCap(
       // step (re-running) re-hits integrate()'s dirty preflight. The recorded
       // state + clearing command is the difference between "re-run" and
       // "re-run and get wedged again".
-      const root = state.pipelineState.commitPrRoot;
-      const rootBlurb = root
-        ? ` repoRoot is on \`${root.branch}\` with ${root.stagedCount} staged file(s)${root.unmergedPaths.length > 0 ? ` and ${root.unmergedPaths.length} UNMERGED path(s) (${root.unmergedPaths.join(", ")})` : ""} — ${root.unmergedPaths.length > 0 ? "resolve those conflicts (the handoff body names each path and the clearing command) before any `git apply` will run" : "clear it with the recorded command so re-running does not wedge at integrate()'s dirty preflight"}.`
-        : "";
+      const rootBlurb = commitPrRootBlurb(
+        state.pipelineState.commitPrRoot,
+        state.pipelineState.commitPrRootError,
+        "clear it with the recorded command so re-running does not wedge at integrate()'s dirty preflight",
+      );
       return `${base}.${rootBlurb}`;
     }
     case "lens-fix-not-integrated":

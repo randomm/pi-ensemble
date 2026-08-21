@@ -30,34 +30,25 @@
  */
 
 import { trace } from "./trace.ts";
+import type { CommitPrRootState } from "./workflow-state-schema.ts";
 import type { ExecFn } from "./worktree.ts";
 
 /**
- * The recorded shape of repoRoot at the moment commit-pr handed off. All
- * fields are best-effort: a `git status` that works but a `rev-parse` that
- * does not yields `branch: "(detached or unknown)"` rather than a failure,
- * because the unmerged paths are the load-bearing fact.
+ * `CommitPrRootState` is defined in workflow-state-schema.ts — it is part of
+ * the persisted state contract (`PipelineState.commitPrRoot`) — and
+ * re-exported here for the driver-side write sites that import from this
+ * module.
  */
-export interface CommitPrRootState {
-  /** Current branch (`git rev-parse --abbrev-ref HEAD`); placeholder when unreadable. */
-  branch: string;
-  /** Porcelain column-1/2 status codes (`UU`, `AA`, `DD` — the unmerged set). */
-  unmergedPaths: string[];
-  /** Entries staged on BOTH columns (`MM`, ` M`, `A `, …) — untracked (`??`) excluded. */
-  stagedCount: number;
-  /** Total porcelain entries (staged + unstaged + untracked). */
-  totalEntries: number;
-  /** Epoch ms of the inspection. */
-  capturedAt: number;
-}
+export type { CommitPrRootState } from "./workflow-state-schema.ts";
 
 export type CommitPrRootInspect =
   | { ok: true; state: CommitPrRootState }
   | { ok: false; error: string };
 
 /**
- * Parse `git status --porcelain -z` output into the record above. Exported
- * for direct unit testing; the `branch` parameter comes from a separate call.
+ * Parse `git status --porcelain -z` output into a `CommitPrRootState` (defined
+ * in workflow-state-schema.ts). Exported for direct unit testing; the
+ * `branch` parameter comes from a separate call.
  *
  * Porcelain format: `XY <path>\0` where X (col 1) is the staged state and Y
  * (col 2) the worktree state. Unmerged paths have X/Y ∈ {U, A, D, .} — in
@@ -93,9 +84,13 @@ export function parseCommitPrStatus(porcelain: string, branch: string): CommitPr
     const line = raw[i] ?? "";
     if (line.length < 4) continue;
     const x = line[0];
-    const y = line[1];
-    if (x === "R" || x === "C" || y === "R" || y === "C") {
-      entries.push(`${x}${y} ${raw[i + 1]?.slice(2) ?? line.slice(2)}`);
+    // Rename/copy markers appear in column 1 only — git porcelain emits
+    // `R ` / `C ` pairs and no `R?` / `C?` shape (a staged copy already
+    // removed its source). When one is seen, the destination token is part
+    // of git's output well-formedness and follows immediately; the
+    // `?? line.slice(2)` only guards a truncated stream.
+    if (x === "R" || x === "C") {
+      entries.push(`${x}${line[1]} ${raw[i + 1]?.slice(2) ?? line.slice(2)}`);
       i += 1; // consume the destination token
       continue;
     }
@@ -146,10 +141,16 @@ export function commitPrRootFactLines(
 ): string[] {
   if (!root && !err) return [];
   const lines: string[] = [];
-  if (err) {
+  if (!root && err) {
+    // The inspection ran and failed: no state is recorded at all, so the
+    // handoff must not let the "clean tree" framing of the recovery commands
+    // survive by omission — say explicitly that cleanness is unknown and the
+    // commands need a `git status` first. Both surfaces stay consistent this
+    // way instead of only the explainCap blurb carrying the caveat.
     lines.push(
-      `${indent}inspection failed: ${err} — the state below is unknown; run \`${prefix}git status\` first.`,
+      `${indent}repoRoot state unknown — the post-PR inspection failed (${err}); do NOT assume the tree is clean, run \`${prefix}git status\` before the recovery commands.`,
     );
+    return lines;
   }
   if (root) {
     lines.push(`${indent}branch: \`${root.branch}\``);
@@ -204,6 +205,27 @@ export function commitPrRootFactLines(
     }
   }
   return lines;
+}
+
+/**
+ * The one-sentence recorded-state summary the explainCap blurb appends to
+ * the commit-pr-family caps. Sibling of `commitPrRootFactLines`: that one
+ * renders the multi-line fact list, this one the inline tail. `noConflictTail`
+ * is the case-specific tail for the clean-state branch (the two caps whose
+ * recovery commands reference `git apply` differ from the integration-verify
+ * cap's "clear it" phrasing).
+ */
+export function commitPrRootBlurb(
+  root: { branch: string; stagedCount: number; unmergedPaths: string[] } | undefined,
+  err: string | undefined,
+  noConflictTail: string,
+): string {
+  if (root) {
+    return ` repoRoot is on \`${root.branch}\` with ${root.stagedCount} staged file(s)${root.unmergedPaths.length > 0 ? ` and ${root.unmergedPaths.length} UNMERGED path(s) (${root.unmergedPaths.join(", ")})` : ""} — ${root.unmergedPaths.length > 0 ? "resolve those conflicts (the handoff body names each path and the clearing command) before any `git apply` will run" : noConflictTail}.`;
+  }
+  return err
+    ? ` The repoRoot state inspection failed (${err}) — run \`git status\` before the recovery commands.`
+    : "";
 }
 
 /**
