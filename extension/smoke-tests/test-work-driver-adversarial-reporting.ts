@@ -144,13 +144,39 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
         rounds[0].verdictParsed === true,
       `#485 R1: the one executed round is recorded with its actual verdict (got ${JSON.stringify(rounds)})`,
     );
-    // No "3 rounds, all rejected" handoff: the tail is a dispatch-failed
-    // (RETRY_ONCE path), so explainCap never claims the gate rejected.
-    const tail = events[events.length - 1];
+    // #486 two-state design: `adversarial` is RETRY_ONCE-class.
+    //  - FIRST pass (this test): the step-level router
+    //    (work-driver-step-router.ts) re-runs the step while the budget
+    //    holds, so the adversarial step leaves a `dispatch-failed` event
+    //    and NO cap-hit — nothing claims the gate rejected. (The overall
+    //    event-log tail is `handoff-emitted`: the driver's own
+    //    mechanized commit-pr path fails in this test's non-git tmp dir
+    //    and parks at commit-pr — downstream of the gate this test pins.)
+    //  - Re-entry (the router hands it back): the failure is permanent.
+    //    runAdversarial parks with the DISTINCT cap
+    //    `adversarial-infra-failure` (#486 requires a permanent failure
+    //    to be NAMED rather than left looking like a bare dispatch
+    //    failure).
+    // The assertion is scoped to the gate: a dispatch-failed for the
+    // adversarial step exists in the log, and no adversarial cap-hit or
+    // rejection overrode it.
+    const advDispatchFailed = events.find(
+      (e) =>
+        (e.kind === "dispatch-failed" || e.kind === "dispatch-failed-provider") &&
+        e.step === "adversarial",
+    );
+    const rejected2 = events.filter((e) => e.kind === "adversarial-rejected");
+    const advCap = events.find(
+      (e) => e.kind === "cap-hit" && (e.cap === "adversarial-infra-failure" || e.cap === "adversarial-loop"),
+    );
     assert(
-      (tail?.kind === "dispatch-failed" || tail?.kind === "dispatch-failed-provider") &&
-        tail.step === "adversarial",
-      "#485 R1: event-log tail stays dispatch-failed (the retry path), not a rejection",
+      advDispatchFailed !== undefined &&
+        (advDispatchFailed.kind === "dispatch-failed" ||
+          advDispatchFailed.kind === "dispatch-failed-provider") &&
+        advDispatchFailed.step === "adversarial" &&
+        rejected2.length === 0 &&
+        advCap === undefined,
+      "#485 R1: the adversarial gate leaves a dispatch-failed (the RETRY_ONCE path) and no adversarial cap-hit or rejection",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

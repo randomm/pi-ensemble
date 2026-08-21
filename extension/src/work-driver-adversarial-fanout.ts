@@ -1,17 +1,11 @@
 /**
  * work-driver-adversarial-fanout — the per-workstream fan-out of the
  * adversarial gate (#486), extracted from work-driver-adversarial.ts
- * (AGENTS.md §12 file-size limit).
- *
- * Leaf module — no dependency on any work-driver-<step>.ts handler (see
- * work-driver-git.ts's header for the rule; work-driver-lens.ts already
- * exposes `commitLensFixChanges` to the step handler, so the fan-out lives
- * here rather than in a second step handler).
- *
- * #486 — a transient infrastructure failure in ONE workstream's loop is
- * retried in-step (per-workstream budget, taxonomy backoff) while the other
- * workstreams' approved verdicts are preserved in the event log either way
- * (`adversarial-workstream-outcome` events). A permanent failure parks with
+ * (AGENTS.md §12 file-size limit). Leaf module — no dependency on any
+ * work-driver-<step>.ts handler. #486: a transient infrastructure failure
+ * in ONE workstream's loop is retried in-step (per-workstream budget,
+ * taxonomy backoff) while the other workstreams' approved verdicts are
+ * preserved in the event log either way. A permanent failure parks with
  * cap `adversarial-infra-failure` instead of being rendered as a review
  * rejection.
  */
@@ -19,11 +13,17 @@
 import { runAdversarialLoop } from "./adversarial.ts";
 import { makeRunId } from "./spawn.ts";
 import { trace } from "./trace.ts";
-import type { AdversarialVerdictStatus, DispatchResult } from "./types.ts";
+import type { DispatchResult } from "./types.ts";
+import {
+  classifyAdversarialOutcome,
+  isTransientAdversarialOutcome,
+  mergeFreshOutcomes,
+  reentryPassBatchSpan,
+  roundsRecords,
+} from "./work-driver-adversarial-reentry.ts";
 import type { DriverContext } from "./work-driver-context.ts";
 import { fetchDiff } from "./work-driver-diff.ts";
 import {
-  classifyFailureCause,
   jitteredMs,
   transientRetryBackoffMs,
   transientRetryEnabled,
@@ -31,11 +31,7 @@ import {
 import { buildCompletionEvent } from "./work-driver-merged.ts";
 import { type WorkEvent, type WorkState, appendEvent } from "./workflow-state.ts";
 
-/**
- * #486 — the driver's per-workstream adversarial retry budget. Matches the
- * #308 router's TRANSIENT_MAX_RETRIES shape (2 retries = up to 3 total
- * attempts).
- */
+/** #486 — the driver's per-workstream adversarial retry budget. Matches the #308 router's TRANSIENT_MAX_RETRIES shape (2 retries = up to 3 total attempts). */
 export const ADVERSARIAL_PER_WS_MAX_RETRIES = 2;
 
 export type AdversarialRoundStatus =
@@ -65,6 +61,8 @@ export interface AdversarialOutcome {
   skipped: boolean;
   /** #486 — a prior run's infra-failure outcome for this workstream. */
   priorInfra: boolean;
+  /** #486 — a prior run's VERDICT outcome (approved / rejected / skipped-empty-diff). Final and NOT re-run on re-entry; the event loop below re-emits the prior verdict from this record so the log stays complete after the splice replaces the prior pass's batch. */
+  priorVerdict?: "approved" | "rejected" | "skipped-empty-diff";
   rejectionText?: string;
   /** Non-blocking findings outstanding when this workstream passed. */
   passFindings?: string;
@@ -75,67 +73,13 @@ export interface AdversarialOutcome {
 }
 
 /**
- * The round this loop's reply describes, as data: the loop's own round
- * table when it carried one (#485), else the "after round N" marker on
- * approved/rejected headlines. An UNPARSEABLE reply returns undefined
- * instead of a confident default — the #485 defect was a guess of 3 for an
- * infra-failure string that contained neither marker, rendered as "3
- * adversarial round(s), all rejected".
- */
-export function roundsFromReply(result: DispatchResult): number | undefined {
-  const table = result.adversarialRounds ?? [];
-  if (table.length > 0) {
-    return Math.max(...table.map((r) => r.round));
-  }
-  const m = result.text.match(/after round (\d+)/);
-  if (m?.[1]) return Number.parseInt(m[1], 10);
-  const plural = result.text.match(/after (\d+) rounds/);
-  return plural?.[1] ? Number.parseInt(plural[1], 10) : undefined;
-}
-
-/**
- * The per-round records to persist. The loop's table is authoritative; the
- * fallback reconstructs it for injected fakes and pre-#485 callers, marking
- * the reconstruction honest (`verdictParsed: false`) rather than inventing a
- * parse the reviewer never made.
- */
-export function roundsRecords(result: DispatchResult): AdversarialRoundRecord[] {
-  const fromData = result.adversarialRounds ?? [];
-  const records = fromData.length > 0 ? [...fromData] : [];
-  if (records.length === 0) {
-    // #485 — the loop's reply says which rounds ran; that is what the
-    // per-round log should count. (Using the loop's roundsExecuted here
-    // instead would collapse to the no-verdict count and record ZERO
-    // rounds for every clean pass.)
-    const total = roundsFromReply(result);
-    if (total !== undefined) {
-      for (let round = 1; round <= total; round++) {
-        records.push(
-          round === total
-            ? {
-                round,
-                status: result.loopOutcome === "rejected" ? "CRITICAL_ISSUES_FOUND" : "APPROVED",
-                verdictParsed: false,
-              }
-            : { round, status: "ISSUES_FOUND", verdictParsed: false },
-        );
-      }
-    }
-  }
-  return records;
-}
-
-/**
  * Fan the adversarial loop out across the named workstreams, applying the
  * #486 in-step per-workstream infra retry, and return the deterministic
- * per-workstream event batch (dispatch-completed / dispatch-failed, the
- * per-round verdict records, the per-workstream outcome, branch-completed).
- *
- * Re-entry (the previous fan-out already recorded NO-VERDICT outcomes in
- * `state.eventLog`): only the infra-failed workstreams re-run, while their
- * per-workstream budget (`state.pipelineState.adversarialTransientRetries`)
- * holds. When nothing left is retryable, returns `parked: true` — the
- * caller appends the `adversarial-infra-failure` cap-hit.
+ * per-workstream event batch. Re-entry (the previous fan-out already
+ * recorded NO-VERDICT outcomes in `state.eventLog`): only the infra-failed
+ * workstreams re-run, while their per-workstream budget holds. When nothing
+ * left is retryable, returns `parked: true` — the caller appends the
+ * `adversarial-infra-failure` cap-hit.
  */
 export async function fanOutAdversarial(
   ctx: DriverContext,
@@ -143,26 +87,38 @@ export async function fanOutAdversarial(
   ids: string[],
   priorOutcomes: Map<string, string>,
   priorHadInfraFailure: boolean,
+  priorBatchSpan: [number, number] | null,
 ): Promise<{
   next: WorkState;
   outcomes: AdversarialOutcome[];
   /** No dispatch ran on this pass (budget exhausted on re-entry). */
   parked: boolean;
+  /** #486 — a first-pass workstream exhausted its per-workstream budget and never produced a verdict. The caller parks with the distinct infra cap instead of rendering the shortfall as a rejection. */
+  parkedInfra: boolean;
 }> {
   const retries = state.pipelineState.adversarialTransientRetries ?? {};
   // #486 — mutable retry map seeded from the prior run's budget so the
   // candidates filter below observes in-step increments (a permanently
   // failing workstream must stop being a candidate after its budget runs
   // out, rather than being re-selected forever from the immutable
-  // `retries` snapshot). Re-entry preserves the prior budget: seeding
-  // from `retries` (which a resumed cycle reads from its state file) keeps
-  // the bound intact across restarts.
+  // `retries` snapshot). Re-entry preserves the prior budget: seeding from
+  // `retries` (which a resumed cycle reads from its state file) keeps the
+  // bound intact across restarts.
   const localRetries: Record<string, number> = { ...retries };
   let next: WorkState = {
     ...state,
     pipelineState: { ...state.pipelineState, currentStep: "adversarial" },
   };
-
+  // #485/#486 — on re-entry, the previous pass's per-workstream records are
+  // REPLACED where the re-run workstreams produced a fresh batch (R1): the
+  // fresh batch is spliced over the previous batch's span (below), so each
+  // workstream's rounds and outcome appear exactly once, and a recovered
+  // workstream's stale failure outcome does not sit side-by-side with its
+  // fresh APPROVED outcome (W1). The stale failure stays auditable through
+  // the preserved dispatch event and the per-workstream outcome's
+  // errorTail. The span is captured by the caller on the ORIGINAL event
+  // log — BEFORE this pass's events are appended.
+  const passStart = priorBatchSpan ? priorBatchSpan[0] : state.eventLog.length;
   const runOne = async (id: string): Promise<AdversarialOutcome> => {
     const cwd = state.pipelineState.worktrees?.[id] ?? ctx.repoRoot;
     const label = ids.length > 1 ? `adversarial[${id}]` : "adversarial_loop";
@@ -312,28 +268,35 @@ export async function fanOutAdversarial(
     };
   };
 
-  const isTransient = (o: AdversarialOutcome): boolean => {
-    if (!o.ok && o.infra) {
-      const cls = classifyFailureCause({
-        kind: "dispatch-failed-provider",
-        providerMessage: o.errorTail,
-      });
-      return cls.shouldRetry;
-    }
-    if (!o.ok && o.threw) {
-      const cls = classifyFailureCause({
-        kind: "dispatch-failed",
-        errorTail: o.errorTail,
-      });
-      return cls.shouldRetry && cls.cause === "provider-severed";
-    }
-    return false;
-  };
-  const classify = (o: AdversarialOutcome) =>
-    o.infra
-      ? classifyFailureCause({ kind: "dispatch-failed-provider", providerMessage: o.errorTail })
-      : classifyFailureCause({ kind: "dispatch-failed", errorTail: o.errorTail });
+  const isTransient = (o: AdversarialOutcome): boolean => isTransientAdversarialOutcome(o);
+  const classify = (o: AdversarialOutcome) => classifyAdversarialOutcome(o);
 
+  // #486 — workstreams that produced a VERDICT (approved / rejected /
+  // skipped-empty-diff) on the prior pass are final and NOT re-run. Their
+  // per-workstream events are re-emitted from this prior-outcome record
+  // (see the `outcomes` seed below), so the log stays complete after the
+  // splice replaces the prior pass's batch.
+  const survivorOutcomes: AdversarialOutcome[] = priorHadInfraFailure
+    ? ids
+        .filter((id) => {
+          const prev = priorOutcomes.get(id);
+          return prev === "approved" || prev === "rejected" || prev === "skipped-empty-diff";
+        })
+        .map((id) => {
+          const prev = priorOutcomes.get(id) ?? "approved";
+          return {
+            id,
+            ok: prev === "approved" || prev === "skipped-empty-diff",
+            rounds: 0,
+            records: [],
+            infra: false,
+            threw: false,
+            skipped: prev === "skipped-empty-diff",
+            priorInfra: false,
+            priorVerdict: prev as "approved" | "rejected" | "skipped-empty-diff",
+          };
+        })
+    : [];
   // #486 — the workstreams that run on THIS pass. First entry: everything.
   // Re-entry (the previous fan-out recorded a NO-VERDICT outcome): only the
   // infra-failed ones re-run while their per-workstream budget holds — a
@@ -349,6 +312,36 @@ export async function fanOutAdversarial(
         );
       })
     : [...ids];
+  // #486 — a first-pass workstream whose FINAL (merged) outcome has no
+  // verdict and whose failure the in-step retry could not absorb is a
+  // permanent infra shortfall. The step-level router does not retry
+  // fan-outs (branches-converged declines when ANY workstream succeeded),
+  // so for a first pass the per-workstream budget is the retry mechanism;
+  // the predicate is the FINAL outcome (merged aggregate), not the budget:
+  //  - `!o.ok` — no verdict in the final outcome. A workstream that
+  //    exhausted its budget on a TRANSIENT failure and then recovered in
+  //    step has a fresh APPROVED outcome and never matches — parking on
+  //    the budget alone would fire the spurious `adversarial-infra-
+  //    failure` cap-hit (W1). A budget check without an outcome check is
+  //    the same bug class as T6: stale first-attempt state surviving
+  //    into aggregation.
+  //  - `o.infra || o.threw` — the final outcome is a NO-VERDICT failure
+  //    (infrastructure death or a throw), never a genuine rejection.
+  //  - `(localRetries[o.id] ?? 0) >= MAX || !isTransient(o)` — the budget
+  //    is exhausted OR the failure is not retryable in-step at all
+  //    (quota window, spend cap, self-kill — the taxonomy says
+  //    shouldRetry=false, so no in-step retry is spent and the budget
+  //    stays at 0 while the failure is still permanent).
+  //  - `!priorHadInfraFailure` — re-entry permanent failures already park
+  //    through the dedicated `parked` / re-entry branches; `parkedInfra`
+  //    must not double-fire.
+  //  - N>1 only: the N=1 first pass leaves the dispatch-failed tail for
+  //    the step-level router's RETRY_ONCE path (the #298 contract); the
+  //    router's re-entry is what parks with the named cap.
+  const exhaustedNoVerdict = (o: AdversarialOutcome): boolean =>
+    !o.ok &&
+    (o.infra || o.threw) &&
+    ((localRetries[o.id] ?? 0) >= ADVERSARIAL_PER_WS_MAX_RETRIES || !isTransient(o));
   if (priorHadInfraFailure && toRun.length === 0) {
     // #486 — every failing workstream already exhausted its budget.
     // Nothing left to retry: the caller parks with the distinct cap; the
@@ -356,17 +349,21 @@ export async function fanOutAdversarial(
     trace(
       "work-driver: adversarial per-workstream infra failure permanent — parking (no retryable workstreams)",
     );
-    return { next, outcomes: [], parked: true };
+    return { next, outcomes: [], parked: true, parkedInfra: false };
   }
-  let outcomes: AdversarialOutcome[] = [];
+  // #486 W1 — `outcomes` accumulates per-attempt history for this pass.
+  // `mergeFreshOutcomes` returns the merged aggregate (one entry per
+  // workstream in `ids` order, fresh outcome superseding stale
+  // first-attempt entries). On re-entry the prior pass's SURVIVOR outcomes
+  // (approved / rejected / skipped) are seeded up front: they are final
+  // and not re-run, but their per-workstream events must be re-emitted in
+  // `ids` order so the log stays complete after the splice replaces the
+  // prior pass's batch.
+  let outcomes: AdversarialOutcome[] = [...survivorOutcomes];
 
   for (;;) {
     const fresh = await Promise.all(toRun.map((id) => runOne(id)));
-    // Re-sort to the original workstream order — Promise.all preserves it
-    // within a pass, but a retry pass contains only the re-run workstreams,
-    // and downstream event order must stay deterministic.
-    const merged = [...outcomes, ...fresh].sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
-    outcomes = merged;
+    outcomes = mergeFreshOutcomes(outcomes, fresh, ids);
 
     // #486 — a transient infra failure in ANY pass earns a bounded in-step
     // retry: the per-workstream budget (ADVERSARIAL_PER_WS_MAX_RETRIES)
@@ -417,15 +414,26 @@ export async function fanOutAdversarial(
 
   // Append per-workstream events in deterministic order: dispatch-completed
   // / dispatch-failed, the per-round verdict records (#485), the
-  // per-workstream outcome (#486), then branch-completed for N>1.
+  // per-workstream outcome (#486), then branch-completed for N>1. On
+  // re-entry the prior pass's SURVIVOR outcomes (approved / rejected /
+  // skipped) are re-emitted here from their prior-outcome records (no
+  // completionEvent / failureEvent / records — the events are synthetic,
+  // carrying the prior verdict and `roundsExecuted: 0`), so the log stays
+  // complete after the splice. The whole batch is spliced at `passStart`
+  // — the previous pass's records' position on re-entry — so the fresh
+  // records replace them and each workstream's rounds appear exactly once
+  // (R1). The previous pass's stale records are dropped: a recovered
+  // workstream's stale failure outcome must not sit side-by-side with its
+  // fresh APPROVED outcome (W1).
   const events: WorkEvent[] = [];
   for (const o of outcomes) {
     if (o.completionEvent) events.push(o.completionEvent);
     if (o.failureEvent) events.push(o.failureEvent);
+    const recordsAt = Date.now();
     for (const r of o.records) {
       events.push({
         kind: "adversarial-round",
-        at: Date.now(),
+        at: recordsAt,
         workstreamId: ids.length > 1 ? o.id : undefined,
         round: r.round,
         status: r.status,
@@ -433,15 +441,17 @@ export async function fanOutAdversarial(
       });
     }
     if (ids.length > 1) {
-      const outcome = o.skipped
-        ? ("skipped-empty-diff" as const)
-        : o.threw
-          ? ("dispatch-failed" as const)
-          : o.infra
-            ? ("infra-failure" as const)
-            : o.ok
-              ? ("approved" as const)
-              : ("rejected" as const);
+      const outcome = o.priorVerdict
+        ? (o.priorVerdict as "approved" | "rejected" | "skipped-empty-diff")
+        : o.skipped
+          ? ("skipped-empty-diff" as const)
+          : o.threw
+            ? ("dispatch-failed" as const)
+            : o.infra
+              ? ("infra-failure" as const)
+              : o.ok
+                ? ("approved" as const)
+                : ("rejected" as const);
       events.push({
         kind: "adversarial-workstream-outcome",
         at: Date.now(),
@@ -453,7 +463,15 @@ export async function fanOutAdversarial(
     }
     if (o.branchEvent) events.push(o.branchEvent);
   }
-  next = appendEvent(next, ...events);
+  // #485/#486 — true splice: the fresh batch REPLACES the previous pass's
+  // batch on re-entry (see `priorBatchSpan` above). On a first pass
+  // `priorBatchSpan` is null and `passStart` is the end of the log, so this
+  // degenerates to an append.
+  const passEnd = priorBatchSpan ? priorBatchSpan[1] : passStart;
+  next = {
+    ...next,
+    eventLog: [...next.eventLog.slice(0, passStart), ...events, ...next.eventLog.slice(passEnd)],
+  };
 
   if (ids.length > 1) {
     next = appendEvent(next, {
@@ -464,5 +482,16 @@ export async function fanOutAdversarial(
     });
   }
 
-  return { next, outcomes, parked: false };
+  // #486 — computed over the FINAL per-workstream outcomes (the merged
+  // aggregate), not the accumulated first-attempt history: a workstream
+  // that exhausted its budget on a transient failure and then RECOVERED on
+  // the in-step retry must not park (W1) — its final outcome is the fresh
+  // APPROVED. Same bug class as T6: stale first-attempt state surviving
+  // into aggregation.
+  return {
+    next,
+    outcomes,
+    parked: false,
+    parkedInfra: !priorHadInfraFailure && ids.length > 1 && outcomes.some(exhaustedNoVerdict),
+  };
 }

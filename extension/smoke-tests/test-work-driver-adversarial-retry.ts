@@ -15,6 +15,7 @@ import path from "node:path";
 import type { DriverContext } from "../src/work-driver-context.ts";
 import { runWorkDriver } from "../src/work-driver.ts";
 import { initialState, readState, writeState } from "../src/workflow-state.ts";
+import type { WorkEvent } from "../src/workflow-state.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
@@ -74,8 +75,7 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
 // #298 — adversarial loop: REJECTED is a verdict, infra failure is retried
 // ============================================================================
 
-// T5 (#298) — REJECTED verdict records dispatch-completed (not
-// dispatch-failed-with-menu-errorTail) + adversarial-rejected.
+// T5 (#298) — REJECTED verdict records dispatch-completed (not dispatch-failed-with-menu-errorTail) + adversarial-rejected.
 {
   const dir = mkdtempSync(path.join(tmpdir(), "work-driver-adv-rejected-"));
   try {
@@ -135,9 +135,7 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
   }
 }
 
-// T6 (#298) — loop infra-failure leaves dispatch-failed as the tail so the
-// RETRY_ONCE router re-runs the step (pre-#298 the synthesized cap-hit made
-// that branch unreachable); recovery on the second attempt approves.
+// T6 (#298) — loop infra-failure leaves dispatch-failed as the tail so the RETRY_ONCE router re-runs the step (pre-#298 the synthesized cap-hit made that branch unreachable); recovery on the second attempt approves.
 {
   const dir = mkdtempSync(path.join(tmpdir(), "work-driver-adv-infra-"));
   try {
@@ -229,10 +227,7 @@ function advFanoutState(issue: number, dir: string, worktrees: string[]): typeof
   };
 }
 
-// W1 (#486) — 3 workstreams; task-b's loop fails transiently on the first
-// pass and succeeds on the in-step retry. The retry must occur (2 loop
-// calls for task-b) and the aggregate must approve on task-b's recovered
-// verdict — no handoff, no cap-hit.
+// W1 (#486) — 3 workstreams; task-b's loop fails transiently on the first pass and succeeds on the in-step retry. The retry must occur (2 loop calls for task-b) and the aggregate must approve on task-b's recovered verdict — no handoff, no cap-hit.
 {
   const dir = mkdtempSync(path.join(tmpdir(), "work-driver-486-w1-"));
   try {
@@ -285,9 +280,16 @@ function advFanoutState(issue: number, dir: string, worktrees: string[]): typeof
       events.some((e) => e.kind === "adversarial-approved"),
       "#486 W1: recovered verdict → aggregate adversarial-approved (no handoff)",
     );
+    // #486 W1 — the gate itself emitted no cap-hit: the transient was
+    // absorbed in-step. Scoped to the gate's caps on purpose — this test
+    // repo is not a git tree, so the driver's mechanized commit-pr fails
+    // downstream and parks with `step-failed:commit-pr` (a test artifact
+    // of the mocked environment, not a gate verdict).
     assert(
-      !events.some((e) => e.kind === "cap-hit"),
-      "#486 W1: no cap-hit — the transient was absorbed in-step",
+      !events.some(
+        (e) => e.kind === "cap-hit" && (e.cap === "adversarial-infra-failure" || e.cap === "adversarial-loop"),
+      ),
+      "#486 W1: no adversarial cap-hit — the transient was absorbed in-step",
     );
     const bOutcomes = events.filter(
       (e) => e.kind === "adversarial-workstream-outcome" && e.workstreamId === "task-b",
