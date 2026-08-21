@@ -13,7 +13,7 @@
  * literals, no harness.
  */
 
-import { clipTitle } from "../src/work-driver-branch-mechanized.ts";
+import { clipTitle } from "../src/work-driver-commit.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
@@ -110,12 +110,14 @@ eq(
 
 // ---- surrogate pairs
 
-// A lone emoji (one surrogate pair) sitting exactly at the cut point.
-// "e".repeat(62) + emoji + "x" = 62 + 2 + 1 = 65 > 64. No whitespace at all
-// → degenerate path, and rule 4 must back off the cut so the pair is not split.
+// A lone emoji (one surrogate pair) with the cut INSIDE the pair: 62 e's +
+// emoji + x = 62 + 2 + 1 = 65 > 64. No whitespace at all → degenerate path,
+// and rule 4 must back off the cut so the pair is not split (a high half at
+// cut-1 would dangle in the prefix).
 const surrogateAtCut = "e".repeat(62) + "\u{1F600}" + "x";
 const surrogateResult = clipTitle(surrogateAtCut, 64);
-// 62 e's + pair + x = 65. cut=63 → backs off to 62 (rule 4) → 62 e's + ellipsis.
+// 62 e's + pair + x = 65. cut=63 falls inside the pair → backs off to 62 →
+// 62 e's + ellipsis.
 assert(
   surrogateResult.length === 63 && surrogateResult.endsWith("\u2026"),
   `surrogate-at-cut: 62 e's + ellipsis (budget-1 after the pair backoff), got ${JSON.stringify(surrogateResult)}`,
@@ -127,6 +129,15 @@ assert(
   "surrogate-at-cut: no lone high surrogate at the end (rule 8)",
 );
 assert(surrogateResult.endsWith("\u2026"), "surrogate-at-cut: ends with ellipsis");
+
+// The straddling case the shipped rule-4 check could NOT catch: high half at
+// cut-1, low half at cut. 62 a's + pair + "x" has the pair at 62,63 and
+// cut=63 — the check reads index 62, the HIGH half, and does not back off,
+// so slice(0,63) leaves the high surrogate dangling. Rule 4 now checks the
+// CUT position (low half) and backs off: 62 a's + ellipsis.
+const straddling = "a".repeat(62) + "\u{1F600}" + "x";
+const straddlingResult = clipTitle(straddling, 64);
+eq(straddlingResult, "a".repeat(62) + "…", "straddling pair: high at cut-1 + low at cut → back off, pair dropped whole");
 
 // Surrogate pair with a word boundary BEFORE it (so rule 5 fires, not rule 6):
 // "word " (5) + 55 a's + emoji pair = 5 + 55 + 2 = 62 <= 64? No: pad to exceed.

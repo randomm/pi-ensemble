@@ -11,13 +11,18 @@
  * with no explanation of why the tree is dirty.
  *
  * This module is the post-hoc inspection the fallback path never had: one
- * `git status --porcelain` + `git rev-parse --abbrev-ref HEAD` after the
+ * `git status --porcelain -z` + `git rev-parse --abbrev-ref HEAD` after the
  * fallback dispatch completes, parsed into facts the handoff renderers
  * (`commitPrRoot` / `commitPrRootError` in pipelineState) render as the
  * branch, the unmerged paths, the staged count, and the exact command that
  * clears the state. It records what the cycle LEFT; it does not modify
  * repoRoot, and it deliberately does not reimplement `integrate()`'s
  * rollback — that already works (test-integrate-aborts.ts).
+ *
+ * Also owns `commitPrRootFactLines`, the single source of the recorded-state
+ * fact lines (branch, unmerged paths, staged count, clearing command) shared
+ * by BOTH handoff surfaces — the "agree by copy" shape that produced the
+ * "adversarial-loop" default in 23 of 53 handoffs.
  *
  * Kept in its own file (not inlined into work-driver-commit.ts) because both
  * of the natural homes sat near the 500-line gate at the time of writing
@@ -38,7 +43,7 @@ export interface CommitPrRootState {
   branch: string;
   /** Porcelain column-1/2 status codes (`UU`, `AA`, `DD` — the unmerged set). */
   unmergedPaths: string[];
-  /** Entries with a non-space column 1 (staged: `M `, `A `, `MM`, unmerged, …). */
+  /** Entries staged on BOTH columns (`MM`, ` M`, `A `, …) — untracked (`??`) excluded. */
   stagedCount: number;
   /** Total porcelain entries (staged + unstaged + untracked). */
   totalEntries: number;
@@ -51,29 +56,62 @@ export type CommitPrRootInspect =
   | { ok: false; error: string };
 
 /**
- * Parse `git status --porcelain` output into the record above. Exported for
- * direct unit testing; the `branch` parameter comes from a separate call.
+ * Parse `git status --porcelain -z` output into the record above. Exported
+ * for direct unit testing; the `branch` parameter comes from a separate call.
  *
- * Porcelain format: `XY <path>` where X (col 1) is the staged state and Y
+ * Porcelain format: `XY <path>\0` where X (col 1) is the staged state and Y
  * (col 2) the worktree state. Unmerged paths have X/Y ∈ {U, A, D, .} — in
  * practice `UU`, `AA`, `DD`, `AU`, `UA` etc. Untracked is `??`.
+ * Rename/copy entries (`R ` / `C `) record a SECOND NUL-separated token —
+ * the destination path — which is the one an operator can `git add` /
+ * `git status` on; the parser consumes it so the old name is never counted
+ * as an entry of its own.
+ *
+ * The `-z` (NUL-separated) form is load-bearing, for the same reason
+ * work-driver-stage.ts uses it: the plain form C-quotes special-character
+ * paths (`"src/we\\ttab.rs"`), and a recorded path is only useful if the
+ * rendered clearing commands (`git add <path>` / `git checkout --theirs`) can
+ * operate on it as-is. NUL-separated output never quotes.
+ *
+ * `stagedCount` counts entries with a non-space column 1 — the staged set
+ * (`M `, `A `, `MM`, `M `, unmerged…). Untracked (`??`) is dirt the operator
+ * sees in `totalEntries`, but it is not staged and the rendered
+ * `git reset --hard` clearing command would not remove it.
  */
 export function parseCommitPrStatus(porcelain: string, branch: string): CommitPrRootState {
-  const entries = porcelain
-    .split("\n")
+  const raw = porcelain
+    .split("\0")
     .map((l) => l.trimEnd())
     .filter((l) => l.length >= 4); // "XY path" — anything shorter is noise
+  // Flatten rename/copy pairs: the destination (second token) replaces the
+  // source, keeping only the source's status columns. `raw` is pre-filtered
+  // to >= 4 chars, so a rename destination token (which is always present in
+  // well-formed output) is the only gap; fall back to the source's own path
+  // when it is missing so the entry is still recorded rather than dropped.
+  const entries: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const line = raw[i] ?? "";
+    if (line.length < 4) continue;
+    const x = line[0];
+    const y = line[1];
+    if (x === "R" || x === "C" || y === "R" || y === "C") {
+      entries.push(`${x}${y} ${raw[i + 1]?.slice(2) ?? line.slice(2)}`);
+      i += 1; // consume the destination token
+      continue;
+    }
+    entries.push(line);
+  }
   const unmergedPaths: string[] = [];
   let stagedCount = 0;
   for (const line of entries) {
     const x = line[0];
     const y = line[1];
-    const staged = x !== " ";
-    if (staged) stagedCount += 1;
     // Unmerged: at least one side records U, or the classic `UU`/`AA`/`DD`
     // shapes where both sides disagree. `UD` (unmerged deletion) etc. all
     // carry a U on one side.
-    if (x === "U" || y === "U") unmergedPaths.push(line.slice(3).trim());
+    if (x === "U" || y === "U") unmergedPaths.push(line.slice(3));
+    // `M ` (worktree-dirty), `??`, and `!!` have no staged component.
+    if (x !== " " && x !== "?" && y !== "?") stagedCount += 1;
   }
   return {
     branch,
@@ -82,6 +120,90 @@ export function parseCommitPrStatus(porcelain: string, branch: string): CommitPr
     totalEntries: entries.length,
     capturedAt: Date.now(),
   };
+}
+
+/**
+ * The commit-pr handoff's shared fact lines: branch, unmerged-path list,
+ * staged count, and the per-state clearing command. Single source for BOTH
+ * handoff surfaces (work-driver-handoff-markdown.ts and
+ * work-driver-handoff-message.ts) — pre-#500 the two surfaces agreed by copy,
+ * and copy is how the "adversarial-loop" default told the wrong gate failed
+ * in 23 of 53 handoffs.
+ *
+ * `prefix` is the command prefix (the chat surface uses
+ * `git -C <repoRoot> `; the GitHub body uses none — the operator runs from
+ * repoRoot). `indent` matches each surface's list style. A placeholder
+ * branch (`HEAD` / `(detached or unknown)`) never reaches a `reset --hard`
+ * command: `git reset --hard HEAD` aborts a merge in progress WITHOUT
+ * clearing the index, which leaves exactly the unmerged state that blocks
+ * `git apply`.
+ */
+export function commitPrRootFactLines(
+  root: CommitPrRootState | undefined,
+  err: string | undefined,
+  prefix: string,
+  indent: string,
+): string[] {
+  if (!root && !err) return [];
+  const lines: string[] = [];
+  if (err) {
+    lines.push(
+      `${indent}inspection failed: ${err} — the state below is unknown; run \`${prefix}git status\` first.`,
+    );
+  }
+  if (root) {
+    lines.push(`${indent}branch: \`${root.branch}\``);
+    lines.push(
+      root.unmergedPaths.length > 0
+        ? `${indent}unmerged paths (${root.unmergedPaths.length}):`
+        : `${indent}unmerged paths: none`,
+    );
+    if (root.unmergedPaths.length > 0) {
+      lines.push(...root.unmergedPaths.map((p) => `${indent}  - \`${p}\``));
+    }
+    lines.push(
+      `${indent}staged-but-uncommitted: ${root.stagedCount} of ${root.totalEntries} porcelain entries`,
+    );
+    const placeholderBranch = root.branch === "HEAD" || root.branch === "(detached or unknown)";
+    if (root.unmergedPaths.length > 0) {
+      lines.push(
+        "",
+        `${indent}The consolidation below will FAIL until these are resolved — \`git apply\` refuses a tree with unmerged paths. Resolve the conflicts by hand (or abort them), then re-apply:`,
+        "",
+        `${prefix}git checkout --theirs -- <path>   # per conflicting path, once decided`,
+        `${prefix}git add <path>`,
+        "",
+        placeholderBranch
+          ? `${indent}To discard the hand consolidation entirely (DESTRUCTIVE — the uncommitted work is lost), name the branch first:`
+          : `${indent}To discard the hand consolidation entirely (DESTRUCTIVE — the uncommitted work is lost):`,
+        "",
+        ...(placeholderBranch ? [`${prefix}git rev-parse --abbrev-ref HEAD`] : []),
+        placeholderBranch
+          ? `${prefix}git reset --hard <branch>`
+          : `${prefix}git reset --hard ${root.branch}`,
+      );
+    } else if (root.stagedCount > 0) {
+      if (placeholderBranch) {
+        lines.push(
+          "",
+          `${indent}The index holds ${root.stagedCount} staged file(s). To discard them first (DESTRUCTIVE — the uncommitted work is lost), name the branch first:`,
+          "",
+          `${prefix}git rev-parse --abbrev-ref HEAD`,
+          `${prefix}git reset --hard <branch>`,
+        );
+      } else {
+        lines.push(
+          "",
+          `${indent}The index holds ${root.stagedCount} staged file(s) on \`${root.branch}\`. The commands below apply on top of it; if that is not what you want, discard it first (DESTRUCTIVE — the uncommitted work is lost):`,
+          "",
+          `${prefix}git reset --hard ${root.branch}`,
+        );
+      }
+    } else {
+      lines.push("", `${indent}The tree is clean — the recovery commands below apply as-is.`);
+    }
+  }
+  return lines;
 }
 
 /**
@@ -99,7 +221,7 @@ export async function inspectCommitPrRoot(
 ): Promise<CommitPrRootInspect> {
   try {
     const [{ stdout: statusOut }, { stdout: branchOut }] = await Promise.all([
-      execFn("git status --porcelain", { cwd: repoRoot, maxBuffer: 256 * 1024 }),
+      execFn("git status --porcelain -z", { cwd: repoRoot, maxBuffer: 256 * 1024 }),
       execFn("git rev-parse --abbrev-ref HEAD", { cwd: repoRoot, maxBuffer: 64 * 1024 }),
     ]);
     const branch = branchOut.trim() || "(detached or unknown)";

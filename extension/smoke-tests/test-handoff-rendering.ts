@@ -160,7 +160,13 @@ for (const [name, render] of [
 // and carries a clearing command.
 // ---------------------------------------------------------------------------
 
-/** A cycle that parked at commit-pr with a conflicted repoRoot. */
+/** A cycle that parked at commit-pr with a conflicted repoRoot.
+ *
+ * The eventLog carries the ops-fallback plumb-report — the driver writes it
+ * when the mechanized path falls back — so the #500 DoD bullet ("the hedge is
+ * rendered into the handoff body") is exercised by an unconditional assertion
+ * below rather than a conditional that could silently skip.
+ */
 function commitPrConflictedState(): WorkState {
   return {
     schemaVersion: 1,
@@ -194,6 +200,13 @@ function commitPrConflictedState(): WorkState {
       },
     },
     eventLog: [
+      {
+        kind: "plumb-report",
+        at: 2,
+        step: "commit-pr",
+        role: "driver",
+        body: "Mechanized commit-pr fell back to the ops dispatch: apply conflict. Note: the repo root may contain partially staged consolidation from the mechanized attempt — verify with `git status` before re-applying patches.",
+      },
       {
         kind: "cap-hit",
         at: 3,
@@ -267,15 +280,19 @@ function commitPrConflictedState(): WorkState {
     "chat: warns about the unmerged paths before the git apply commands",
   );
 
-  // The plumb-report hedge ("repo root may contain partially staged") is
-  // rendered in the handoff body, not left in the state file only.
-  const plumb = s.eventLog.find((e) => e.kind === "plumb-report");
-  if (plumb) {
-    assert(
-      md.includes("partially staged"),
-      "markdown: renders the plumb-report hedge into the handoff body",
-    );
-  }
+  // The ops-fallback plumb-report's hedge ("repo root may contain partially
+  // staged") is rendered into the handoff body — the fixture's eventLog
+  // carries the plumb-report the driver writes on fallback, so this
+  // assertion is unconditional: a renderer that drops the hedge fails the
+  // gate instead of passing silently behind an `if (plumb)` guard.
+  assert(
+    s.eventLog.some((e) => e.kind === "plumb-report"),
+    "#500: fixture carries the ops-fallback plumb-report",
+  );
+  assert(
+    md.includes("partially staged"),
+    "markdown: renders the plumb-report hedge into the handoff body",
+  );
 
   // No `&&`-chained shell commands anywhere. (The existing recovery commands
   // use `|` pipes for `git diff | git apply` — a shell pipeline that runs as
@@ -294,6 +311,18 @@ function commitPrConflictedState(): WorkState {
     assert(
       chained.length === 0,
       `${name} (#500): no &&-chained commands (${chained[0]?.trim() ?? "none"})`,
+    );
+    // The `|` exemption is by design (git diff | git apply), but the
+    // exemption must not be vacuous: every piped shell line must be the
+    // expected pipeline shape, and there must be shell lines at all.
+    const pipeLines = shellLines.filter((l) => l.includes("|"));
+    assert(
+      pipeLines.every((l) => /git (?:-C \S+ )?diff[^|]*\|[^|]*git (?:-C \S+ )?apply/.test(l)),
+      `${name} (#500): every piped line is the expected git-diff|git-apply pipeline (${pipeLines[0]?.trim() ?? "none"})`,
+    );
+    assert(
+      shellLines.length > 0,
+      `${name} (#500): ...and there ARE commands to check, so the assertion is not vacuous`,
     );
   }
 }

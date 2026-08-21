@@ -9,6 +9,7 @@
 
 import { killDetail } from "./kill-detail.ts";
 import { renderLensFindings } from "./lens-findings-render.ts";
+import { commitPrRootFactLines } from "./work-driver-commit-inspect.ts";
 import { explainCap } from "./work-driver-explain.ts";
 import {
   adversarialOutcomeSection,
@@ -18,59 +19,55 @@ import { type ParkReason, parkAction } from "./work-driver-intent.ts";
 import type { WorkEvent, WorkState } from "./workflow-state.ts";
 
 /**
- * #500 — what repoRoot actually holds at commit-pr handoff, and the exact
- * command to clear it. Facts from `inspectCommitPrRoot`'s record, not the
- * clean-tree assumption the recovery commands below were written for. The
- * clearing command is chosen per state: a merge in progress has no unmerged
- * paths and is cleared with `reset --merge`; a conflict or a dirty index is
- * cleared with `reset --hard <branch>` — which is destructive of uncommitted
- * work, so the handoff says that out loud and offers the state-file/branch
- * inspection first.
+ * #500 — the ops-fallback plumb-report's hedge ("repo root may contain
+ * partially staged consolidation"). Unlike `plumbReportSection` (which
+ * renders `pipelineState.plumbReports`, kept OUT of the event log so it
+ * doesn't change the tail `nextStep()` routes on), the commit-pr
+ * ops-fallback plumb-report IS an event-log entry — and pre-#500 nothing
+ * rendered it, leaving the DoD ("the hedge is rendered into the handoff
+ * body") unmet.
  */
-function commitPrRootFacts(state: WorkState): string[] {
-  const root = state.pipelineState.commitPrRoot;
-  const err = state.pipelineState.commitPrRootError;
-  if (!root && !err) return [];
-  const lines: string[] = ["### repoRoot state at commit-pr handoff", ""];
-  if (err) {
-    lines.push(
-      `- inspection failed: \`${err}\` — the state below is unknown; run \`git status\` first.`,
-    );
+function commitPrFallbackPlumbSection(state: WorkState, cap: string | undefined): string[] {
+  if (
+    cap !== "commit-pr-incomplete-consolidation" &&
+    cap !== "verify-failed:commit-pr" &&
+    cap !== "integration-verify-failed"
+  ) {
+    return [];
   }
-  if (root) {
-    lines.push(`- branch: \`${root.branch}\``);
-    if (root.unmergedPaths.length > 0) {
-      lines.push(
-        `- unmerged paths (${root.unmergedPaths.length}):`,
-        ...root.unmergedPaths.map((p) => `    - \`${p}\``),
-      );
-    } else {
-      lines.push("- unmerged paths: none");
-    }
-    lines.push(
-      `- staged-but-uncommitted: ${root.stagedCount} of ${root.totalEntries} porcelain entries`,
+  const report = [...state.eventLog]
+    .reverse()
+    .find(
+      (e): e is Extract<WorkEvent, { kind: "plumb-report" }> =>
+        e.kind === "plumb-report" && e.step === "commit-pr",
     );
-    if (root.unmergedPaths.length > 0) {
-      lines.push(
-        "",
-        "The consolidation below will FAIL until these are resolved — `git apply` refuses a tree with unmerged paths. Resolve the conflicts by hand (or abort them), then re-apply:",
-        "",
-        "git checkout --theirs -- <path>   # per conflicting path, once decided",
-        "git add <path>",
-      );
-    } else if (root.stagedCount > 0) {
-      lines.push(
-        "",
-        `The index holds ${root.stagedCount} staged file(s) on \`${root.branch}\`. The commands below apply on top of it; if that is not what you want, discard it first (DESTRUCTIVE — the uncommitted work is lost):`,
-        "",
-        `git reset --hard ${root.branch}`,
-      );
-    } else {
-      lines.push("", "The tree is clean — the recovery commands below apply as-is.");
-    }
+  if (!report) return [];
+  return ["### commit-pr fallback note", "", `> ${report.body}`, ""];
+}
+
+/**
+ * #500 — the recorded repoRoot state at commit-pr handoff. Facts from
+ * `commitPrRootFactLines` — the single source the in-chat twin uses — so
+ * the two surfaces cannot drift. Gated on the commit-pr caps: rendering the
+ * clearing commands for some other cap's handoff would be the "wrong
+ * commands for the cap" class #398's rewrites existed to eliminate.
+ */
+function commitPrRootFacts(state: WorkState, cap: string | undefined): string[] {
+  if (
+    cap !== "commit-pr-incomplete-consolidation" &&
+    cap !== "verify-failed:commit-pr" &&
+    cap !== "integration-verify-failed"
+  ) {
+    return [];
   }
-  lines.push("");
-  return lines;
+  const facts = commitPrRootFactLines(
+    state.pipelineState.commitPrRoot,
+    state.pipelineState.commitPrRootError,
+    "",
+    "",
+  );
+  if (facts.length === 0) return [];
+  return ["### repoRoot state at commit-pr handoff", "", ...facts, ""];
 }
 
 /**
@@ -142,7 +139,8 @@ export function renderHandoffMarkdown(state: WorkState): string {
     "",
     explain,
     "",
-    ...commitPrRootFacts(state),
+    ...commitPrRootFacts(state, capForExplain),
+    ...commitPrFallbackPlumbSection(state, capForExplain),
     ...adversarialOutcomeSection(state),
     ...plumbReportSection(state),
     "### What was attempted",
@@ -376,6 +374,13 @@ export function renderHandoffMarkdown(state: WorkState): string {
     const missing = ps.incompleteConsolidation ?? [];
     const root = ps.commitPrRoot;
     const conflicted = (root?.unmergedPaths ?? []).length > 0;
+    // #500 — a placeholder branch means `reset --hard HEAD` would abort a
+    // merge in progress WITHOUT clearing the index; name the branch first.
+    const clearRoot = root
+      ? root.branch === "HEAD" || root.branch === "(detached or unknown)"
+        ? "git rev-parse --abbrev-ref HEAD   # name the branch, then: git reset --hard <branch>"
+        : `git reset --hard ${root.branch}`
+      : "git reset --hard HEAD";
     lines.push(
       "# 1. Inspect each missing workstream's worktree — the developer's work is still there uncommitted:",
       ...missing.map((m) => `git -C .worktrees/issue-${issue}-${m.id} status --porcelain`),
@@ -389,7 +394,7 @@ export function renderHandoffMarkdown(state: WorkState): string {
             "git add <resolved-path>",
             "# (or discard the hand consolidation entirely — DESTRUCTIVE,",
             "#  the uncommitted staged work is lost):",
-            `git reset --hard ${root?.branch ?? "HEAD"}`,
+            clearRoot,
             "",
           ]
         : []),
@@ -476,13 +481,10 @@ export function renderHandoffMarkdown(state: WorkState): string {
 /**
  * Plumbing failures the cycle worked around and kept going.
  *
- * `pipelineState.plumbReports` records git failures during lens-fix — a failed
- * commit or push — deliberately OUT of the event log, because appending there
- * would change the tail and `nextStep()` routes on it. The comment at the write
- * site says these exist "so the operator sees it in handoff", and until now
- * nothing rendered them: written in two places, read in none.
- *
- * They matter precisely because the cycle continued. A lens-fix whose push
+ * `pipelineState.plumbReports` records git failures during lens-fix — a
+ * failed commit or push — deliberately OUT of the event log, because
+ * appending there would change the tail and `nextStep()` routes on it.
+ * They matter precisely because the cycle continued: a lens-fix whose push
  * failed means the PR the reviewer is looking at does not contain the fix.
  */
 function plumbReportSection(state: WorkState): string[] {

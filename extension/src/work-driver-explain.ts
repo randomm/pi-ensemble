@@ -127,10 +127,6 @@ export function explainCap(
       const elem = sb?.sddElement ?? "(spec element not specified)";
       return `explore stepped back and identified a spec-level gap in **${elem}** — the lens-review fix loop kept flagging the same shape across rounds (MAST 41.77% — spec-level problem fingerprint). The handoff body includes a proposed revision. After updating the issue (via /plan or \`gh issue edit\`), re-run with \`/work N --restart\` to start a fresh cycle against the revised spec`;
     }
-    case "integration-verify-failed":
-      return "the consolidated tree failed the project's verify command, so nothing was pushed. Each workstream passed its own develop gate in its own worktree; the combination does not build — which is a defect integration CREATED, and the only place it can be caught. The failing output is in the plumb-report above. Recover by fixing the interaction (typically one workstream renamed or moved something another still refers to) and re-running";
-    case "lens-fix-not-integrated":
-      return "the lens-fix round did not reach the branch — either the integration failed or the fixer wrote nothing — so the cycle halted rather than reviewing again. The next round would have re-read an unchanged branch and re-reported the identical findings until the round cap fired, which is what burned whole review budgets on already-solved defects. The git detail is in the plumb-report above; the fix may still be sitting uncommitted in the worktree, so check `git -C .worktrees/... status` before re-running";
     case "commit-pr-incomplete-consolidation": {
       const missing = state.pipelineState.incompleteConsolidation ?? [];
       const which =
@@ -139,6 +135,9 @@ export function explainCap(
       // pre-#500 silence (nothing recorded, nothing rendered) is the defect:
       // a conflicted root wedges every later cycle at integrate()'s
       // dirty-preflight, and the handoff used to say nothing about why.
+      // Cap-gated: this cap is the ONLY one whose recovery commands render
+      // the `git apply` path the blurb references, so the blurb must not leak
+      // into caps whose recovery commands differ.
       const root = state.pipelineState.commitPrRoot;
       const rootBlurb = root
         ? ` repoRoot is on \`${root.branch}\` with ${root.stagedCount} staged file(s)${root.unmergedPaths.length > 0 ? ` and ${root.unmergedPaths.length} UNMERGED path(s) (${root.unmergedPaths.join(", ")})` : ""} — ${root.unmergedPaths.length > 0 ? "resolve those conflicts (the handoff body names each path and the clearing command) before any `git apply` will run" : "the recovery commands below apply as-is"}.`
@@ -147,6 +146,35 @@ export function explainCap(
           : "";
       return `commit-pr's post-dispatch consolidation gate detected that the committed diff is missing files from these workstreams: ${which}. Ops committed a partial slice — the developers' work in the missing worktrees is uncommitted on disk. Pre-PR14 this would have merged silently (v0.12.13 /work 577 closed an issue with 1 of 3 workstreams' changes shipped). The driver halted before merge; recover by collecting the missing diffs from \`.worktrees/issue-N-<id>\` and re-running, or take over the integration manually.${rootBlurb}`;
     }
+    case "verify-failed:commit-pr": {
+      // #500 — the outcome gate fires on the same commit-pr step as the
+      // incomplete-consolidation cap, so the recorded repoRoot state applies
+      // to its recovery too. The blurb stays cap-scoped: it only appends from
+      // the cases whose recovery commands reference the recorded state.
+      const root = state.pipelineState.commitPrRoot;
+      const rootBlurb = root
+        ? ` repoRoot is on \`${root.branch}\` with ${root.stagedCount} staged file(s)${root.unmergedPaths.length > 0 ? ` and ${root.unmergedPaths.length} UNMERGED path(s) (${root.unmergedPaths.join(", ")})` : ""} — ${root.unmergedPaths.length > 0 ? "resolve those conflicts (the handoff body names each path and the clearing command) before any `git apply` will run" : "the recovery commands below apply as-is"}.`
+        : state.pipelineState.commitPrRootError
+          ? ` The repoRoot state inspection failed (${state.pipelineState.commitPrRootError}) — run \`git status\` before the recovery commands.`
+          : "";
+      return `the driver's outcome-verification gate rejected the commit-pr step's "done" claim — the committed + pushed + PR-opened claim is not backed by executed evidence. The per-check findings are in the handoff body; inspect the recorded repoRoot state there and re-run.${rootBlurb}`;
+    }
+    case "integration-verify-failed": {
+      const base =
+        "the consolidated tree failed the project's verify command, so nothing was pushed. Each workstream passed its own develop gate in its own worktree; the combination does not build — which is a defect integration CREATED, and the only place it can be caught. The failing output is in the plumb-report above. Recover by fixing the interaction (typically one workstream renamed or moved something another still refers to) and re-running";
+      // #500 — this cap fires BEFORE the PR is created, but a failed
+      // mechanized attempt can leave repoRoot dirty, and the operator's next
+      // step (re-running) re-hits integrate()'s dirty preflight. The recorded
+      // state + clearing command is the difference between "re-run" and
+      // "re-run and get wedged again".
+      const root = state.pipelineState.commitPrRoot;
+      const rootBlurb = root
+        ? ` repoRoot is on \`${root.branch}\` with ${root.stagedCount} staged file(s)${root.unmergedPaths.length > 0 ? ` and ${root.unmergedPaths.length} UNMERGED path(s) (${root.unmergedPaths.join(", ")})` : ""} — ${root.unmergedPaths.length > 0 ? "resolve those conflicts (the handoff body names each path and the clearing command) before any `git apply` will run" : "clear it with the recorded command so re-running does not wedge at integrate()'s dirty preflight"}.`
+        : "";
+      return `${base}.${rootBlurb}`;
+    }
+    case "lens-fix-not-integrated":
+      return "the lens-fix round did not reach the branch — either the integration failed or the fixer wrote nothing — so the cycle halted rather than reviewing again. The next round would have re-read an unchanged branch and re-reported the identical findings until the round cap fired, which is what burned whole review budgets on already-solved defects. The git detail is in the plumb-report above; the fix may still be sitting uncommitted in the worktree, so check `git -C .worktrees/... status` before re-running";
   }
   // PR17 — `verify-failed:<step>`: the driver-side outcome gate found
   // the step's claimed result isn't backed by executed evidence. The

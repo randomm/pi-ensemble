@@ -16,8 +16,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { carriedAdversarialFindings, renderCarriedFindings } from "./adversarial-findings.ts";
 import { trace } from "./trace.ts";
-import { clipTitle } from "./work-driver-branch-mechanized.ts";
-import { type CommitPrRootState, inspectCommitPrRoot } from "./work-driver-commit-inspect.ts";
+import {
+  type CommitPrRootInspect,
+  type CommitPrRootState,
+  inspectCommitPrRoot,
+} from "./work-driver-commit-inspect.ts";
 import type { DriverContext } from "./work-driver-context.ts";
 import { cachedIssueTitle, integrate, withIntegrationLock } from "./work-driver-integrate.ts";
 import { renderAssumptions } from "./work-driver-intent.ts";
@@ -31,6 +34,65 @@ import { appendEvent } from "./workflow-state.ts";
 import type { WorkState } from "./workflow-state.ts";
 
 const execp = promisify(exec);
+
+/**
+ * #507 — clip a PR title / commit subject to a code-unit budget at a word
+ * boundary, with a single U+2026 ellipsis. The PR title feeds BOTH `git
+ * commit -m` and `gh pr create --title`, and under squash-merge the title
+ * becomes the commit subject on main — a mid-word cut reaches CHANGELOG.md
+ * and release notes by two routes. The budget is 64, not 72: the subject
+ * convention is ≤ 72 chars and GitHub's squash-merge appends
+ * ` (#<prNumber>)` (8 code units, unknown at title-construction time).
+ *
+ * No lone surrogate is ever produced in the output: a cut that would fall
+ * between the two halves of a surrogate pair is backed off (rule 4) so the
+ * pair is dropped whole rather than leaving a dangling high half.
+ */
+export function clipTitle(raw: string, budget: number): string {
+  if (raw.length <= budget) return raw;
+  let cut = budget - 1; // reserve one code unit for the ellipsis
+  // Rule 4 — never leave a dangling high surrogate: if the cut falls between
+  // the two halves of a surrogate pair (high half at cut-1 in the prefix, low
+  // half at cut in the dropped tail), step the cut back so the pair is cut
+  // whole. The high half can only sit at cut-1 when the low half sits at
+  // cut, so checking the cut position for a low surrogate is sufficient.
+  if (cut < raw.length) {
+    const at = raw.charCodeAt(cut);
+    const before = raw.charCodeAt(cut - 1);
+    if (
+      (at >= 0xdc00 && at <= 0xdfff && before >= 0xd800 && before <= 0xdbff) ||
+      (at >= 0xd800 && at <= 0xdbff)
+    ) {
+      cut -= 1;
+    }
+  }
+  // Rule 5 — last whitespace at or before cut; prefix after trimEnd must be
+  // non-empty (a boundary at index 0 would otherwise yield a bare ellipsis).
+  for (let i = cut; i >= 0; i--) {
+    const ch = raw.charAt(i);
+    if (/\s/.test(ch) && raw.slice(0, i).trimEnd().length > 0) {
+      return `${raw.slice(0, i).trimEnd()}\u2026`;
+    }
+  }
+  // Rule 6 — no breakable boundary (a single unbreakable token over budget).
+  // The one case where a word is cut mid-way: the alternative is an empty
+  // title, which is worse. `cut` was already backed off the pair in rule 4.
+  return `${raw.slice(0, cut)}\u2026`;
+}
+
+/**
+ * #500 — the `commitPrRoot` / `commitPrRootError` record fields for both
+ * commit-pr paths (mechanized + ops fallback). One builder so the two
+ * write sites cannot drift when the record gains a field.
+ */
+function commitPrRootFieldsOf(r: CommitPrRootInspect): {
+  commitPrRoot: CommitPrRootState | undefined;
+  commitPrRootError: string | undefined;
+} {
+  return r.ok
+    ? { commitPrRoot: r.state, commitPrRootError: undefined }
+    : { commitPrRoot: undefined, commitPrRootError: r.error };
+}
 
 /**
  * Wall-clock for the verify run against the consolidated tree. This is the
@@ -92,7 +154,6 @@ export async function mechanizedCommitPr(
 ): Promise<{ ok: true; state: WorkState } | { ok: false; reason: string; terminal?: boolean }> {
   const execFn = ctx.verifyExecFn ?? execp;
   const ps = state.pipelineState;
-  const inspect = inspectCommitPrRoot;
   const branchName = ps.branchName;
   if (!branchName || branchName.startsWith("(")) {
     return { ok: false, reason: "integration branch name was not captured at Step 3" };
@@ -210,7 +271,7 @@ export async function mechanizedCommitPr(
     }
     // 5. Emit the same event shapes the dispatch path produces so the
     // shared downstream (parsePrNumber + both gates) runs unchanged.
-    const rootState = await inspect(execFn, ctx.repoRoot);
+    const rootState = await inspectCommitPrRoot(execFn, ctx.repoRoot);
     let next = appendEvent(
       { ...state, pipelineState: { ...state.pipelineState, currentStep: "commit-pr" } },
       { kind: "step-started", step: "commit-pr", at: now },
@@ -226,12 +287,12 @@ export async function mechanizedCommitPr(
       at: Date.now(),
       summary: `Mechanized commit-pr: consolidated ${ids.length} worktree(s), committed, pushed ${branchName}, opened PR.\npr: ${prNumber}`,
     });
+    const commitPrRootFields = commitPrRootFieldsOf(rootState);
     next = {
       ...next,
       pipelineState: {
         ...next.pipelineState,
-        commitPrRoot: rootState.ok ? rootState.state : undefined,
-        commitPrRootError: rootState.ok ? undefined : rootState.error,
+        ...commitPrRootFields,
       },
     };
     return { ok: true, state: next };
@@ -352,8 +413,7 @@ async function runCommitPrLocked(
     ...next,
     pipelineState: {
       ...next.pipelineState,
-      commitPrRoot: rootState.ok ? rootState.state : undefined,
-      commitPrRootError: rootState.ok ? undefined : rootState.error,
+      ...commitPrRootFieldsOf(rootState),
     },
   };
   const prNumber = parsePrNumber(last.summary);

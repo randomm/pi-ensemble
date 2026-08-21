@@ -273,7 +273,7 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
         const LONG_TITLE =
           "fix: long issue title that exceeds the sixty-four code unit budget-TAIL";
         assert(LONG_TITLE.length > 64, "M4: fixture title really is over budget");
-        const { clipTitle } = await import("../src/work-driver-branch-mechanized.ts");
+        const { clipTitle } = await import("../src/work-driver-commit.ts");
         const expectedClipped = clipTitle(LONG_TITLE, 64);
         assert(expectedClipped.length <= 64, "M4: clipped title is within budget");
         assert(expectedClipped.endsWith("\u2026"), "M4: clipped title ends with ellipsis");

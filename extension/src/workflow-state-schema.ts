@@ -10,6 +10,7 @@
  * resumability, GitHub-is-the-bus).
  */
 
+import type { CommitPrRootState } from "./work-driver-commit-inspect.ts";
 import type { WorkEvent, WorkStep } from "./workflow-state-events.ts";
 
 /** Current schema version. Bump on breaking changes. */
@@ -238,13 +239,7 @@ export interface PipelineState {
    * were written for. Absent when the inspection never ran (pre-#500 state
    * files, a failed dispatch) or failed (see `commitPrRootError`).
    */
-  commitPrRoot?: {
-    branch: string;
-    unmergedPaths: string[];
-    stagedCount: number;
-    totalEntries: number;
-    capturedAt: number;
-  };
+  commitPrRoot?: CommitPrRootState;
   /** #500 — the git error, when the post-fallback inspection could not run. */
   commitPrRootError?: string;
   /**
