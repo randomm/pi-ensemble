@@ -4,6 +4,9 @@
  * No Pi spawns; just exercises `resolveModel` under various env states.
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   clearAllOverrides,
   loadOverrides,
@@ -13,10 +16,22 @@ import {
 } from "../src/model-config.ts";
 import { resolveModel } from "../src/models.ts";
 
-// Use a throwaway config file for the test so we don't clobber the user's.
-process.env.PI_ENSEMBLE_MODELS_CONFIG = `/tmp/pi-ensemble-test-models-${process.pid}.json`;
+// Use a unique throwaway config file for the test so we don't clobber the
+// user's. A per-run mkdtemp dir is unique and cleaned up on exit (#502:
+// the old pid-suffixed /tmp path was shared across cancelled runs and host
+// restarts, so a stale fixture could be read instead of one this run wrote).
+const configDir = mkdtempSync(path.join(tmpdir(), "pi-ensemble-test-models-"));
+process.env.PI_ENSEMBLE_MODELS_CONFIG = path.join(configDir, "ensemble-models.json");
 await loadOverrides();
 await clearAllOverrides();
+// Best-effort cleanup on exit.
+process.on("exit", () => {
+  try {
+    rmSync(configDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
