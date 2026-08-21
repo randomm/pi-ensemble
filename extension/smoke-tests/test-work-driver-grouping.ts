@@ -252,6 +252,47 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
     "R4 regression: [frontend] at line start still unions → 1 group",
   );
 
+  // #501 — three issues sharing a conventional-commit scope with disjoint
+  // paths and no link markers → three singletons plus a declined note.
+  // A bare scope match is boilerplate in this repository and no longer
+  // unions on its own.
+  const r4Declined = groupIssues([1100, 1101, 1102], {
+    1100: "fix(work-driver): repair the lens loop\n\nTouches extension/src/work-driver-lens.ts",
+    1101: "fix(work-driver): plan path collisions\n\nTouches extension/src/work-driver-plan-paths.ts",
+    1102: "fix(work-driver): worktree provisioning\n\nTouches extension/src/worktree-provision.ts",
+  });
+  assert(
+    Object.keys(r4Declined.groups).length === 3,
+    "#501: three bare-scope issues with disjoint paths → three singleton groups",
+  );
+  assert(
+    Object.values(r4Declined.groups).every((g) => g.issues.length === 1),
+    "#501: no group contains more than one of the three",
+  );
+  assert(
+    r4Declined.notes.some((n) =>
+      n.startsWith("R4 declined: #1100 ↔ #1101 (tag=[work-driver])"),
+    ),
+    "#501: declined note names the pair and the tag",
+  );
+
+  // #501 — the same scope is corroborated: two issues sharing the scope AND
+  // ≥ 0.5 path overlap are joined, with the note naming the corroboration.
+  const r4Corroborated = groupIssues([1110, 1111], {
+    1110: "fix(spawn): close stdin\n\nTouches extension/src/spawn.ts and extension/src/spawn-support.ts",
+    1111: "fix(spawn): retry on willRetry\n\nTouches extension/src/spawn.ts and extension/src/spawn-support.ts",
+  });
+  assert(
+    Object.keys(r4Corroborated.groups).length === 1,
+    "#501: bare scope + R2 path overlap ≥ 0.5 → one group",
+  );
+  assert(
+    r4Corroborated.notes.some((n) =>
+      n.startsWith("R4 subsystem: #1110 ↔ #1111 (tag=[spawn])") && n.includes("R2 path-overlap"),
+    ),
+    "#501: R4 note names the corroboration",
+  );
+
   // Guardrail — MAX_ISSUES_PER_GROUP splits oversized components.
   //
   // Four issues all linked pairwise via depends-on → one component.
