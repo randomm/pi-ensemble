@@ -104,6 +104,13 @@ export function groupIssues(
   if (activeIssues.length === 0) {
     return { groups: {}, fanout: { mode: "parallel", concurrencyCap: 1 }, notes };
   }
+  // Structural corroboration record for R4: which pairs R1/R2 actually unioned.
+  // #501 — tracking these as note strings would couple R4's union DECISION to
+  // the human-readable note format of two other rules; a cosmetic rename in
+  // R1's note would silently disable R4's corroboration detection.
+  const pairKey = (a: number, b: number) => `${Math.min(a, b)}|${Math.max(a, b)}`;
+  const r1Pairs = new Set<string>();
+  const r2Pairs = new Set<string>();
   if (activeIssues.length === 1) {
     // Single-issue path: return one "default" group. Callers usually
     // shouldn't reach groupIssues for K=1, but return sanely if they do.
@@ -204,6 +211,7 @@ export function groupIssues(
       const other = Number.parseInt(m[1] ?? "", 10);
       if (Number.isFinite(other) && parent.has(other) && other !== n && union(n, other)) {
         notes.push(`R1 link: #${n} ↔ #${other}`);
+        r1Pairs.add(pairKey(n, other));
       }
     }
     linkRe.lastIndex = 0;
@@ -259,6 +267,7 @@ export function groupIssues(
       const jaccard = union_ === 0 ? 0 : inter / union_;
       if (jaccard >= 0.5 && union(a, b)) {
         notes.push(`R2 path-overlap: #${a} ↔ #${b} (jaccard=${jaccard.toFixed(2)})`);
+        r2Pairs.add(pairKey(a, b));
       }
     }
   }
@@ -278,6 +287,10 @@ export function groupIssues(
   // scope match now unions only when corroborated by an R1 link marker
   // between the pair or R2 path overlap ≥ 0.5; an uncorroborated scope match
   // is declined and noted rather than silently joined.
+  // #501 — accumulated so the O(N²) per-pair "declined" notes collapse into
+  // one summary per tag in the plumb report; the loop body pushes pairs,
+  // not notes.
+  const r4Declined = new Map<string, string[]>();
   const tagByIssue = new Map<number, { tag: string; bracket: boolean }>();
   for (const n of activeIssues) {
     const body = bodiesByIssue[n] ?? "";
@@ -299,14 +312,10 @@ export function groupIssues(
       if (!ea || !eb || ea.tag !== eb.tag) continue;
       const corroborations: string[] = [];
       if (ea.bracket && eb.bracket) corroborations.push("bracket tag");
-      if (notes.some((x) => x === `R1 link: #${a} ↔ #${b}` || x === `R1 link: #${b} ↔ #${a}`)) {
-        corroborations.push("R1 link");
-      }
-      if (notes.some((x) => x.startsWith(`R2 path-overlap: #${a} ↔ #${b} `))) {
-        corroborations.push("R2 path-overlap");
-      }
+      if (r1Pairs.has(pairKey(a, b))) corroborations.push("R1 link");
+      if (r2Pairs.has(pairKey(a, b))) corroborations.push("R2 path-overlap");
       if (corroborations.length === 0) {
-        notes.push(`R4 declined: #${a} ↔ #${b} (tag=[${ea.tag}]) — uncorroborated scope match`);
+        r4Declined.set(ea.tag, [...(r4Declined.get(ea.tag) ?? []), `#${a} ↔ #${b}`]);
         continue;
       }
       // Record the corroboration whenever the pair ends up in one component —
@@ -317,8 +326,22 @@ export function groupIssues(
         notes.push(
           `R4 subsystem: #${a} ↔ #${b} (tag=[${ea.tag}]) corroborated: ${corroborations.join(", ")}`,
         );
+      } else {
+        // Split-blocked: union() refused and alreadyGrouped() is false by
+        // construction for split issues, so the pair was evaluated, corroborated,
+        // and declined — noted explicitly so the log is complete rather than
+        // silently skipping the case.
+        notes.push(`R4 skipped: #${a} ↔ #${b} (tag=[${ea.tag}]) — corroborated but split-blocked`);
       }
     }
+  }
+  // One summary note per tag instead of O(N²) per-pair notes: for the modal
+  // scope, N bare-scope issues would otherwise dominate the plumb report with
+  // N² notes that all say the same thing.
+  for (const [tag, pairs] of r4Declined) {
+    notes.push(
+      `R4 declined: ${pairs.length} pair${pairs.length === 1 ? "" : "s"} (tag=[${tag}]) — uncorroborated scope match: ${pairs.join(", ")}`,
+    );
   }
 
   // Collect union-find components.

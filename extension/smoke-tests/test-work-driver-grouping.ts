@@ -271,9 +271,9 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
   );
   assert(
     r4Declined.notes.some((n) =>
-      n.startsWith("R4 declined: #1100 ↔ #1101 (tag=[work-driver])"),
+      n.startsWith("R4 declined:") && n.includes("tag=[work-driver]") && n.includes("#1100 ↔ #1101"),
     ),
-    "#501: declined note names the pair and the tag",
+    "#501: declined summary names the tag and each pair",
   );
 
   // #501 — the same scope is corroborated: two issues sharing the scope AND
@@ -291,6 +291,28 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
       n.startsWith("R4 subsystem: #1110 ↔ #1111 (tag=[spawn])") && n.includes("R2 path-overlap"),
     ),
     "#501: R4 note names the corroboration",
+  );
+
+  // #501 — corroborated but split-blocked: the pair was evaluated and
+  // corroborated, then declined by the R3 split marker. The decision log
+  // must say so explicitly rather than going silent. (Corroborated via the
+  // bracket tag, which unions on its own — a scope/R1/R2 corroboration
+  // cannot fire because split markers block those unions too, and the
+  // "corroborated" evidence is the pair would have unioned had it not
+  // been split-blocked.)
+  const r4SplitBlocked = groupIssues([1120, 1121], {
+    1120: "[spawn] first\n\nSplit: true",
+    1121: "[spawn] second",
+  });
+  assert(
+    Object.keys(r4SplitBlocked.groups).length === 2,
+    "#501: split-blocked corroborated pair stays two singletons",
+  );
+  assert(
+    r4SplitBlocked.notes.some((n) =>
+      n.startsWith("R4 skipped: #1120 ↔ #1121 (tag=[spawn])") && n.includes("split-blocked"),
+    ),
+    "#501: corroborated-but-split-blocked pair produces an R4 skipped note",
   );
 
   // Guardrail — MAX_ISSUES_PER_GROUP splits oversized components.

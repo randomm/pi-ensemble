@@ -123,7 +123,7 @@ assert(
     Object.keys(res.groups).length === 2,
     "#501: bare scope match does NOT union — two singleton groups",
   );
-  const declined = res.notes.find((x) => x.startsWith("R4 declined: #1 ↔ #2"));
+  const declined = res.notes.find((x) => x.startsWith("R4 declined:") && x.includes("#1 ↔ #2"));
   assert(
     declined !== undefined && declined.includes("tag=[work-driver]"),
     "#501: R4 declined note names the tag for an uncorroborated scope match",
@@ -230,8 +230,16 @@ assert(
   );
   const declined = res.notes.filter((x) => x.startsWith("R4 declined:"));
   assert(
-    declined.length === 3,
-    "#501: all three uncorroborated scope pairs in the real fixtures are declined, not joined",
+    declined.length === 1,
+    "#501: one summary note for the three uncorroborated scope pairs (not three per-pair notes)",
+  );
+  assert(
+    declined[0] !== undefined &&
+      declined[0].includes("tag=[work-driver]") &&
+      declined[0].includes("#287 ↔ #366") &&
+      declined[0].includes("#287 ↔ #368") &&
+      declined[0].includes("#366 ↔ #368"),
+    "#501: the summary names the tag and every declined pair",
   );
   assert(
     declined.every((x) => x.includes("tag=[work-driver]")),
@@ -248,7 +256,7 @@ assert(
     Object.keys(res.groups).length === 2,
     "#501: #366 ↔ #368 (shared work-driver scope, disjoint changes) → two groups",
   );
-  const declined = res.notes.find((x) => x.startsWith("R4 declined: #366 ↔ #368"));
+  const declined = res.notes.find((x) => x.startsWith("R4 declined:") && x.includes("#366 ↔ #368"));
   assert(
     declined !== undefined && declined.includes("tag=[work-driver]"),
     "#501: R4 declined note names the pair and the tag",
