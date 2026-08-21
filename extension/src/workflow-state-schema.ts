@@ -227,6 +227,27 @@ export interface PipelineState {
    */
   incompleteConsolidation?: Array<{ id: string; paths: string[] }>;
   /**
+   * #500 — repoRoot's ACTUAL state at the moment commit-pr completed, as
+   * recorded by `inspectCommitPrRoot` (work-driver-commit-inspect.ts). The
+   * mechanized path records a clean tree on the feature branch; the LLM ops
+   * fallback records whatever the hand consolidation left — which, on issue
+   * #481's live cycle, was two `UU` paths and 8 staged files on the feature
+   * branch. The `commit-pr-incomplete-consolidation` handoff renderers read
+   * this to state facts (branch, unmerged paths, staged count, the clearing
+   * command) instead of assuming the clean tree their recovery commands
+   * were written for. Absent when the inspection never ran (pre-#500 state
+   * files, a failed dispatch) or failed (see `commitPrRootError`).
+   */
+  commitPrRoot?: {
+    branch: string;
+    unmergedPaths: string[];
+    stagedCount: number;
+    totalEntries: number;
+    capturedAt: number;
+  };
+  /** #500 — the git error, when the post-fallback inspection could not run. */
+  commitPrRootError?: string;
+  /**
    * PR10 — multi-issue counterpart of `activeIssues`: issues filtered
    * out by `runExplore` because explore declared them complete or
    * ambiguous. Surfaced in handoff renderers + PR body so the operator

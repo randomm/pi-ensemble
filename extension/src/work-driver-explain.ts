@@ -135,7 +135,17 @@ export function explainCap(
       const missing = state.pipelineState.incompleteConsolidation ?? [];
       const which =
         missing.length > 0 ? missing.map((m) => m.id).join(", ") : "one or more workstreams";
-      return `commit-pr's post-dispatch consolidation gate detected that the committed diff is missing files from these workstreams: ${which}. Ops committed a partial slice — the developers' work in the missing worktrees is uncommitted on disk. Pre-PR14 this would have merged silently (v0.12.13 /work 577 closed an issue with 1 of 3 workstreams' changes shipped). The driver halted before merge; recover by collecting the missing diffs from \`.worktrees/issue-N-<id>\` and re-running, or take over the integration manually`;
+      // #500 — the recorded repoRoot state, when the inspection ran. The
+      // pre-#500 silence (nothing recorded, nothing rendered) is the defect:
+      // a conflicted root wedges every later cycle at integrate()'s
+      // dirty-preflight, and the handoff used to say nothing about why.
+      const root = state.pipelineState.commitPrRoot;
+      const rootBlurb = root
+        ? ` repoRoot is on \`${root.branch}\` with ${root.stagedCount} staged file(s)${root.unmergedPaths.length > 0 ? ` and ${root.unmergedPaths.length} UNMERGED path(s) (${root.unmergedPaths.join(", ")})` : ""} — ${root.unmergedPaths.length > 0 ? "resolve those conflicts (the handoff body names each path and the clearing command) before any `git apply` will run" : "the recovery commands below apply as-is"}.`
+        : state.pipelineState.commitPrRootError
+          ? ` The repoRoot state inspection failed (${state.pipelineState.commitPrRootError}) — run \`git status\` before the recovery commands.`
+          : "";
+      return `commit-pr's post-dispatch consolidation gate detected that the committed diff is missing files from these workstreams: ${which}. Ops committed a partial slice — the developers' work in the missing worktrees is uncommitted on disk. Pre-PR14 this would have merged silently (v0.12.13 /work 577 closed an issue with 1 of 3 workstreams' changes shipped). The driver halted before merge; recover by collecting the missing diffs from \`.worktrees/issue-N-<id>\` and re-running, or take over the integration manually.${rootBlurb}`;
     }
   }
   // PR17 — `verify-failed:<step>`: the driver-side outcome gate found

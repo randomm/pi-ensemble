@@ -49,6 +49,46 @@ export function branchSlug(issues: number[], title: string | undefined): string 
   return brief ? `feature/${stem}-${brief}` : `feature/${stem}`;
 }
 
+/**
+ * #507 — clip a PR title / commit subject to a code-unit budget at a word
+ * boundary, with a single U+2026 ellipsis.
+ *
+ * Why it exists: the mechanized commit-pr path derives the PR title from the
+ * issue title and previously applied a bare 72-char slice, which cut words
+ * mid-token ("Database::search" → "...per-row cosine loop in Dat"). The same
+ * string feeds BOTH `git commit -m` (via integrate()) and `gh pr create
+ * --title`, and under squash-merge the PR title becomes the commit subject on
+ * main — so a mid-word cut reaches CHANGELOG.md and release notes by two
+ * independent routes.
+ *
+ * The budget is 64, not 72: AGENTS.md §12 sets the subject convention at
+ * ≤ 72 characters, and GitHub's squash-merge appends ` (#<prNumber>)` to the
+ * title. The PR number is not known at title-construction time (the title is
+ * an input to `gh pr create`), so 8 code units are reserved. ` (#9999)` is
+ * exactly 8 units — zero margin at 4-digit PR numbers, and a 5-digit number
+ * overruns the convention by 1. Accepted as a documented limit, not fixed.
+ */
+export function clipTitle(raw: string, budget: number): string {
+  if (raw.length <= budget) return raw;
+  let cut = budget - 1; // reserve one code unit for the ellipsis
+  // Rule 4 — never leave a dangling high surrogate: if cut falls between the
+  // two halves of a surrogate pair, step back so the pair is cut whole.
+  const hi = raw.charCodeAt(cut - 1);
+  if (hi >= 0xd800 && hi <= 0xdbff) cut -= 1;
+  // Rule 5 — last whitespace at or before cut; prefix after trimEnd must be
+  // non-empty (a boundary at index 0 would otherwise yield a bare ellipsis).
+  for (let i = cut; i >= 0; i--) {
+    const ch = raw.charAt(i);
+    if (/\s/.test(ch) && raw.slice(0, i).trimEnd().length > 0) {
+      return `${raw.slice(0, i).trimEnd()}\u2026`;
+    }
+  }
+  // Rule 6 — no breakable boundary (a single unbreakable token over budget).
+  // The one case where a word is cut mid-way: the alternative is an empty
+  // title, which is worse. `cut` was already backed off the pair in rule 4.
+  return `${raw.slice(0, cut)}\u2026`;
+}
+
 /** Detect the mainline branch name, preferring origin's HEAD over a guess. */
 export async function detectMainline(execFn: ExecFn, repoRoot: string): Promise<string> {
   try {

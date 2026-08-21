@@ -16,6 +16,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { carriedAdversarialFindings, renderCarriedFindings } from "./adversarial-findings.ts";
 import { trace } from "./trace.ts";
+import { clipTitle } from "./work-driver-branch-mechanized.ts";
+import { type CommitPrRootState, inspectCommitPrRoot } from "./work-driver-commit-inspect.ts";
 import type { DriverContext } from "./work-driver-context.ts";
 import { cachedIssueTitle, integrate, withIntegrationLock } from "./work-driver-integrate.ts";
 import { renderAssumptions } from "./work-driver-intent.ts";
@@ -90,6 +92,7 @@ export async function mechanizedCommitPr(
 ): Promise<{ ok: true; state: WorkState } | { ok: false; reason: string; terminal?: boolean }> {
   const execFn = ctx.verifyExecFn ?? execp;
   const ps = state.pipelineState;
+  const inspect = inspectCommitPrRoot;
   const branchName = ps.branchName;
   if (!branchName || branchName.startsWith("(")) {
     return { ok: false, reason: "integration branch name was not captured at Step 3" };
@@ -105,7 +108,11 @@ export async function mechanizedCommitPr(
   }
   const startedAt = Date.now();
   try {
-    const title = (await cachedIssueTitle(state))?.slice(0, 72) ?? `implement issue #${ctx.issue}`;
+    const rawTitle = await cachedIssueTitle(state);
+    const title =
+      rawTitle !== null && rawTitle !== undefined
+        ? clipTitle(rawTitle, 64)
+        : `implement issue #${ctx.issue}`;
     const fixesLines = issues.map((n) => `Fixes #${n}`);
     const companionLines = (ps.droppedIssues ?? []).map(
       (d) =>
@@ -203,6 +210,7 @@ export async function mechanizedCommitPr(
     }
     // 5. Emit the same event shapes the dispatch path produces so the
     // shared downstream (parsePrNumber + both gates) runs unchanged.
+    const rootState = await inspect(execFn, ctx.repoRoot);
     let next = appendEvent(
       { ...state, pipelineState: { ...state.pipelineState, currentStep: "commit-pr" } },
       { kind: "step-started", step: "commit-pr", at: now },
@@ -218,6 +226,14 @@ export async function mechanizedCommitPr(
       at: Date.now(),
       summary: `Mechanized commit-pr: consolidated ${ids.length} worktree(s), committed, pushed ${branchName}, opened PR.\npr: ${prNumber}`,
     });
+    next = {
+      ...next,
+      pipelineState: {
+        ...next.pipelineState,
+        commitPrRoot: rootState.ok ? rootState.state : undefined,
+        commitPrRootError: rootState.ok ? undefined : rootState.error,
+      },
+    };
     return { ok: true, state: next };
   } catch (err) {
     const e = err as Error & { stderr?: string };
@@ -323,6 +339,23 @@ async function runCommitPrLocked(
   }
   const last = next.eventLog[next.eventLog.length - 1];
   if (last?.kind !== "dispatch-completed") return next;
+  // #500 — the ops fallback consolidates repoRoot BY HAND; unlike the
+  // mechanized path there is no guarantee what it leaves. Record the state
+  // it actually left (unmerged paths, staged count, current branch) so the
+  // handoff renders facts rather than the assumption of a clean tree. A
+  // read failure records the failure, not a guess: a silent empty state
+  // would make the handoff's "clean" claim exactly the defect this ticket
+  // exists to close.
+  const execFn = ctx.verifyExecFn ?? execp;
+  const rootState = await inspectCommitPrRoot(execFn, ctx.repoRoot);
+  next = {
+    ...next,
+    pipelineState: {
+      ...next.pipelineState,
+      commitPrRoot: rootState.ok ? rootState.state : undefined,
+      commitPrRootError: rootState.ok ? undefined : rootState.error,
+    },
+  };
   const prNumber = parsePrNumber(last.summary);
   if (prNumber !== undefined) {
     next = {

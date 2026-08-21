@@ -15,6 +15,53 @@ import { type ParkReason, parkAction } from "./work-driver-intent.ts";
 import type { WorkEvent, WorkState } from "./workflow-state.ts";
 
 /**
+ * #500 — the in-chat twin of `commitPrRootFacts` in
+ * work-driver-handoff-markdown.ts: what repoRoot actually holds when a
+ * commit-pr handoff fires, so the in-chat message and the GitHub body agree
+ * on the facts (branch, unmerged paths, staged count) and on the clearing
+ * command. Rendered only for the `commit-pr-incomplete-consolidation` cap
+ * — that is the cap whose recovery commands historically assumed a clean
+ * tree that did not exist.
+ */
+function commitPrRootLines(state: WorkState, repoRoot: string): string[] {
+  const ps = state.pipelineState;
+  const root = ps.commitPrRoot;
+  const err = ps.commitPrRootError;
+  if (!root && !err) return [];
+  const lines: string[] = ["repoRoot state at commit-pr handoff:"];
+  if (err) {
+    lines.push(
+      `  inspection failed: ${err} — run \`git -C ${repoRoot} status\` before anything else.`,
+    );
+  }
+  if (root) {
+    lines.push(`  branch: ${root.branch}`);
+    lines.push(
+      root.unmergedPaths.length > 0
+        ? `  unmerged paths (${root.unmergedPaths.length}): ${root.unmergedPaths.join(", ")}`
+        : "  unmerged paths: none",
+    );
+    lines.push(`  staged-but-uncommitted: ${root.stagedCount} of ${root.totalEntries} entries`);
+    if (root.unmergedPaths.length > 0) {
+      lines.push(
+        "  resolve or abort those conflicts first — `git apply` in the commands",
+        "  below refuses a tree with unmerged paths. Resolve by hand, then:",
+        `     git -C ${repoRoot} add <resolved-path>`,
+        "  (or discard the hand consolidation — DESTRUCTIVE):",
+        `     git -C ${repoRoot} reset --hard ${root.branch}`,
+      );
+    } else if (root.stagedCount > 0) {
+      lines.push(
+        `  the index holds staged work; to discard it first (DESTRUCTIVE): git -C ${repoRoot} reset --hard ${root.branch}`,
+      );
+    } else {
+      lines.push("  tree is clean — the commands below apply as-is.");
+    }
+  }
+  return lines;
+}
+
+/**
  * PR5 — operator-facing in-chat handoff message. Multi-line; produced
  * by `runWorkDriver` to replace the PR4-and-earlier terse ~150-char
  * pointer-to-JSON. Sections:
@@ -324,6 +371,8 @@ export function renderHandoffUserMessage(
     );
   } else if (cap === "commit-pr-incomplete-consolidation") {
     const missing = ps.incompleteConsolidation ?? [];
+    const root = ps.commitPrRoot;
+    const conflicted = (root?.unmergedPaths ?? []).length > 0;
     lines.push(
       "",
       "Missing workstreams from the committed diff:",
@@ -332,11 +381,23 @@ export function renderHandoffUserMessage(
           `  ${m.id} — paths not in diff: ${m.paths.slice(0, 3).join(", ")}${m.paths.length > 3 ? "..." : ""}`,
       ),
       "",
+      ...commitPrRootLines(state, repoRoot),
+      "",
       "  # 1. Inspect each missing workstream's worktree:",
       ...missing.map(
         (m) => `     git -C ${repoRoot}/.worktrees/issue-${issue}-${m.id} status --porcelain`,
       ),
       "",
+      ...(conflicted
+        ? [
+            "  # 1b. repoRoot has unmerged paths — resolve or abort them first",
+            "  #     or step 2's `git apply` will refuse to run:",
+            `     git -C ${repoRoot} status`,
+            "     # resolve the conflicts by hand, then: git add <resolved-path>",
+            `     # (or discard the hand consolidation — DESTRUCTIVE): git -C ${repoRoot} reset --hard ${root?.branch ?? "HEAD"}`,
+            "",
+          ]
+        : []),
       "  # 2. Apply each missing diff to the integration branch:",
       ...missing.map(
         (m) =>

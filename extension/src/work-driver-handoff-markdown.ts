@@ -18,6 +18,62 @@ import { type ParkReason, parkAction } from "./work-driver-intent.ts";
 import type { WorkEvent, WorkState } from "./workflow-state.ts";
 
 /**
+ * #500 — what repoRoot actually holds at commit-pr handoff, and the exact
+ * command to clear it. Facts from `inspectCommitPrRoot`'s record, not the
+ * clean-tree assumption the recovery commands below were written for. The
+ * clearing command is chosen per state: a merge in progress has no unmerged
+ * paths and is cleared with `reset --merge`; a conflict or a dirty index is
+ * cleared with `reset --hard <branch>` — which is destructive of uncommitted
+ * work, so the handoff says that out loud and offers the state-file/branch
+ * inspection first.
+ */
+function commitPrRootFacts(state: WorkState): string[] {
+  const root = state.pipelineState.commitPrRoot;
+  const err = state.pipelineState.commitPrRootError;
+  if (!root && !err) return [];
+  const lines: string[] = ["### repoRoot state at commit-pr handoff", ""];
+  if (err) {
+    lines.push(
+      `- inspection failed: \`${err}\` — the state below is unknown; run \`git status\` first.`,
+    );
+  }
+  if (root) {
+    lines.push(`- branch: \`${root.branch}\``);
+    if (root.unmergedPaths.length > 0) {
+      lines.push(
+        `- unmerged paths (${root.unmergedPaths.length}):`,
+        ...root.unmergedPaths.map((p) => `    - \`${p}\``),
+      );
+    } else {
+      lines.push("- unmerged paths: none");
+    }
+    lines.push(
+      `- staged-but-uncommitted: ${root.stagedCount} of ${root.totalEntries} porcelain entries`,
+    );
+    if (root.unmergedPaths.length > 0) {
+      lines.push(
+        "",
+        "The consolidation below will FAIL until these are resolved — `git apply` refuses a tree with unmerged paths. Resolve the conflicts by hand (or abort them), then re-apply:",
+        "",
+        "git checkout --theirs -- <path>   # per conflicting path, once decided",
+        "git add <path>",
+      );
+    } else if (root.stagedCount > 0) {
+      lines.push(
+        "",
+        `The index holds ${root.stagedCount} staged file(s) on \`${root.branch}\`. The commands below apply on top of it; if that is not what you want, discard it first (DESTRUCTIVE — the uncommitted work is lost):`,
+        "",
+        `git reset --hard ${root.branch}`,
+      );
+    } else {
+      lines.push("", "The tree is clean — the recovery commands below apply as-is.");
+    }
+  }
+  lines.push("");
+  return lines;
+}
+
+/**
  * Build the cap-hit handoff markdown body.
  * Walks state.eventLog for: which cap fired (cap-hit event's `cap` field),
  * how many lens-review rounds ran, last lens-issues-found findings (for
@@ -86,6 +142,7 @@ export function renderHandoffMarkdown(state: WorkState): string {
     "",
     explain,
     "",
+    ...commitPrRootFacts(state),
     ...adversarialOutcomeSection(state),
     ...plumbReportSection(state),
     "### What was attempted",
@@ -317,10 +374,25 @@ export function renderHandoffMarkdown(state: WorkState): string {
     );
   } else if (capForExplain === "commit-pr-incomplete-consolidation") {
     const missing = ps.incompleteConsolidation ?? [];
+    const root = ps.commitPrRoot;
+    const conflicted = (root?.unmergedPaths ?? []).length > 0;
     lines.push(
       "# 1. Inspect each missing workstream's worktree — the developer's work is still there uncommitted:",
       ...missing.map((m) => `git -C .worktrees/issue-${issue}-${m.id} status --porcelain`),
       "",
+      ...(conflicted
+        ? [
+            "# 1b. repoRoot has unmerged paths — resolve or abort them first,",
+            "#     otherwise `git apply` in step 2 will refuse to run:",
+            "git status",
+            "# resolve the conflicts by hand, then:",
+            "git add <resolved-path>",
+            "# (or discard the hand consolidation entirely — DESTRUCTIVE,",
+            "#  the uncommitted staged work is lost):",
+            `git reset --hard ${root?.branch ?? "HEAD"}`,
+            "",
+          ]
+        : []),
       "# 2. Apply the missing diffs to the integration branch. Stage inside the",
       "#    worktree FIRST — `git diff HEAD` alone silently omits untracked new",
       "#    files — and use --3way, which resolves two workstreams touching",
