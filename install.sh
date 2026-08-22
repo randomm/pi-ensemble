@@ -27,6 +27,7 @@ done
 
 ENSEMBLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PI_AGENT_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"
+EXT_DIR="$PI_AGENT_DIR/extensions"
 
 echo "==> pi-ensemble install"
 echo "    ensemble dir: $ENSEMBLE_DIR"
@@ -121,10 +122,25 @@ fi
 
 # ---- 5. Register the extension with Pi ---------------------------------------
 
-mkdir -p "$PI_AGENT_DIR/extensions"
-ext_target="$PI_AGENT_DIR/extensions/pi-ensemble"
+mkdir -p "$EXT_DIR"
+ext_target="$EXT_DIR/pi-ensemble"
 ln -sfn "$ENSEMBLE_DIR/extension" "$ext_target"
 echo "==> Registered extension at $ext_target"
+
+# pi core has no native MCP; pi-mcp-adapter is the bridge that loads MCP
+# servers (see README → Using MCP servers). Without it NO MCP server loads —
+# the codebase-memory-mcp registration in the next step is read by nothing —
+# so warn (never fail) when the bridge is absent from the extensions dir,
+# consistent with the warn-only preflight posture above. We test presence,
+# not installation history: a user who already installed it is not warned.
+if [ ! -e "$EXT_DIR/pi-mcp-adapter" ]; then
+  echo ""
+  echo "!! pi-mcp-adapter not found in $EXT_DIR — Pi core has no native MCP,"
+  echo "   so without the bridge NO MCP server loads (including codebase_memory)."
+  echo "   Install it with: pi install npm:pi-mcp-adapter   (README → Prerequisites)"
+  echo "   and re-run ./install.sh."
+  echo ""
+fi
 
 # ---- 6. Register codebase-memory-mcp with pi-mcp-adapter ---------------------
 #

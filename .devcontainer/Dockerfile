@@ -152,7 +152,28 @@ RUN cd ${PI_ENSEMBLE_DIR}/extension && bun install --frozen-lockfile
 
 # pi-mcp-adapter must be installed as the running user — pi's `pi install`
 # writes under ~/.pi/agent/npm/. This is the user-level install path.
-RUN pi install npm:pi-mcp-adapter || true
+#
+# Unlike the other `|| true` soft-fails in this image (registry/network
+# hiccups for OPTIONAL tools), the bridge is load-bearing: Pi core has no
+# native MCP, so without pi-mcp-adapter NO MCP server loads in the sandbox
+# — including the codebase_memory entry the install step below writes into
+# ~/.config/mcp/mcp.json. The image is published to GHCR and is the default
+# install path for sandbox users, so a silently-broken image would ship to
+# everyone. `pi install` still tolerates a transient registry hiccup
+# (`|| true`), but the post-install check fails the build when the bridge
+# is genuinely absent. `pi install npm:<pkg>` installs into the flat npm
+# project under ~/.pi/agent/npm/node_modules/ (NOT the extensions/ dir, which
+# is only used for git/local installs); Pi's own package manager then loads
+# it at runtime via the `pi.extensions` manifest in the package's package.json.
+RUN pi install npm:pi-mcp-adapter || true \
+    && test -d "$HOME/.pi/agent/npm/node_modules/pi-mcp-adapter" || { \
+         echo "ERROR: pi-mcp-adapter is missing from $HOME/.pi/agent/npm/node_modules/" \
+              "after 'pi install npm:pi-mcp-adapter'." >&2; \
+         echo "ERROR: The MCP bridge is required for any MCP server to load in" \
+              "the sandbox (Pi core has no native MCP). A transient registry" >&2; \
+         echo "ERROR: hiccup is the likely cause — retry the image build." >&2; \
+         exit 1; \
+       }
 
 # Build per-role prompts + symlink extension + skills + write the codebase_memory
 # MCP entry into ~/.config/mcp/mcp.json. install.sh is idempotent — safe to

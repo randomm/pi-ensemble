@@ -64,6 +64,7 @@ Required CLIs on `$PATH`. The role prompts assume all of these are installed —
 | [`oo`](https://github.com/randomm/oo) | Context-efficient wrapper for chatty CLIs (git, gh). |
 | `jq` | Used by `build.sh` to assemble the capability matrix into the PM prompt. |
 | [`parallel-cli`](https://docs.parallel.ai/cli/overview) | Web search / fetch / deep research used by the `explore` role. `/research` and cross-web investigation depend on it. |
+| [`pi-mcp-adapter`](https://github.com/nicobailon/pi-mcp-adapter) | MCP bridge — Pi core has no native Model Context Protocol support, so **without the bridge no MCP server loads** (not just `codebase_memory`). Any other MCP server you add later needs it too. Sandbox users are unaffected: the image bakes the bridge in. |
 | [`ctx7`](https://context7.com) | Current third-party library documentation. Specialists run `ctx7 library <name>` → `ctx7 docs <id> <query>` to verify API shape. Free tier works without login. |
 
 ### Supply-chain setup (recommended one-time before installing)
@@ -102,6 +103,9 @@ brew install git gh jq                                                # macOS
 cargo install vipune
 cargo install double-o
 
+# pi-mcp-adapter (REQUIRED — Pi core has no native MCP; without the bridge no MCP server loads)
+pi install npm:pi-mcp-adapter
+
 # codebase-memory-mcp (REQUIRED — pi-ensemble's code-search doctrine depends on it)
 curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
 # Installs the C binary at ~/.local/bin/codebase-memory-mcp (~250 MB; ships
@@ -120,7 +124,7 @@ npm install -g --ignore-scripts ctx7
 After install:
 
 - `vipune version` once to initialise `~/.vipune/`.
-- Run pi-ensemble's `./install.sh` from this repo. That script detects `codebase-memory-mcp` on your `PATH` (or in `~/.local/bin/`) and writes a `codebase_memory` entry to `~/.config/mcp/mcp.json` for pi-mcp-adapter to pick up. **You should not have to hand-edit any MCP config.** Re-running `./install.sh` is safe (idempotent merge — other MCP servers you configured by hand are preserved). Verify after `pi` restarts with `/mcp` — should list `codebase_memory` with 7 direct tools (`search_code`, `search_graph`, `trace_path`, `detect_changes`, `get_code_snippet`, `get_architecture`, `query_graph`).
+- Run pi-ensemble's `./install.sh` from this repo. That script detects `codebase-memory-mcp` on your `PATH` (or in `~/.local/bin/`) and writes a `codebase_memory` entry to `~/.config/mcp/mcp.json` for pi-mcp-adapter to pick up (the bridge installed in the [Install commands](#install-commands) block; full walkthrough in [Using MCP servers](#using-mcp-servers-per-host-or-per-project)). **You should not have to hand-edit any MCP config.** Re-running `./install.sh` is safe (idempotent merge — other MCP servers you configured by hand are preserved). Verify after `pi` restarts with `/mcp` — should list `codebase_memory` with 7 direct tools (`search_code`, `search_graph`, `trace_path`, `detect_changes`, `get_code_snippet`, `get_architecture`, `query_graph`).
 - One-shot index every project the first time pi opens there:
   ```
   mcp({tool: "codebase_memory_index_repository", args: '{"repo_path": "."}'})
@@ -347,7 +351,9 @@ Pi has no built-in Model Context Protocol support — MCP is provided by a bridg
 pi install npm:pi-mcp-adapter
 ```
 
-`pi install` drops the bridge into `~/.pi/agent/extensions/`, where pi-ensemble's auto-forward picks it up for subagents automatically. Bridges installed outside the canonical location can be added via `PI_ENSEMBLE_USER_EXTENSION=<abs-path or npm:ref>`.
+(Already done as part of the [Prerequisites install commands](#install-commands)? Skip to Step 2.)
+
+`pi install` drops the bridge into `~/.pi/agent/extensions/`, where pi-ensemble's auto-forward picks it up for subagents automatically. Bridges installed outside the canonical location can be added via `PI_ENSEMBLE_USER_EXTENSION=<abs-path or npm:ref>`. This step covers the bridge install; the bridge itself is a generic prerequisite — any MCP server you add later (Step 2 onward) depends on it.
 
 ### Step 2 — Define MCP servers (bridge config, 4 tiers)
 
