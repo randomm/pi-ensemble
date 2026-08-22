@@ -130,13 +130,18 @@ echo "==> Registered extension at $ext_target"
 # pi core has no native MCP; pi-mcp-adapter is the bridge that loads MCP
 # servers (see README → Using MCP servers). Without it NO MCP server loads —
 # the codebase-memory-mcp registration in the next step is read by nothing —
-# so warn (never fail) when the bridge is absent from the extensions dir,
-# consistent with the warn-only preflight posture above. We test presence,
-# not installation history: a user who already installed it is not warned.
-if [ ! -e "$EXT_DIR/pi-mcp-adapter" ]; then
+# so warn (never fail) when the bridge is absent, consistent with the
+# warn-only preflight posture above. `pi install npm:pi-mcp-adapter`
+# installs into $PI_AGENT_DIR/npm/node_modules/ (the npm: layout), while
+# git/local installs land in $EXT_DIR — test both so a correctly-installed
+# user is not warned and either install shape is recognised.
+if [ ! -e "$PI_AGENT_DIR/npm/node_modules/pi-mcp-adapter" ] \
+   && [ ! -e "$EXT_DIR/pi-mcp-adapter" ]; then
   echo ""
-  echo "!! pi-mcp-adapter not found in $EXT_DIR — Pi core has no native MCP,"
-  echo "   so without the bridge NO MCP server loads (including codebase_memory)."
+  echo "!! pi-mcp-adapter not found in $PI_AGENT_DIR/npm/node_modules/"
+  echo "   (pi install npm: layout) or $EXT_DIR (git/local layout)"
+  echo "   — Pi core has no native MCP, so without the bridge"
+  echo "   NO MCP server loads (including codebase_memory)."
   echo "   Install it with: pi install npm:pi-mcp-adapter   (README → Prerequisites)"
   echo "   and re-run ./install.sh."
   echo ""

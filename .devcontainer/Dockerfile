@@ -165,13 +165,19 @@ RUN cd ${PI_ENSEMBLE_DIR}/extension && bun install --frozen-lockfile
 # project under ~/.pi/agent/npm/node_modules/ (NOT the extensions/ dir, which
 # is only used for git/local installs); Pi's own package manager then loads
 # it at runtime via the `pi.extensions` manifest in the package's package.json.
-RUN pi install npm:pi-mcp-adapter || true \
+# Verified against pi 0.79.1 (the pin this image installs, see the pi install
+# line above): `pi install npm:pi-mcp-adapter` + the node_modules layout below.
+# Bumping pi is a deliberate update per AGENTS.md § 5 — re-verify this check
+# when the pin changes.
+RUN pi install npm:pi-mcp-adapter 2>&1 || true \
     && test -d "$HOME/.pi/agent/npm/node_modules/pi-mcp-adapter" || { \
          echo "ERROR: pi-mcp-adapter is missing from $HOME/.pi/agent/npm/node_modules/" \
               "after 'pi install npm:pi-mcp-adapter'." >&2; \
          echo "ERROR: The MCP bridge is required for any MCP server to load in" \
-              "the sandbox (Pi core has no native MCP). A transient registry" >&2; \
-         echo "ERROR: hiccup is the likely cause — retry the image build." >&2; \
+              "the sandbox (Pi core has no native MCP)." >&2; \
+         echo "ERROR: See the 'pi install' output above — if it was a transient" >&2; \
+         echo "ERROR: network/registry error, retry the image build; otherwise" >&2; \
+         echo "ERROR: file an issue against this repo (or the pi version pin)." >&2; \
          exit 1; \
        }
 

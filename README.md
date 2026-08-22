@@ -5,7 +5,7 @@
 
 A multi-specialist orchestrator extension for [Pi](https://pi.dev) — the terminal AI coding agent. Spawns role-specialised child Pi processes in parallel, isolates them in git worktrees, runs a mandatory adversarial gate before commit, and gates merge on a six-pass code review (security, error handling, type safety, performance, architecture, simplicity).
 
-> **Status: alpha.** The interfaces work and the workflow runs end-to-end, but the API will change before `1.0`. Use on disposable repos until you've kicked the tires. Tested against pi `0.75.3`.
+> **Status: alpha.** The interfaces work and the workflow runs end-to-end, but the API will change before `1.0`. Use on disposable repos until you've kicked the tires. Tested against pi `0.75.3` (the dev-deps pin; the sandbox image ships `0.79.1` — see [Pi compatibility](#pi-compatibility)).
 
 ## What you get
 
@@ -353,7 +353,7 @@ pi install npm:pi-mcp-adapter
 
 (Already done as part of the [Prerequisites install commands](#install-commands)? Skip to Step 2.)
 
-`pi install` drops the bridge into `~/.pi/agent/extensions/`, where pi-ensemble's auto-forward picks it up for subagents automatically. Bridges installed outside the canonical location can be added via `PI_ENSEMBLE_USER_EXTENSION=<abs-path or npm:ref>`. This step covers the bridge install; the bridge itself is a generic prerequisite — any MCP server you add later (Step 2 onward) depends on it.
+`pi install npm:<pkg>` installs into the flat npm project under `~/.pi/agent/npm/node_modules/` (NOT the `extensions/` dir, which is only used for git/local installs) — verified against pi `0.79.1`, so treat a pi version bump as a deliberate re-verification. Pi's own package manager loads it at runtime via the `pi.extensions` manifest in the package's package.json. Bridges installed outside the canonical location can be added via `PI_ENSEMBLE_USER_EXTENSION=<abs-path or npm:ref>`. This step covers the bridge install; the bridge itself is a generic prerequisite — any MCP server you add later (Step 2 onward) depends on it.
 
 ### Step 2 — Define MCP servers (bridge config, 4 tiers)
 
