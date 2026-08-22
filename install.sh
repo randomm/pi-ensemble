@@ -63,7 +63,7 @@ if [ "$(classify_os "$UNAME_S")" = "unsupported" ]; then
   echo "   path — none of which work on native Windows." >&2
   echo "   On Windows, use WSL2 (expected to work, untested); it needs Docker" >&2
   echo "   (Docker Desktop with WSL2 integration, or an equivalent daemon) for" >&2
-  echo "   sandbox mode. See README → Platform support." >&2
+  echo "   sandbox mode. See docs/troubleshooting.md → Platform support." >&2
   exit 1
 fi
 
@@ -136,6 +136,7 @@ fi
 
 # ---- 3. Symlink skills --------------------------------------------------------
 
+# first side effect: everything before this line only prints and checks
 mkdir -p "$PI_AGENT_DIR/skills"
 echo "==> Symlinking skills → $PI_AGENT_DIR/skills/"
 for d in "$ENSEMBLE_DIR/skill"/*; do

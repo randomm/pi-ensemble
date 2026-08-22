@@ -12,12 +12,12 @@ Symptoms → causes → fixes. Most issues here come from running an older sandb
 
 **Fix:**
 
-- **Use WSL2.** It is **expected to work but untested** — do not treat it as supported until someone has verified it end to end. The one real condition: **sandbox mode needs a Docker daemon reachable from WSL2** (Docker Desktop with WSL2 integration enabled, or an equivalent Docker Engine) to pull the published image. Without a Docker daemon you can still run **host mode** (`pi`) inside WSL2, which does not need the sandbox image.
+- **Use WSL2.** WSL2 (Windows Subsystem for Linux 2) is **expected to work but untested** — do not treat it as supported until someone has verified it end to end. The one real condition: **sandbox mode needs a Docker daemon reachable from WSL2** (Docker Desktop with WSL2 integration enabled, or an equivalent Docker Engine) to pull the published image. Without a Docker daemon you can still run **host mode** (`pi`) inside WSL2, which does not need the sandbox image.
 - **Do not attempt a native-Windows install.** There is no supported path.
 
 **Verification (the "expected to work" bar).** WSL2 is upgraded from "expected to work" to "supported" only once someone records a clean run: `./install.sh` completes, one sandbox image pull succeeds, one subagent dispatch runs, and `/mcp` shows the `codebase_memory` server. Record the configuration — repo location (`/home/...` vs `/mnt/c/...`, which interacts with the absolute-path mount premise) and the Docker variant.
 
-**Note on the prerequisites:** several tools have no native-Windows install path, which is part of why the platform is unsupported — `codebase-memory-mcp` installs by curl-to-bash, `parallel-cli` by a Homebrew tap, and `vipune` / `oo` by cargo from source. Under WSL2 all of these install normally because it is a Linux kernel.
+**Note on the prerequisites:** several tools have no native-Windows install path, which is part of why the platform is unsupported — `codebase-memory-mcp` installs by curl-to-bash, `parallel-cli` by a Homebrew tap, and `vipune` / `oo` by cargo from source. Under WSL2 (a Linux kernel running inside a Windows VM) all of these install normally.
 
 ### `docker` / the sandbox image is unreachable from inside WSL2
 
