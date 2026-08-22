@@ -91,6 +91,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 # -----------------------------------------------------------------------------
 
 # Pi (per https://pi.dev/docs/latest/quickstart)
+# The unpinned install resolves to whatever is latest at build time — the
+# version claimed in the pi-mcp-adapter comment below and in README ("Status"
+# line + Pi compatibility section) is a hand-maintained claim; re-check all
+# three when the built image's pi changes.
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 # ctx7 — current library docs
@@ -165,14 +169,18 @@ RUN cd ${PI_ENSEMBLE_DIR}/extension && bun install --frozen-lockfile
 # project under ~/.pi/agent/npm/node_modules/ (NOT the extensions/ dir, which
 # is only used for git/local installs); Pi's own package manager then loads
 # it at runtime via the `pi.extensions` manifest in the package's package.json.
-# Verified against pi 0.79.1 (the pin this image installs, see the pi install
-# line above): `pi install npm:pi-mcp-adapter` + the node_modules layout below.
-# Bumping pi is a deliberate update per AGENTS.md § 5 — re-verify this check
-# when the pin changes.
-RUN pi install npm:pi-mcp-adapter 2>&1 || true \
+# Verified against pi 0.79.1 (see the version note at the pi install line
+# above; also asserted in README → "Status" + Pi compatibility): `pi install
+# npm:pi-mcp-adapter` + the node_modules layout below. Bumping pi is a
+# deliberate update per AGENTS.md § 5 — re-verify this check when the pin
+# changes. (This path literal is the build-side mirror of install.sh §5's
+# bridge check — keep them in sync.)
+RUN pi install npm:pi-mcp-adapter || true \
     && test -d "$HOME/.pi/agent/npm/node_modules/pi-mcp-adapter" || { \
-         echo "ERROR: pi-mcp-adapter is missing from $HOME/.pi/agent/npm/node_modules/" \
-              "after 'pi install npm:pi-mcp-adapter'." >&2; \
+         echo "ERROR: pi-mcp-adapter is missing from the npm layout this image" \
+              "uses (we explicitly run 'pi install npm:pi-mcp-adapter'; the" \
+              "git/local extensions/ layout install.sh also accepts is not a" \
+              "valid install shape here)." >&2; \
          echo "ERROR: The MCP bridge is required for any MCP server to load in" \
               "the sandbox (Pi core has no native MCP)." >&2; \
          echo "ERROR: See the 'pi install' output above — if it was a transient" >&2; \

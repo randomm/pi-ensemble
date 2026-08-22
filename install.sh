@@ -127,14 +127,14 @@ ext_target="$EXT_DIR/pi-ensemble"
 ln -sfn "$ENSEMBLE_DIR/extension" "$ext_target"
 echo "==> Registered extension at $ext_target"
 
-# pi core has no native MCP; pi-mcp-adapter is the bridge that loads MCP
-# servers (see README → Using MCP servers). Without it NO MCP server loads —
-# the codebase-memory-mcp registration in the next step is read by nothing —
-# so warn (never fail) when the bridge is absent, consistent with the
-# warn-only preflight posture above. `pi install npm:pi-mcp-adapter`
-# installs into $PI_AGENT_DIR/npm/node_modules/ (the npm: layout), while
-# git/local installs land in $EXT_DIR — test both so a correctly-installed
-# user is not warned and either install shape is recognised.
+# Bridge check — the load-bearing rationale (Pi core has no native MCP, so
+# without pi-mcp-adapter NO MCP server loads) lives in the Dockerfile
+# post-install check; this site differs in two site-specific ways: it WARNS
+# rather than fails (install.sh is warn-only, never a hard gate), and it
+# tests BOTH install layouts — `pi install npm:` lands in
+# $PI_AGENT_DIR/npm/node_modules/, git/local installs in $EXT_DIR — so a
+# correctly-installed user is not warned. (Mirror of the Dockerfile build
+# gate — keep the two in sync.)
 if [ ! -e "$PI_AGENT_DIR/npm/node_modules/pi-mcp-adapter" ] \
    && [ ! -e "$EXT_DIR/pi-mcp-adapter" ]; then
   echo ""
@@ -310,8 +310,7 @@ fi
 # `timeoutMs` of exactly 180000 (#236), and `maxRetryDelayMs` of exactly 10000
 # (the value documented above). Any other value is preserved.
 
-PI_AGENT_DIR_INSTALL="${PI_AGENT_DIR:-$HOME/.pi/agent}"
-PI_SETTINGS="$PI_AGENT_DIR_INSTALL/settings.json"
+PI_SETTINGS="$PI_AGENT_DIR/settings.json"
 RETRY_TIMEOUT_MS=600000
 RETRY_MAX_DELAY_MS=60000   # Pi's own default; see the note above before lowering
 RETRY_BAD_MAX_DELAY_MS=10000   # our own past footprint, repaired on sight
