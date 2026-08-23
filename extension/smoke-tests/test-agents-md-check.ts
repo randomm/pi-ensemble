@@ -75,6 +75,51 @@ function mkFs(): AgentsMdFs {
   );
 }
 
+// A gate command hand-added to the commands section (not quality-gates) is
+// still visible to check: its first token must be on PATH. This is the
+// coverage fix — a commands-section-only gate must not be silently skipped.
+{
+  const cmds =
+    "# T\n" +
+    renderSection("quality-gates", "- **g** — `bun run test`") +
+    renderSection("commands", "| kind | command |\n| --- | --- |\n| gate | `definitely-not-a-real-cmd-xyz` |") +
+    renderSection(
+      "decision-ledger",
+      "| key | value | provenance |\n| --- | --- | --- |\n| k | v | [auto:2026-01-01] |",
+    );
+  writeFileSync(path.join(tmp, "cmds.md"), cmds);
+  const r = checkAgent(tmp, path.join(tmp, "cmds.md"), {}, mkFs());
+  assert(r.check?.code === EXIT_FINDINGS, `commands-section gate → exit ${EXIT_FINDINGS} (got ${r.check?.code})`);
+  assert(
+    r.check?.findings.some(
+      (f) => f.kind === "missing-command" && f.message.includes("definitely-not-a-real-cmd-xyz"),
+    ),
+    "...with the missing-command finding for the commands-section line",
+  );
+}
+
+// A gate line with shell metacharacters is reported (invalid-shell), never
+// parsed or executed → findings → 1.
+{
+  const unsafe =
+    "# T\n" +
+    renderSection("quality-gates", "- **evil** — `echo a; echo b` | `true`\n- **safe** — `true`") +
+    renderSection(
+      "decision-ledger",
+      "| key | value | provenance |\n| --- | --- | --- |\n| k | v | [auto:2026-01-01] |",
+    );
+  writeFileSync(path.join(tmp, "unsafe.md"), unsafe);
+  const r = checkAgent(tmp, path.join(tmp, "unsafe.md"), {}, mkFs());
+  assert(
+    r.check?.code === EXIT_FINDINGS,
+    `metacharacter gate → exit ${EXIT_FINDINGS} (got ${r.check?.code})`,
+  );
+  assert(
+    r.check?.findings.some((f) => f.kind === "invalid-shell" && f.message.includes("echo a; echo b")),
+    "...with the invalid-shell finding naming the metacharacter line",
+  );
+}
+
 // A file whose markers cannot be parsed → refuse → 2.
 {
   const corrupt =

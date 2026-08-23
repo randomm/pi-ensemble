@@ -165,12 +165,76 @@ const input =
   assert(threw, "splice refuses to act on a corrupt file (throws MarkerError)");
 }
 
+// ------------------------------------------------------------ tripwire shapes
+//
+// The corruption tripwire's invariant: a marker-shaped token that neither
+// BEGIN_RE nor END_RE recognised must be refused, never silently accepted.
+// A mis-versioned END (trailing `v<N>`) is the load-bearing shape — if it
+// were accepted, a drift of this kind would be spliced around verbatim and
+// the corruption would be permanently invisible.
+
+{
+  const v3begin = "<!-- pi-ensemble:agents-md:begin x v3 -->\nq\n<!-- pi-ensemble:agents-md:end x v2 -->\n";
+  const err = throwsCorrupt(v3begin, "strict-captured begin v3 + strict-missed end v2 → MarkerError");
+  assert(
+    err !== undefined && err.includes("mis-versioned"),
+    "...and the diagnostic names the mis-versioned marker (not an orphan pairing)",
+  );
+
+  // The other strict-missed END shapes, so the invariant holds for the class,
+  // not just the one probe that motivated it.
+  throwsCorrupt("<!-- pi-ensemble:agents-md:begin x v99 -->\nq\n<!-- pi-ensemble:agents-md:end x v2 -->\n",
+    "begin v99 + end v2 → MarkerError");
+  throwsCorrupt("<!-- pi-ensemble:agents-md:begin x v1 -->\nq\n<!-- pi-ensemble:agents-md:end x v2 -->\n",
+    "begin v1 + end v2 → MarkerError");
+  throwsCorrupt("<!-- pi-ensemble:agents-md:begin x v2 -->\nq\n<!-- pi-ensemble:agents-md:end x v2 -->\n",
+    "begin v2 + end v2 (both strict-missed on the end) → MarkerError");
+  throwsCorrupt("<!-- pi-ensemble:agents-md:end a v2 -->\n", "orphan END with a version → MarkerError");
+  throwsCorrupt("<!-- pi-ensemble:agents-md:begin a v1 -->\nq\n<!-- pi-ensemble:agents-md:end b v3 -->\n",
+    "mismatched ids + versioned END → MarkerError");
+  throwsCorrupt("<!-- pi-ensemble:agents-md:begin x v1 -->\nq\n<!-- pi-ensemble:agents-md:end x\nv9 -->\n",
+    "END split across two physical lines → MarkerError");
+
+  // The shapes that used to vanish silently before the tripwire existed.
+  throwsCorrupt("<!-- pi-ensemble:agents-md:begin x -->\nq\n<!-- pi-ensemble:agents-md:end x -->\n",
+    "begin missing its version → MarkerError");
+  throwsCorrupt("<!-- pi-ensemble:agents-md:begin x v1 -->\nq\n<!-- pi-ensemble:agents-md:end x junk -->\n",
+    "end with trailing junk → MarkerError");
+  throwsCorrupt("<!-- pi-ensemble:agents-md:begin a.b v1 -->\nq\n<!-- pi-ensemble:agents-md:end a.b -->\n",
+    "id with a dot → MarkerError");
+  throwsCorrupt("<!-- pi-ensemble:agents-md:begin QUALITY v1 -->\nq\n<!-- pi-ensemble:agents-md:end QUALITY -->\n",
+    "uppercase id → MarkerError");
+
+  // Valid shapes must keep parsing — the tripwire must not over-catch.
+  const valid = "<!-- pi-ensemble:agents-md:begin a v1 -->\nq\n<!-- pi-ensemble:agents-md:end a -->\n"
+    + "<!-- pi-ensemble:agents-md:begin b v1 -->\nq\n<!-- pi-ensemble:agents-md:end b -->\n";
+  const ids = presentIds(valid);
+  assert(ids.join(",") === "a,b", "valid multi-pair file still parses cleanly");
+}
+
 function throws(fn: () => unknown): boolean {
   try {
     fn();
     return false;
   } catch (e) {
     return e instanceof MarkerError;
+  }
+}
+
+function throwsCorrupt(input: string, msg: string): string | undefined {
+  try {
+    parseMarkers(input);
+    console.error(`✗ ${msg}`);
+    exit = 1;
+    return undefined;
+  } catch (e) {
+    if (e instanceof MarkerError) {
+      console.log(`✓ ${msg}`);
+      return e.message;
+    }
+    console.error(`✗ ${msg} (wrong error type: ${(e as Error).message})`);
+    exit = 1;
+    return undefined;
   }
 }
 

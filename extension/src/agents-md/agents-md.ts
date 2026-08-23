@@ -22,16 +22,17 @@
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { type CheckResult, runChecks } from "./check.ts";
-import { detectFacts } from "./detect.ts";
+import { type DetectedFacts, detectFacts } from "./detect.ts";
 import {
   type LedgerRow,
   driftWarnings,
   mergeAutoRows,
   parseLedger,
   renderLedger,
+  upsertRow,
 } from "./ledger.ts";
-import { MARKER_VERSION, appendSection, presentIds, sectionContent, splice } from "./markers.ts";
-import { FACT_SECTIONS, commandsBody, environmentBody, gatesBody } from "./renderer.ts";
+import { MARKER_VERSION, parseMarkers, presentIds, sectionContent } from "./markers.ts";
+import { commandsBody, environmentBody, gatesBody, omissionFor, renderAgent } from "./renderer.ts";
 
 export type Verb = "create" | "update" | "check";
 
@@ -118,7 +119,7 @@ export function createAgent(root: string, file: string, fs: AgentsMdFs = DEFAULT
   const facts = detectFacts(root);
   const today = fs.today?.() ?? new Date().toISOString().slice(0, 10);
   const ledger = initialLedger(facts, today);
-  const bytes = buildBytes(DEFAULT_PREAMBLE, facts, ledger, MARKER_VERSION);
+  const bytes = renderAgent({ facts, ledger, preamble: DEFAULT_PREAMBLE, version: MARKER_VERSION });
   fs.writeFile(file, bytes);
   return {
     verb: "create",
@@ -153,43 +154,56 @@ export function updateAgent(root: string, file: string, fs: AgentsMdFs = DEFAULT
   const facts = detectFacts(root);
   const today = fs.today?.() ?? new Date().toISOString().slice(0, 10);
 
-  let bytes = current;
-  // 1. Re-render each managed section that the facts still support, via the
-  //    same pure body helpers the fresh-file builder uses. Each splice runs on
-  //    the *current* bytes (not the accumulating result), because a splice
-  //    re-parses the whole document and its content ranges shift as other
-  //    sections change; sequential splices on the accumulator would corrupt.
-  //    Omission reasons are collected, not spliced, here — the ledger is the
-  //    single place they land (step 2).
+  // The three fact-derived bodies — the same pure helpers the fresh-file
+  // builder uses, so the two cannot drift apart.
+  const updates = new Map<string, string>();
   const omitted: { id: string; reason: string }[] = [];
-  for (const { id, body } of FACT_SECTIONS) {
-    const b = body(facts);
-    if (typeof b === "string") {
-      bytes = splice(bytes, id, b);
-    } else {
-      omitted.push({ id, reason: b.omit });
-    }
+  for (const [id, body] of [
+    ["quality-gates", gatesBody(facts)],
+    ["commands", commandsBody(facts)],
+    ["environment", environmentBody(facts)],
+  ] as const) {
+    if (typeof body === "string") updates.set(id, body);
+    else omitted.push({ id, reason: body.omit });
   }
 
-  // 2. Merge the ledger once, on the bytes produced by step 1: keep operator
-  //    rows, supersede changed auto rows, and record any new omissions.
-  const existingLedger = parseExistingLedger(bytes);
+  // 2. Merge the ledger once on the CURRENT bytes: keep operator rows,
+  //    supersede changed auto rows, and record any new omissions.
   const auto = currentAutoRows(facts, today);
-  const merged = mergeAutoRows(existingLedger, auto);
-  for (const o of omitted) {
-    const row: LedgerRow = {
-      key: `omit:${o.id}`,
-      value: o.reason,
-      provenance: "auto",
-      date: today,
+  const existingLedger = parseExistingLedger(current);
+  if (existingLedger === undefined) {
+    return {
+      verb: "update",
+      error: "refusing to update corrupt markers: decision-ledger has a malformed row",
+      exitCode: 2,
     };
-    const idx = merged.findIndex((r) => r.key === row.key);
-    const existingRow = merged[idx];
-    if (idx === -1) merged.push(row);
-    else if (existingRow && existingRow.value !== row.value) merged[idx] = row;
   }
+  const merged = mergeOmissionRows(mergeAutoRows(existingLedger, auto), omitted, today);
   const drift = driftWarnings(existingLedger, auto);
-  bytes = splice(bytes, "decision-ledger", renderLedger(merged));
+
+  // 3. Single-pass rebuild: the markers are parsed ONCE from the original
+  //    bytes and every managed span is resolved up front, so there is no
+  //    shifting-index problem — the output is built in document order, copying
+  //    original bytes verbatim everywhere except the managed content of the
+  //    sections being updated (the #253 invariant: bytes outside a managed
+  //    span are never touched).
+  const { spans } = parseMarkers(current);
+  const spanById = new Map(spans.map((s) => [s.id, s]));
+  const ledgerSpan = spanById.get("decision-ledger");
+  const ledgerBody = renderLedger(merged);
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const span of spans) {
+    let body: string | undefined;
+    if (span.id === "decision-ledger" && ledgerSpan) body = ledgerBody;
+    else if (span.id !== "decision-ledger") body = updates.get(span.id);
+    if (body === undefined) continue; // content unchanged — copy verbatim
+    parts.push(current.slice(cursor, span.contentStart));
+    parts.push(body.endsWith("\n") ? body : `${body}\n`);
+    cursor = span.contentEnd;
+  }
+  parts.push(current.slice(cursor));
+  const bytes = parts.join("");
 
   const wouldWrite = bytes !== current;
   // The single write codepath. A no-op update (wouldWrite false) never enters
@@ -240,96 +254,84 @@ export function checkAgent(
 
 // ---------------------------------------------------------------- helpers
 
-function initialLedger(facts: ReturnType<typeof detectFacts>, today: string): LedgerRow[] {
+function omissionRows(facts: DetectedFacts, today: string): LedgerRow[] {
   const rows: LedgerRow[] = [];
-  const omit = (id: string, reason: string) =>
-    rows.push({ key: `omit:${id}`, value: reason, provenance: "auto", date: today });
-  if (facts.commands.length === 0) {
-    omit("quality-gates", "no gate commands could be derived from the project manifest");
-    omit("commands", "no commands could be derived from the project manifest");
+  for (const id of ["quality-gates", "commands", "environment"] as const) {
+    const reason = omissionFor(facts, id);
+    if (reason) rows.push({ key: `omit:${id}`, value: reason, provenance: "auto", date: today });
   }
-  if (!facts.manifest) omit("environment", "no recognised manifest was detected");
   return rows;
 }
 
-function currentAutoRows(facts: ReturnType<typeof detectFacts>, today: string): LedgerRow[] {
-  const rows: LedgerRow[] = [];
-  if (facts.commands.length === 0) {
-    rows.push({
-      key: "omit:quality-gates",
-      value: "no gate commands could be derived from the project manifest",
-      provenance: "auto",
-      date: today,
-    });
-    rows.push({
-      key: "omit:commands",
-      value: "no commands could be derived from the project manifest",
-      provenance: "auto",
-      date: today,
-    });
-  }
-  if (!facts.manifest)
-    rows.push({
-      key: "omit:environment",
-      value: "no recognised manifest was detected",
-      provenance: "auto",
-      date: today,
-    });
-  return rows;
+function initialLedger(facts: DetectedFacts, today: string): LedgerRow[] {
+  return omissionRows(facts, today);
 }
 
-function omittedSections(facts: ReturnType<typeof detectFacts>): { id: string; reason: string }[] {
+function currentAutoRows(facts: DetectedFacts, today: string): LedgerRow[] {
+  return omissionRows(facts, today);
+}
+
+function mergeOmissionRows(
+  merged: LedgerRow[],
+  omitted: { id: string; reason: string }[],
+  today: string,
+): LedgerRow[] {
+  // o.reason comes from the same omissionFor source currentAutoRows uses,
+  // so it is already the current derivation — upsert it by key (an existing
+  // row with the same value is left untouched, a changed value is superseded
+  // in place, a missing key is appended).
+  return omitted.reduce(
+    (out, o) =>
+      upsertRow(out, { key: `omit:${o.id}`, value: o.reason, provenance: "auto", date: today }),
+    merged,
+  );
+}
+
+function omittedSections(facts: DetectedFacts): { id: string; reason: string }[] {
   const out: { id: string; reason: string }[] = [];
-  if (facts.commands.length === 0) {
-    out.push({
-      id: "quality-gates",
-      reason: "no gate commands could be derived from the project manifest",
-    });
-    out.push({ id: "commands", reason: "no commands could be derived from the project manifest" });
-  }
-  if (!facts.manifest)
-    out.push({ id: "environment", reason: "no recognised manifest was detected" });
-  return out;
-}
-
-function parseExistingLedger(bytes: string): LedgerRow[] {
-  const body = sectionContent(bytes, "decision-ledger");
-  if (body === undefined) return [];
-  try {
-    return parseLedger(body);
-  } catch {
-    return [];
-  }
-}
-
-/** The exact gate-command shell lines currently in the quality-gates section. */
-function gateCommandsFrom(content: string): string[] {
-  const body = sectionContent(content, "quality-gates") ?? "";
-  const out: string[] = [];
-  for (const m of body.matchAll(/— `([^`]+)`/g)) {
-    if (m[1]) out.push(m[1]);
+  for (const id of ["quality-gates", "commands", "environment"] as const) {
+    const reason = omissionFor(facts, id);
+    if (reason) out.push({ id, reason });
   }
   return out;
 }
 
 /**
- * Build the full set of managed bytes for a fresh file (used by create).
- * Delegates to the pure renderer for the sections and appends the ledger.
+ * The current decision-ledger rows, or undefined when the section is malformed.
+ * A corrupt ledger row MUST refuse the update (exit 2) — silently continuing
+ * with an empty ledger would delete every `[asked:operator]` decision on the
+ * next write.
  */
-function buildBytes(
-  preamble: string,
-  facts: ReturnType<typeof detectFacts>,
-  ledger: LedgerRow[],
-  version: number,
-): string {
-  void version;
-  let bytes = preamble;
-  for (const { id, body } of FACT_SECTIONS) {
-    const b = body(facts);
-    if (typeof b === "string") bytes = appendSection(bytes, id, b);
+function parseExistingLedger(bytes: string): LedgerRow[] | undefined {
+  const body = sectionContent(bytes, "decision-ledger");
+  if (body === undefined) return [];
+  try {
+    return parseLedger(body);
+  } catch {
+    return undefined;
   }
-  bytes = appendSection(bytes, "decision-ledger", renderLedger(ledger));
-  return bytes;
+}
+
+/**
+ * The exact gate-command shell lines currently in the quality-gates AND
+ * commands sections. Both are managed and both are operator-editable, so a
+ * hand-added command in either section must be visible to the deep check —
+ * a commands-section-only gate must not be silently skipped. Lines containing
+ * shell metacharacters ARE extracted here and reported as `invalid-shell`
+ * downstream by `runChecks` (isSafeGateCommand) — they are never parsed or
+ * executed.
+ */
+function gateCommandsFrom(content: string): string[] {
+  const out: string[] = [];
+  for (const id of ["quality-gates", "commands"] as const) {
+    const body = sectionContent(content, id);
+    if (!body) continue;
+    for (const m of body.matchAll(/`([^`]+)`/g)) {
+      const line = m[1];
+      if (line && !out.includes(line)) out.push(line);
+    }
+  }
+  return out;
 }
 
 export { fileState };

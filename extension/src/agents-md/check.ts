@@ -21,12 +21,13 @@
  * `check` should have by default.
  */
 
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { detectFacts } from "./detect.ts";
 import { driftWarnings, parseLedger } from "./ledger.ts";
 import { MarkerError, parseMarkers } from "./markers.ts";
+import { omissionFor } from "./renderer.ts";
 
 export const EXIT_CLEAN = 0;
 export const EXIT_FINDINGS = 1;
@@ -51,14 +52,31 @@ export interface CheckResult {
   corrupt: boolean;
 }
 
-const SHELL_LINE = /^(`([^`]+)`|\$([^\s`]+))/;
+/**
+ * SECURITY: whether a file-derived gate line is safe to hand to a shell at
+ * all. Gate commands are extracted from AGENTS.md — a file edited by agents,
+ * CI and operators — so it is untrusted input. A legitimate gate command is a
+ * single runner invocation (`bun run test`, `cargo test`, `go test ./...`);
+ * it never needs a shell operator. ANY of these metacharacters means the line
+ * could compose multiple commands, read/write files, or spawn subprocesses,
+ * so it is refused: never executed, never `bash -n`-parsed, only reported.
+ *
+ * Note: a line that passes may name an on-disk relative executable (e.g.
+ * `./scripts/test.sh`) which `--deep` then execs directly. That is a property
+ * of the opt-in `--deep` verb on the user's own repo, not a shell-execution
+ * risk — no shell is ever involved.
+ */
+export function isSafeGateCommand(line: string): boolean {
+  return !/[&;|<>`$\n]/.test(line) && !line.includes("$(");
+}
 
 /**
  * Run the default (shallow) checks against `root` + `fileContent`.
  *
- * `gateCommands` is the list of exact shell lines the renderer wrote into the
- * quality-gates section. Each is checked for (a) its first token being on PATH
- * and (b) — for shell lines — passing `bash -n`.
+ * `gateCommands` is the list of exact shell lines from the quality-gates AND
+ * the commands section (both managed, both operator-editable). Each is checked
+ * for its first token being on PATH. Lines containing shell metacharacters are
+ * never parsed or executed — only reported (`invalid-shell`).
  */
 export function runChecks(
   root: string,
@@ -108,21 +126,24 @@ export function runChecks(
     }
   }
 
-  // 4. Gate commands: first token on PATH, and (shell) passes bash -n.
+  // 4. Gate commands: first token on PATH. A line that could not be executed
+  //    safely is reported (invalid-shell) but never parsed, even read-only.
   for (const line of opts.gateCommands) {
+    if (!isSafeGateCommand(line)) {
+      // SECURITY: file-derived text with shell metacharacters is never parsed
+      // or executed — not even read-only via `bash -n`. Report and move on.
+      findings.push({
+        kind: "invalid-shell",
+        message: `gate command \`${line}\` contains shell metacharacters; refusing to parse or execute`,
+      });
+      continue;
+    }
     const first = firstToken(line);
     if (!commandAvailable(first)) {
       findings.push({
         kind: "missing-command",
         message: `command "${first}" (from \`${line}\`) is not on PATH`,
       });
-    }
-    if (looksLikeShell(line)) {
-      try {
-        execFileSync("bash", ["-n", line], { stdio: "pipe" });
-      } catch {
-        findings.push({ kind: "invalid-shell", message: `\`${line}\` fails bash -n` });
-      }
     }
   }
 
@@ -155,9 +176,16 @@ export function runChecks(
   if (opts.deep) {
     const timeout = opts.deepTimeoutMs ?? 60000;
     for (const line of opts.gateCommands) {
+      if (!isSafeGateCommand(line)) continue; // already reported in step 4
       if (!commandAvailable(firstToken(line))) continue; // already reported as missing
       try {
-        execSync(line, { cwd: root, stdio: "pipe", timeout, shell: "/bin/bash" });
+        // argv form — NEVER the shell. The line passed isSafeGateCommand, so
+        // it is a single executable plus plain arguments: the first token is
+        // executed directly and the rest are passed as-is. No shell is ever
+        // involved, so no file-derived text is interpreted.
+        const argv = line.split(/\s+/).filter(Boolean);
+        if (argv.length === 0 || !argv[0]) continue;
+        execFileSync(argv[0], argv.slice(1), { cwd: root, stdio: "pipe", timeout });
       } catch {
         findings.push({ kind: "deep-failed", message: `deep check: \`${line}\` exited non-zero` });
       }
@@ -169,10 +197,10 @@ export function runChecks(
 }
 
 /**
- * The auto-derived ledger rows for `root` — the keys `renderer.omissionLedgerRows`
- * would record, recomputed here so the drift check compares the in-file ledger
- * against what the repository *now* derives. Kept in sync with the renderer's
- * omission reasons by construction (same strings, same keys).
+ * The auto-derived ledger rows for `root` — recomputed from the same
+ * `renderer.omissionFor` source the update path writes, so the drift check
+ * compares the in-file ledger against what the repository *now* derives
+ * (same strings, same keys, by construction).
  */
 function autoRows(
   root: string,
@@ -180,22 +208,10 @@ function autoRows(
   const facts = detectFacts(root);
   const rows: { key: string; value: string; provenance: "auto"; date: string }[] = [];
   for (const s of ["quality-gates", "commands", "environment"] as const) {
-    const derived = deriveKey(facts, s);
+    const derived = omissionFor(facts, s);
     if (derived) rows.push({ key: `omit:${s}`, value: derived, provenance: "auto", date: "" });
   }
   return rows;
-}
-
-function deriveKey(
-  facts: { commands: { command: string }[]; manifest?: string },
-  s: string,
-): string | undefined {
-  if (s === "quality-gates" && facts.commands.length === 0)
-    return "no gate commands could be derived from the project manifest";
-  if (s === "commands" && facts.commands.length === 0)
-    return "no commands could be derived from the project manifest";
-  if (s === "environment" && !facts.manifest) return "no recognised manifest was detected";
-  return undefined;
 }
 
 function extractSection(file: string, id: string): string | undefined {
@@ -218,11 +234,4 @@ export function commandAvailable(name: string): boolean {
   } catch {
     return false;
   }
-}
-
-function looksLikeShell(line: string): boolean {
-  // Lines that are plain `runner run script` are not shell syntax we can
-  // meaningfully `bash -n` (they are already simple). Only check lines that
-  // contain shell operators or backticks.
-  return /(\||&&|\|\||;|`|\$\(|>)/.test(line);
 }

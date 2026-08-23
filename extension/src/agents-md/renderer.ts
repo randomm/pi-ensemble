@@ -38,25 +38,43 @@ import { renderSection } from "./markers.ts";
 const SECTION_ORDER = ["quality-gates", "commands", "environment", "decision-ledger"] as const;
 
 /**
+ * The single source of truth for omission reasons, keyed by managed section
+ * id. Both the section bodies below and the decision-ledger omission rows
+ * (recorded by agents-md.ts and re-derived by check.ts) call this, so the
+ * "why was this section skipped" text cannot drift between the file on disk
+ * and what the drift check compares it against.
+ */
+export function omissionFor(facts: DetectedFacts, id: string): string | undefined {
+  if ((id === "quality-gates" || id === "commands") && facts.commands.length === 0) {
+    return id === "quality-gates"
+      ? "no gate commands could be derived from the project manifest"
+      : "no commands could be derived from the project manifest";
+  }
+  if (id === "environment" && !facts.manifest) return "no recognised manifest was detected";
+  return undefined;
+}
+
+/**
  * Pure section bodies. These are the single source of truth for what each
  * managed section contains — both the fresh-file builder and the brownfield
  * updater call these, so the two cannot drift apart. A section whose facts are
- * absent returns an omission reason instead of a body.
+ * absent returns the `omissionFor` reason instead of a body.
  */
 export function gatesBody(facts: DetectedFacts): string | { omit: string } {
-  if (facts.commands.length === 0)
-    return { omit: "no gate commands could be derived from the project manifest" };
+  const omit = omissionFor(facts, "quality-gates");
+  if (omit) return { omit };
   const lines = facts.commands.map((c) => `- **${c.name}** — \`${c.command}\``);
   return `Run these before pushing. All must pass locally:\n\n${lines.join("\n")}`;
 }
 export function commandsBody(facts: DetectedFacts): string | { omit: string } {
-  if (facts.commands.length === 0)
-    return { omit: "no commands could be derived from the project manifest" };
+  const omit = omissionFor(facts, "commands");
+  if (omit) return { omit };
   const rows = facts.commands.map((c) => `| ${c.kind} | \`${c.command}\` |`).join("\n");
   return `| kind | command |\n| --- | --- |\n${rows}`;
 }
 export function environmentBody(facts: DetectedFacts): string | { omit: string } {
-  if (!facts.manifest) return { omit: "no recognised manifest was detected" };
+  const omit = omissionFor(facts, "environment");
+  if (omit) return { omit };
   const lines = [
     `- Manifest: \`${facts.manifest}\``,
     facts.packageManager ? `- Package manager: \`${facts.packageManager}\`` : "",

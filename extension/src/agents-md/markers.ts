@@ -37,6 +37,17 @@ export type SectionId = (typeof SECTION_IDS)[number];
 
 const BEGIN_RE = /<!--\s*pi-ensemble:agents-md:begin\s+([a-z][a-z0-9-]*)\s+v(\d+)\s*-->/g;
 const END_RE = /<!--\s*pi-ensemble:agents-md:end\s+([a-z][a-z0-9-]*)\s*-->/g;
+/**
+ * The LOOSE form of every marker occurrence — begin or end, any id shape, any
+ * version shape. Used as a corruption tripwire: if the loose scan finds more
+ * occurrences than BEGIN_RE + END_RE captured together, a token exists that
+ * neither strict regex recognised (e.g. a begin line missing `v<N>`, or a
+ * drifted version like `v2` when pairing expects otherwise, or an unknown id
+ * character). Silently ignoring such a token would let its END be captured as
+ * an orphan while its BEGIN is invisible, so a mis-versioned pair must throw,
+ * not vanish.
+ */
+const LOOSE_RE = /<!--\s*pi-ensemble:agents-md:(begin|end)\b[^>]*-->/g;
 
 /**
  * The byte range of a single managed section, plus its markers.
@@ -106,6 +117,21 @@ export function parseMarkers(text: string): ParsedMarkers {
       });
     }
   }
+
+  // Tripwire: any marker-shaped token the strict regexes did NOT capture is a
+  // corrupt or mis-versioned marker. Count loose occurrences and refuse if the
+  // strict capture is short of them — never silently ignore one.
+  LOOSE_RE.lastIndex = 0;
+  const captured = new Set(tokens.map((t) => t.start));
+  for (let m = LOOSE_RE.exec(text); m !== null; m = LOOSE_RE.exec(text)) {
+    if (m.index === LOOSE_RE.lastIndex) LOOSE_RE.lastIndex++;
+    if (!captured.has(m.index)) {
+      throw new MarkerError(
+        `corrupt or mis-versioned marker: ${m[0].replace(/\s+/g, " ").slice(0, 80)}`,
+      );
+    }
+  }
+
   tokens.sort((a, b) => a.start - b.start);
 
   const spans: MarkerSpan[] = [];

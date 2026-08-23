@@ -59,8 +59,12 @@ function tryRead(file: string): string | undefined {
 function scriptsOf(pkg: Record<string, unknown> | undefined): Record<string, string> {
   if (!pkg) return {};
   const s = pkg.scripts;
-  if (typeof s === "object" && s !== null) return s as Record<string, string>;
-  return {};
+  if (typeof s !== "object" || s === null) return {};
+  // Validate values before the cast: a malformed manifest (e.g.
+  // "scripts": {"test": 42}) must not surface a number as a command line.
+  const rec = s as Record<string, unknown>;
+  if (!Object.values(rec).every((v) => typeof v === "string")) return {};
+  return rec as Record<string, string>;
 }
 
 /**
