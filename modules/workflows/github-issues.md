@@ -16,7 +16,7 @@ Issue creation is **PM-only**. This module is composed into both the project-man
 - **Project manager (PM)**: the sole owner of issue creation. For non-trivial work, create issues via `/plan` Phase 5 (the quality-gated path). Trivial tickets (single file, no contract change, no new external surface) may be created inline with the bare `gh issue` create verb — see the tool-access line in `project-manager.md` for the exact command. **Mid-cycle `gh issue edit` of an existing issue body stays ungated** — refinements and corrections go in the body, not a new ticket.
 - **Developer (and every specialist)**: you do NOT create or edit GitHub issues. Before starting work, **verify a GitHub issue exists** for the task. If none does, **report the missing issue in your final message** — PM files it. Do not open a ticket yourself.
 
-The dead `mcp_issue` tool is removed from doctrine. Run `gh` directly — a backend-agnostic `ticket` tool (see [#98](https://github.com/randomm/pi-ensemble/issues/98)) will eventually replace these `gh` bash entries; until then, PM runs `gh` bare.
+PM runs `gh` directly — a backend-agnostic `ticket` tool (see [#98](https://github.com/randomm/pi-ensemble/issues/98)) will eventually replace these `gh` bash entries; until then, PM runs `gh` bare.
 
 ## Issue Creation Template
 
@@ -37,12 +37,10 @@ The dead `mcp_issue` tool is removed from doctrine. Run `gh` directly — a back
 
 ## Issue Creation Command (PM only)
 
-PM creates issues by running `gh` directly — the `mcp_issue` tool no longer exists in doctrine. A backend-agnostic `ticket` tool (see [#98](https://github.com/randomm/pi-ensemble/issues/98)) will replace these `gh` bash entries in the future; until then, run `gh` bare.
-
-The exact create command is `gh issue` + the create verb, matching the tool-access line in `project-manager.md`. Pass the body via `--body-file` to avoid shell-quoting pitfalls in multi-line or backtick-laden bodies (write the body to a file using the template above):
+PM creates issues by running `gh` directly. Pass the body via `--body-file` to avoid shell-quoting pitfalls in multi-line or backtick-laden bodies (write the body to a file using the template above):
 
 ```bash
-gh issue <create-verb> --title "fix: description" --body-file tmp/issue-body.md
+gh issue create --title "fix: description" --body-file tmp/issue-body.md
 ```
 
 **Specialists (developer, ops, explore, reviewers)**: do NOT run issue-creation commands. Verify the issue exists, then report a missing one to PM in your final message.
