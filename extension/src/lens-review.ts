@@ -83,6 +83,11 @@ export interface LensRunResult {
   findings: Finding[];
   model?: string;
   transcriptPath?: string;
+  /** #543 — the dispatch-cap kill cause when the lens child was cap-killed
+   * (loop detector / token budget). A cap-killed lens is NOT retried: an
+   * SIGTERM'd looped child is a non-zero exit, and without this guard the
+   * retry below would undo the kill up to MAX_LENS_ATTEMPTS times. */
+  killCause?: DispatchResult["killCause"];
   /** Set when the child failed to spawn or returned non-zero. */
   parseError?: string;
   /** Number of spawn attempts made for this lens (1 = no retries; up to
@@ -110,6 +115,9 @@ export interface LensReviewSummary {
   totalFindings: number;
   bySeverity: Record<Severity, number>;
   lenses: LensRunResult[];
+  /** #543 — a dispatch-cap kill (loop / token-budget) hit one of the lens
+   * children; the driver emits the fixed-literal cap-hit from this. */
+  capKill?: DispatchResult["killCause"];
   /** Deduplicated, precedence-ordered list. */
   findings: Finding[];
   /**
@@ -306,6 +314,12 @@ export async function runLensReview(opts: {
       } catch (err) {
         lastError = `attempt ${attempts}/${MAX_LENS_ATTEMPTS}: spawn failed: ${(err as Error).message}`;
       }
+      // #543 no-retry-on-cap-kill: a loop / token-budget killed child is a
+      // SELF-inflicted cap, never a transient failure. Re-spawning it would
+      // just re-loop (the kill is the cap; the retry would undo it 4x).
+      if (result && (result.killCause === "loop" || result.killCause === "token-budget")) {
+        break;
+      }
       // Backoff before next retry (skipped on last attempt to keep total
       // wall-clock bounded).
       if (attempts < MAX_LENS_ATTEMPTS) {
@@ -335,6 +349,7 @@ export async function runLensReview(opts: {
         // #534 — a failed lens still flushes usage from whatever turns
         // completed before it died; count it like any other dispatch-failed.
         usage: result?.usage,
+        ...(result?.killCause ? { killCause: result.killCause } : {}),
       };
     }
 
@@ -386,6 +401,12 @@ export async function runLensReview(opts: {
           { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
         )
       : undefined;
+  // #543 — a dispatch-cap kill on any lens child (loop detector / token
+  // budget) is surfaced on the summary so the driver emits the fixed-literal
+  // cap-hit (F4g) instead of a silent 1-of-6 loss.
+  const capKill = lensResults.find(
+    (r) => r.killCause === "loop" || r.killCause === "token-budget",
+  )?.killCause;
   return {
     verdict,
     totalFindings: deduped.length,
@@ -393,6 +414,7 @@ export async function runLensReview(opts: {
     lenses: lensResults,
     findings: deduped,
     usage,
+    ...(capKill ? { capKill } : {}),
   };
 }
 

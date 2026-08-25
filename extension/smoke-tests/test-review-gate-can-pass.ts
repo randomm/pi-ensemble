@@ -185,16 +185,16 @@ const roundCap: WorkEvent = {
 }
 
 {
-  const lens = code("work-driver-lens.ts");
-  // The call must sit inside the findings branch. Structural, because the
-  // behavioural assertion above cannot see WHERE the cap came from.
+  // The verdict → events tail moved to work-driver-lens-verdicts.ts (split
+  // for module size hygiene) — the landmarks live there now.
+  const lens = code("work-driver-lens-verdicts.ts");
   const approvedIdx = lens.indexOf('summary.verdict === "APPROVED"');
   const issuesIdx = lens.indexOf('kind: "lens-issues-found"');
   const capIdx = lens.indexOf("appendReviewCapHit(");
-  const incompleteIdx = lens.indexOf('cap: "review-incomplete"');
+  const incompleteIdx = lens.search(/cap:\s*\(capKilled \?\? String\.raw`review-incomplete`\)/);
   assert(
     approvedIdx >= 0 && issuesIdx >= 0 && capIdx >= 0 && incompleteIdx >= 0,
-    "all four landmarks are present in work-driver-lens.ts",
+    "all four landmarks are present in work-driver-lens-verdicts.ts",
   );
   assert(
     capIdx > issuesIdx && capIdx < incompleteIdx,

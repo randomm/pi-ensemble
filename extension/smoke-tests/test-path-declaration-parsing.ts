@@ -111,7 +111,7 @@ function assert(cond: boolean, msg: string) {
 {
   const SRC = path.resolve(import.meta.dirname, "..", "src");
   const read = (f: string) => readFileSync(path.join(SRC, f), "utf8");
-  for (const f of ["work-driver-handoff-markdown.ts", "work-driver-prompts-late.ts"]) {
+  for (const f of ["work-driver-handoff-recovery.md.ts", "work-driver-prompts-late.ts"]) {
     const src = read(f);
     assert(
       /git apply --3way --binary/.test(src),

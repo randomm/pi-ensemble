@@ -57,6 +57,7 @@ import type { PiJsonEvent, SpawnOptions } from "./pi-event-shapes.ts";
 import { emptyRunningState, ingestEvent } from "./progress.ts";
 import { excludeToolsFor } from "./role-tools.ts";
 import { ROLES, type RoleName, isRoleName } from "./roles.ts";
+import { type CapSession, createCapSession } from "./spawn-caps.ts";
 import { collapseEvents } from "./spawn-collapse-events.ts";
 import {
   applyUserExtension,
@@ -69,6 +70,7 @@ import {
   assertLiveSpawnAllowed,
   buildChildArgs,
   buildCwdHint,
+  capKillGraceMs,
   getPiInvocation,
   inactivityTimeoutMs,
   makeRunId,
@@ -293,7 +295,19 @@ async function spawnSpecialistInner(
     }
     // Stream into the running state. ingestEvent returns true only when an
     // assistant turn completed (the right cadence to surface to the user).
-    if (ingestEvent(runningState, parsed as Parameters<typeof ingestEvent>[1], start)) {
+    // #543 F1 — pass the full block list to the loop detector (ops-role
+    // children are exempt: the cap session returns no observer for them).
+    if (
+      ingestEvent(
+        runningState,
+        parsed as Parameters<typeof ingestEvent>[1],
+        start,
+        caps.loopObserver,
+      )
+    ) {
+      // #543 F6 — check the token budget on every assistant turn end.
+      caps.tokenBudgetTracker?.check(Date.now());
+      caps.tokenBudgetTracker?.onMessageEnd(Date.now());
       opts.onProgress?.({ ...runningState, usage: { ...runningState.usage } });
     }
     // Retain only the two events collapseEvents actually reads (the latest
@@ -366,12 +380,28 @@ async function spawnSpecialistInner(
     }
   }
 
+  // #543 F1/F6 — dispatch caps (loop detector + token budget). The cap
+  // session (spawn-caps.ts) owns the per-spawn detector/tracker state, the
+  // grace-window timers and the killCause priority (loop > inactivity >
+  // timeout > abort) — see its module doc.
+  const caps: CapSession = createCapSession({
+    role: spec.role,
+    child,
+    onSteer: opts.onSteer,
+    totalTokens: () => runningState.totalTokens,
+    timedOut: () => timedOut,
+    inactivityKilled: () => inactivityKilled,
+    aborted: () => aborted,
+    capKillGraceMs: capKillGraceMs(),
+  });
+
   let exitCode: number | null = null;
   try {
     [exitCode] = (await once(child, "exit")) as [number | null];
   } finally {
     clearTimeout(timeout);
     if (inactivityPoll) clearInterval(inactivityPoll);
+    caps.cleanup();
     opts.signal?.removeEventListener("abort", onAbort);
     // Best-effort cleanup of the temp prompt file; ignore errors.
     fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
@@ -391,6 +421,17 @@ async function spawnSpecialistInner(
   if (inactivityKilled) {
     appendStderr(`\n[pi-ensemble] killed after ${inactivityMs}ms inactivity`);
   }
+  if (caps.loopKilled()) {
+    const ev = caps.loopEvidence();
+    appendStderr(
+      `\n[pi-ensemble] killed: loop detected (${ev?.tool ?? "unknown"} repeated ${ev?.count ?? 0} times after normalization; override: PI_ENSEMBLE_DISPATCH_CAPS / PI_ENSEMBLE_CAP_KILL_GRACE_MS)`,
+    );
+  }
+  if (caps.tokenBudgetTracker?.killed) {
+    appendStderr(
+      `\n[pi-ensemble] killed: token budget exceeded (${runningState.totalTokens} tokens used; override: PI_ENSEMBLE_TOKEN_BUDGET_${spec.role.toUpperCase()})`,
+    );
+  }
   if (aborted) {
     appendStderr("\n[pi-ensemble] cancelled by user (Esc)");
   }
@@ -409,16 +450,16 @@ async function spawnSpecialistInner(
   );
   result.transcriptPath = transcriptPath;
   result.modelSource = modelChoice.source;
-  // Structured kill-cause (#296): downstream classification branches on this
-  // BEFORE errorStop/exitCode so self-kills are never blamed on the provider.
-  if (timedOut) {
-    result.killCause = "timeout";
-    result.killBudgetMs = timeoutMs;
-  } else if (inactivityKilled) {
-    result.killCause = "inactivity";
-    result.killBudgetMs = inactivityMs;
-  } else if (aborted) {
-    result.killCause = "abort";
+  // Structured kill-cause (#296; #543 extends the priority with loop first):
+  // downstream classification branches on this BEFORE errorStop/exitCode so
+  // self-kills are never blamed on the provider. A looped child that was ALSO
+  // silent past the inactivity window is a loop first: the loop is the
+  // diagnosis, the silence is its symptom.
+  const killCause = caps.killCause();
+  if (killCause) {
+    result.killCause = killCause;
+    if (killCause === "timeout") result.killBudgetMs = timeoutMs;
+    if (killCause === "inactivity") result.killBudgetMs = inactivityMs;
   }
   // A killed child never completed its assignment, whatever its exit code.
   if (result.killCause) {

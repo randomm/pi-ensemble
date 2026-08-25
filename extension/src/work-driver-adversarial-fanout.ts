@@ -67,6 +67,8 @@ export interface AdversarialOutcome {
   /** Non-blocking findings outstanding when this workstream passed. */
   passFindings?: string;
   errorTail?: string;
+  /** #543 — a loop / token-budget cap kill, threaded from the inner spawn. */
+  killCause?: "loop" | "token-budget";
   completionEvent?: WorkEvent;
   failureEvent?: WorkEvent;
   branchEvent?: WorkEvent;
@@ -253,6 +255,11 @@ export async function fanOutAdversarial(
       // A pass that carried unresolved findings says so in its headline.
       passFindings: ok && result.text?.includes("PASSED WITH FINDINGS") ? result.text : undefined,
       errorTail: result.errorStop?.message ?? undefined,
+      // #543 — thread a loop / token-budget cap kill so the aggregate parks
+      // with the fixed-literal cap INSTEAD of the generic infra cap.
+      ...(result.killCause === "loop" || result.killCause === "token-budget"
+        ? { killCause: result.killCause }
+        : {}),
       completionEvent,
       branchEvent:
         ids.length > 1
@@ -327,17 +334,13 @@ export async function fanOutAdversarial(
   //    into aggregation.
   //  - `o.infra || o.threw` — the final outcome is a NO-VERDICT failure
   //    (infrastructure death or a throw), never a genuine rejection.
-  //  - `(localRetries[o.id] ?? 0) >= MAX || !isTransient(o)` — the budget
-  //    is exhausted OR the failure is not retryable in-step at all
-  //    (quota window, spend cap, self-kill — the taxonomy says
-  //    shouldRetry=false, so no in-step retry is spent and the budget
-  //    stays at 0 while the failure is still permanent).
+  //  - `(localRetries[o.id] ?? 0) >= MAX || !isTransient(o)` — budget
+  //    exhausted OR the failure is not retryable in-step (self-kill).
   //  - `!priorHadInfraFailure` — re-entry permanent failures already park
   //    through the dedicated `parked` / re-entry branches; `parkedInfra`
   //    must not double-fire.
-  //  - N>1 only: the N=1 first pass leaves the dispatch-failed tail for
-  //    the step-level router's RETRY_ONCE path (the #298 contract); the
-  //    router's re-entry is what parks with the named cap.
+  //  - N>1 only: N=1 leaves the dispatch-failed tail for the step-level
+  //    router's RETRY_ONCE path (#298); its re-entry parks with the cap.
   const exhaustedNoVerdict = (o: AdversarialOutcome): boolean =>
     !o.ok &&
     (o.infra || o.threw) &&

@@ -91,6 +91,52 @@ export const KNOWN_CONSOLIDATION_STATUSES: readonly unknown[] = [
 const CAP_HIT_NEXT_STEPS: readonly unknown[] = ["handoff", "step-back", "ci"];
 
 /**
+ * #543 — the FIXED-LITERAL caps (F1 loop / F6 token-budget included). A
+ * cap-hit's `cap` must be one of these, or a `verify-failed:` / `step-failed:`
+ * template value — nothing else. `validateDiscriminants` REJECTS a fabricated
+ * `loop-detected:<anything>` / `token-budget:<anything>` suffix (the #533
+ * "extend the union, don't smuggle a field" rule applied to cap strings).
+ */
+const CAP_HIT_FIXED_LITERALS: readonly unknown[] = [
+  "adversarial-loop",
+  "round-cap",
+  "wall-clock",
+  "review-incomplete",
+  "ci-retry",
+  "developer-timeout",
+  "explore-already-complete",
+  "explore-needs-clarification",
+  "explore-bodies-empty",
+  "step-back-revise-spec",
+  "commit-pr-incomplete-consolidation",
+  "lens-fix-not-integrated",
+  "integration-verify-failed",
+  "intent-park",
+  "awaiting-human-merge",
+  "lens-diff-unreadable",
+  "existing-pr-detected",
+  "adversarial-infra-failure",
+  "loop-detected",
+  "token-budget",
+];
+
+/** `pipelineState.capEvidence.kind` vocabulary (#543). */
+const CAP_EVIDENCE_KINDS: readonly unknown[] = ["loop", "token-budget"];
+
+/** #543 F5 — `pipelineState.capedPartialState.tree` vocabulary. */
+const KNOWN_CAPPED_PARTIAL_TREES: readonly unknown[] = ["committed", "dirty-uncommitted", "clean"];
+
+/** #543 F5 — `pipelineState.capedPartialState.role` vocabulary. */
+const KNOWN_CAPPED_PARTIAL_ROLES: readonly unknown[] = [
+  "project-manager",
+  "developer",
+  "ops",
+  "explore",
+  "adversarial-developer",
+  "code-review-specialist",
+];
+
+/**
  * Human-readable findings; empty when every discriminant is a known value.
  * Each finding names the field AND the offending value — the driver halts
  * on a non-empty result and the message surfaces verbatim.
@@ -206,6 +252,70 @@ export function validateDiscriminants(state: unknown): string[] {
         }
       }
     }
+    // #543 — `pipelineState.capEvidence`, when present, must carry a known
+    // `kind` and a numeric `count` (the structured trigger evidence the
+    // F1/F6 caps render). The same #533 "type-check the untyped cast" rule
+    // that covers `commitPrRoot`: a partial / hand-edited record would
+    // otherwise flow to `explainCap` as if every field were present.
+    if (ps.capEvidence !== undefined) {
+      const ce = ps.capEvidence;
+      if (typeof ce !== "object" || ce === null) {
+        out.push("pipelineState.capEvidence is not an object");
+      } else {
+        const ceo = ce as Record<string, unknown>;
+        if (!CAP_EVIDENCE_KINDS.includes(ceo.kind)) {
+          out.push(`pipelineState.capEvidence.kind has unknown value ${JSON.stringify(ceo.kind)}`);
+        }
+        if (typeof ceo.count !== "number" || !Number.isFinite(ceo.count)) {
+          out.push("pipelineState.capEvidence.count is missing or not a finite number");
+        }
+        if (ceo.turnRange !== undefined && !Array.isArray(ceo.turnRange)) {
+          out.push("pipelineState.capEvidence.turnRange is not an array");
+        }
+        for (const field of ["budgetTokens", "usedTokens"] as const) {
+          if (
+            ceo[field] !== undefined &&
+            (typeof ceo[field] !== "number" || !Number.isFinite(ceo[field] as number))
+          ) {
+            out.push(`pipelineState.capEvidence.${field} is not a finite number`);
+          }
+        }
+      }
+    }
+    // #543 F5 — `pipelineState.capedPartialState` (the driver-owned
+    // checkpoint record) must carry a known role/tree and, when the tree is
+    // "committed", the commit it claims: the handoff renders
+    // `git -C <worktree> show <sha>` from it, and a partial object would
+    // render a confident wrong SHA.
+    if (ps.capedPartialState !== undefined) {
+      const cps = ps.capedPartialState;
+      if (typeof cps !== "object" || cps === null) {
+        out.push("pipelineState.capedPartialState is not an object");
+      } else {
+        const cpso = cps as Record<string, unknown>;
+        if (typeof cpso.cap !== "string" || cpso.cap.length === 0) {
+          out.push("pipelineState.capedPartialState.cap is missing or not a string");
+        }
+        if (!KNOWN_CAPPED_PARTIAL_ROLES.includes(cpso.role)) {
+          out.push(
+            `pipelineState.capedPartialState.role has unknown value ${JSON.stringify(cpso.role)}`,
+          );
+        }
+        if (!KNOWN_CAPPED_PARTIAL_TREES.includes(cpso.tree)) {
+          out.push(
+            `pipelineState.capedPartialState.tree has unknown value ${JSON.stringify(cpso.tree)}`,
+          );
+        }
+        if (typeof cpso.at !== "number" || !Number.isFinite(cpso.at)) {
+          out.push("pipelineState.capedPartialState.at is not a finite number");
+        }
+        if (cpso.tree === "committed" && typeof cpso.commitSha !== "string") {
+          out.push(
+            "pipelineState.capedPartialState.commitSha is missing or not a string (required when tree is 'committed')",
+          );
+        }
+      }
+    }
   }
 
   const log = s.eventLog;
@@ -227,6 +337,19 @@ export function validateDiscriminants(state: unknown): string[] {
       }
       if (e.kind === "cap-hit" && !CAP_HIT_NEXT_STEPS.includes(e.nextStep)) {
         out.push(`eventLog[${i}].nextStep has unknown value ${JSON.stringify(e.nextStep)}`);
+      }
+      // #543 — a cap-hit's `cap` must be a known fixed literal, a
+      // `verify-failed:` / `step-failed:` template value, or nothing else. A
+      // fabricated `loop-detected:<anything>` / `token-budget:<anything>`
+      // suffix is REJECTED: those caps are fixed literals, and a suffix would
+      // smuggle a role the canary does not know (the role travels in the
+      // separate `role` field instead).
+      if (e.kind === "cap-hit" && typeof e.cap === "string") {
+        const cap = e.cap as string;
+        const isTemplate = cap.startsWith("verify-failed:") || cap.startsWith("step-failed:");
+        if (!CAP_HIT_FIXED_LITERALS.includes(cap) && !isTemplate) {
+          out.push(`eventLog[${i}].cap has unknown value ${JSON.stringify(cap)}`);
+        }
       }
     });
   }

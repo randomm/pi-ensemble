@@ -50,6 +50,20 @@ const ARTIFACT_THRESHOLD_BYTES = 4_000;
 
 const execp = promisify(exec);
 
+/** #543 — env knob named in a self-kill's errorTail (loop/token name the cap knobs). */
+function overrideEnvForKillCause(killCause: NonNullable<DispatchResult["killCause"]>): string {
+  switch (killCause) {
+    case "timeout":
+      return "PI_ENSEMBLE_SPAWN_TIMEOUT_MS";
+    case "loop":
+    case "token-budget":
+      return "PI_ENSEMBLE_DISPATCH_CAPS + PI_ENSEMBLE_CAP_KILL_GRACE_MS";
+    case "inactivity":
+    case "abort":
+      return "PI_ENSEMBLE_INACTIVITY_TIMEOUT_MS";
+  }
+}
+
 /**
  * PR10 — Parse a `merge-commit: <sha>` marker line from ops's merge reply.
  * Lenient: accepts surrounding markdown (`**merge-commit:**`), backticks,
@@ -90,26 +104,18 @@ export async function buildCompletionEvent(
   const at = Date.now();
   const jobId = result.transcriptPath ? path.basename(result.transcriptPath, ".json") : "unknown";
 
-  // Structured kill-cause (#296) wins over everything: a child pi-ensemble
-  // itself killed (wall-clock cap / inactivity watchdog / abort) is OUR
-  // failure, never a provider failure — even if the dying child also
-  // flushed an error-stop message. The errorTail names the budget and the
-  // override knob so the operator-facing explanation is accurate.
+  // Structured kill-cause (#296; #543 adds loop/token-budget) wins over
+  // everything: a child pi-ensemble itself killed is OUR failure, never a
+  // provider failure. The errorTail names the budget + override knob.
   if (result.killCause) {
     const detail =
       result.killCause === "abort"
         ? "[pi-ensemble] cancelled (abort signal)"
         : `[pi-ensemble] killed after ${result.killBudgetMs}ms ${result.killCause}` +
-          ` (override: ${
-            result.killCause === "timeout"
-              ? "PI_ENSEMBLE_SPAWN_TIMEOUT_MS"
-              : "PI_ENSEMBLE_INACTIVITY_TIMEOUT_MS"
-          })`;
+          ` (override: ${overrideEnvForKillCause(result.killCause)})`;
     // Attribute the silence, not just the budget. `linesSeen: 0` means the
-    // child never spoke at all — a provider stall, an auth failure or a bad
-    // model id — which is a different problem from a child that went quiet
-    // after real work. Raising the budget fixes neither, and cannot tell them
-    // apart, which is why this records the shape instead.
+    // child never spoke — a provider stall / auth failure / bad model id — a
+    // different problem from one that went quiet after real work.
     const la = result.lastActivity;
     const attribution = la
       ? ` · last output: ${la.kind} ${Math.round(la.agoMs / 1000)}s before the kill, after ${la.linesSeen} line(s)`

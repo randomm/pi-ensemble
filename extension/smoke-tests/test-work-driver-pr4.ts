@@ -15,6 +15,8 @@ import { type DriverContext, nextStep } from "../src/work-driver-context.ts";
 import { renderHandoffMarkdown } from "../src/work-driver-handoff-markdown.ts";
 import { parseHandoffCommentUrl } from "../src/work-driver-handoff.ts";
 import { parsePrNumber } from "../src/work-driver-lens.ts";
+import { explainCap } from "../src/work-driver-explain.ts";
+import { validateDiscriminants } from "../src/workflow-state-validate.ts";
 import { runWorkDriver } from "../src/work-driver.ts";
 import { appendEvent, initialState, writeState } from "../src/workflow-state.ts";
 
@@ -366,6 +368,129 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
     round: 3,
   });
   assert(completed3.includes("(round 3)"), "step-completed: round=3 suffix shown");
+}
+
+// ---------------------------------------------------------------------------
+// #543 F4 — nextStep routing on the cap strings + explainCap + validateDiscriminants
+// ---------------------------------------------------------------------------
+{
+  // (h) nextStep routes BOTH cap strings to handoff. The cap-hit event is the
+  // routing input — nextStep reads `lastEvent.nextStep`, so a cap-hit with
+  // nextStep:"handoff" reaches handoff for every step that emits it.
+  for (const cap of ["loop-detected", "token-budget"] as const) {
+    let s = initialState(543, 1_000_000);
+    s = { ...s, pipelineState: { ...s.pipelineState, currentStep: "develop" } };
+    s = appendEvent(s, {
+      kind: "cap-hit",
+      at: 2,
+      cap,
+      reviewRound: 1,
+      nextStep: "handoff",
+    } as Parameters<typeof appendEvent>[1]);
+    const d = nextStep(s);
+    assert(d.kind === "step" && d.step === "handoff", `nextStep: cap ${cap} → handoff (develop)`);
+    // Same routing for the other two cap-emitting steps.
+    for (const step of ["lens-review", "adversarial"] as const) {
+      let s2 = initialState(543, 1_000_000);
+      s2 = { ...s2, pipelineState: { ...s2.pipelineState, currentStep: step } };
+      s2 = appendEvent(s2, {
+        kind: "cap-hit",
+        at: 2,
+        cap,
+        reviewRound: 1,
+        nextStep: "handoff",
+      } as Parameters<typeof appendEvent>[1]);
+      const d2 = nextStep(s2);
+      assert(
+        d2.kind === "step" && d2.step === "handoff",
+        `nextStep: cap ${cap} → handoff (${step})`,
+      );
+    }
+  }
+
+  // (i) explainCap renders a defined (non-undefined) trigger line from
+  // capEvidence for both caps. The switch is NOT compile-exhaustive, so the
+  // canary is the gate: a missing case returns the fallback "step failed: ..."
+  // string rather than the cap-specific sentence.
+  for (const [cap, kind, needle] of [
+    ["loop-detected", "loop", "looped on"],
+    ["token-budget", "token-budget", "token budget"],
+  ] as const) {
+    let s = initialState(543, 1_000_000);
+    s = { ...s, pipelineState: { ...s.pipelineState, currentStep: "handoff" } };
+    s = {
+      ...s,
+      pipelineState: {
+        ...s.pipelineState,
+        capEvidence: { kind, count: 10, tool: "bash", fingerprint: "ls /a" },
+      },
+    };
+    s = appendEvent(s, {
+      kind: "cap-hit",
+      at: 2,
+      cap,
+      reviewRound: 1,
+      nextStep: "handoff",
+    } as Parameters<typeof appendEvent>[1]);
+    const line = explainCap(cap, s);
+    assert(
+      typeof line === "string" && line.includes(needle),
+      `explainCap(${cap}) renders the trigger evidence (${needle})`,
+    );
+  }
+}
+
+// #543 F4(f) — the fixed-literal cap strings are accepted by the #533
+// canary; a fabricated `loop-detected:<anything>` / `token-budget:<anything>`
+// suffix is REJECTED (the role travels in the separate `role` field, never in
+// the cap string).
+{
+  const base = {
+    schemaVersion: 1,
+    resumable: false,
+    issue: 543,
+    startedAt: 1,
+    updatedAt: 2,
+    pipelineState: {
+      currentStep: "handoff",
+      status: "handoff",
+      inFlightJobIds: [],
+      worktrees: {},
+      reviewRound: 1,
+      plumbReports: [],
+    },
+    eventLog: [],
+  };
+  for (const cap of ["loop-detected", "token-budget"]) {
+    const ok = validateDiscriminants({
+      ...base,
+      eventLog: [{ kind: "cap-hit", at: 2, cap, reviewRound: 1, nextStep: "handoff" }],
+    });
+    assert(ok.length === 0, `validateDiscriminants accepts the fixed literal ${cap}`);
+  }
+  for (const cap of [
+    "loop-detected:developer",
+    "token-budget:task-b",
+    "step-failed-543",
+  ] as const) {
+    const bad = validateDiscriminants({
+      ...base,
+      eventLog: [{ kind: "cap-hit", at: 2, cap, reviewRound: 1, nextStep: "handoff" }],
+    });
+    assert(
+      bad.some((b) => b.includes(".cap")),
+      `validateDiscriminants REJECTS fabricated cap ${cap}: ${bad[0] ?? "(no finding)"}`,
+    );
+  }
+  // A valid template cap still passes (the rejection must be precise, not a
+  // blanket no-go on unknown caps).
+  const tpl = validateDiscriminants({
+    ...base,
+    eventLog: [
+      { kind: "cap-hit", at: 2, cap: "step-failed:develop", reviewRound: 1, nextStep: "handoff" },
+    ],
+  });
+  assert(tpl.length === 0, "validateDiscriminants still accepts the step-failed:<step> template");
 }
 
 console.log(`\nexit ${exit}`);

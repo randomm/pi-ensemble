@@ -14,6 +14,7 @@
 
 import * as lifecycle from "./lifecycle-events.ts";
 import { trace } from "./trace.ts";
+import { capKilledString } from "./work-driver-cap-killed.ts";
 import { STEP_FAILURE_POLICY } from "./work-driver-context.ts";
 import type { DriverContext } from "./work-driver-context.ts";
 import { dispatchTokens } from "./work-driver-cycle-total.ts";
@@ -239,18 +240,31 @@ export async function routeStepOutcome(
         // #308 — use structured killCause for cap detection instead of
         // regex-matching errorTail. A timeout self-kill is a deliberate
         // budget cap; it should NEVER be retried.
-        const isTimeout = (tail as { killCause?: string }).killCause === "timeout";
+        const killCause = (tail as { killCause?: string }).killCause;
+        // #543 — a loop / token-budget self-kill parks with the fixed-literal
+        // cap (`loop-detected` / `token-budget`) INSTEAD of `step-failed:<step>`.
+        // It is not a provider fault and must never be retried (the HALT branch
+        // already refuses retry: `shouldRetry` is false, so the #308 retry block
+        // above never ran). The fixed literal (no `'<role>'` suffix) + the
+        // `role` field is what F4(f) requires; explainCap reads capEvidence for
+        // the trigger detail.
+        const capKilled = tail.kind === "dispatch-failed" ? capKilledString(tail) : undefined;
         const cap =
-          step === "develop" && isTimeout
+          capKilled ??
+          (step === "develop" && killCause === "timeout"
             ? ("developer-timeout" as const)
-            : (`step-failed:${step}` as const);
-        state = appendEvent(state, {
+            : (`step-failed:${step}` as const));
+        const capEvent: Extract<WorkEvent, { kind: "cap-hit" }> = {
           kind: "cap-hit",
           at: Date.now(),
           cap,
           reviewRound: state.pipelineState.reviewRound,
           nextStep: "handoff",
-        });
+        };
+        if (capEvent.cap === "loop-detected" || capEvent.cap === "token-budget") {
+          capEvent.role = (tail as { role?: string }).role as typeof capEvent.role;
+        }
+        state = appendEvent(state, capEvent);
         // Set currentStep='handoff' but LEAVE status='running' so the
         // loop re-enters and runs runHandoff. runHandoff's final block
         // sets status based on the cap shape (mid-flight failure →
