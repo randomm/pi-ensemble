@@ -1,30 +1,15 @@
 #!/usr/bin/env bun
 /**
  * A worktree with no dependencies cannot run the project's own commands:
- * `git worktree add --detach` materialises tracked files only, and the
- * develop step then runs the project's verify command inside that tree.
- *
- * Rust (nessie): cargo rebuilds from scratch — costs minutes, not
- * correctness. Node/bun (this repo): the verify command needs
- * `extension/node_modules`, which is gitignored — the gate fails outright,
- * so pi-ensemble dogfooding `/work` on itself could not pass its own develop
- * gate in a worktree.
- *
- * #481: the symlink loop looked at `repoRoot` only and reported a USEFUL
- * link for an EMPTY gitignored `node_modules/` at the root, while the real
- * tree at `extension/node_modules` was never linked. The fix scans depth-1
- * package directories for manifests/lockfiles, skips empty candidates,
- * and sets `ProvisionResult.problem` when a lockfile-bearing project has
- * no usable tree.
- *
- * The `git check-ignore` probe goes through the injected `execFn` so its
- * three exit states (0 = ignored, 1 = not-ignored, ≥2 = git error) are
- * each observable: `err.code === 1` reads as NOT-IGNORED, `err.code >= 2`
- * (or no `.code`) as GIT-ERROR — both refuse the candidate. Pre-#481 both
- * collapsed to one state, which let a tracked directory be shadowed by a
- * link to elsewhere. Every fixture creates a real git repo, commits a
- * tracked file, and leaves the candidate dependency directory untracked
- * (as it would be after `bun install`).
+ * `git worktree add --detach` materialises tracked files only, so the
+ * develop gate needs the gitignored dep tree linked in. #481: the symlink
+ * loop looked at `repoRoot` only and reported a USEFUL link for an EMPTY
+ * gitignored `node_modules/` at the root, while the real tree at
+ * `extension/node_modules` was never linked. The fix scans depth-1 package
+ * directories, skips empty candidates, and sets `ProvisionResult.problem`
+ * when a lockfile-bearing project has no usable tree. The `check-ignore`
+ * probe goes through the injected `execFn` so its three exit states
+ * (0 = ignored, 1 = not-ignored, ≥2 = git error) are each observable.
  */
 
 import { exec } from "node:child_process";
@@ -55,8 +40,7 @@ function assert(cond: boolean, msg: string) {
 /**
  * An `execFn` that runs REAL git (the probe needs its three-state exit code
  * via `err.code`), with `sh <hook>` calls stubbed when `hookRuns` is given.
- * `git rev-parse --git-common-dir` (used by `hideFromGit`) returns ".git",
- * correct for the fixture repos `initRepo` builds.
+ * `git rev-parse --git-common-dir` (used by `hideFromGit`) returns ".git".
  */
 function realExecFn(
   hookRuns?: string[],
@@ -79,11 +63,7 @@ function fixture(name: string): { root: string; wt: string } {
   return { root, wt: path.join(root, ".worktrees", name) };
 }
 
-/**
- * A real git repo at `root` with the given `.gitignore` content. A tracked
- * file is committed so the repo has at least one commit; candidate dep
- * directories are left untracked (the "bun install ran" shape).
- */
+/** A real git repo with the given `.gitignore`; a tracked file committed. */
 async function initRepo(
   root: string,
   gitignore: string,
@@ -107,12 +87,7 @@ async function initRepo(
   await run("commit", "-q", "-m", "init");
 }
 
-/**
- * A `git worktree add --detach`-equivalent: a fresh directory whose `.git`
- * is a FILE pointing at a per-worktree gitdir, so `git check-ignore` and
- * `git rev-parse --git-common-dir` from inside it both resolve (which is
- * what `hideFromGit` calls).
- */
+/** A `git worktree add --detach`-equivalent with a per-worktree gitdir. */
 async function makeWorktreeFixture(root: string, name: string): Promise<string> {
   const wt = path.join(root, ".worktrees", name);
   mkdirSync(wt, { recursive: true });
@@ -133,7 +108,6 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
     writeFileSync(path.join(root, "node_modules", "marker"), "x");
     mkdirSync(path.join(root, "target"), { recursive: true });
     mkdirSync(wt, { recursive: true });
-
     const result = await provisionWorktree(realExecFn(), root, wt);
 
     assert(result.via === "symlink", `provisioned by symlink (got ${result.via})`);
@@ -183,11 +157,9 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
 {
   const { root, wt } = fixture("w");
   try {
-    // The #479 live failure, reproduced: an EMPTY `node_modules/` at the
-    // root (gitignored, so it passes `check-ignore`) and the real tree at
-    // `pkg/node_modules`. Pre-#481 the root one was linked and reported as
-    // `linked: ["node_modules"]` — indistinguishable from success — while
-    // the nested tree the verify command actually needs was never linked.
+    // The #479 live failure: an EMPTY `node_modules/` at the root and the
+    // real tree at `pkg/node_modules`. Pre-#481 the root one was linked and
+    // reported as `linked: ["node_modules"]` — indistinguishable from success.
     await initRepo(root, "node_modules/\npkg/node_modules/\n", {
       "pkg/package.json": '{"name": "pkg", "dependencies": {}}\n',
     });
@@ -239,9 +211,7 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
   try {
     // Only an EMPTY gitignored node_modules at the root, no nested package.
     // Pre-#481 this returned `linked: ["node_modules"]` — a claim of success
-    // for a bare worktree. Post-#481 it is skipped (empty) and, because the
-    // root has a package.json, a `problem` is set so the branch step can
-    // trace it. The worktree is still bare, but the driver now knows it is.
+    // for a bare worktree. Post-#481 it is skipped and a `problem` is set.
     await initRepo(root, "node_modules/\n", {
       "package.json": '{"name": "root", "dependencies": {}}\n',
     });
@@ -327,14 +297,14 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
     mkdirSync(path.join(root, ".pi"), { recursive: true });
     writeFileSync(path.join(root, ".pi", "worktree-setup"), "exit 1\n");
     mkdirSync(wt, { recursive: true });
-    const execFn = async (cmd: string) => {
+    const fn = (async (cmd: string) => {
       if (cmd.startsWith("sh ")) throw new Error("hook exited 1");
       return { stdout: "" };
-    };
-    const result = await provisionWorktree(execFn, root, wt);
+    }) as never;
+    const result = await provisionWorktree(fn, root, wt);
     assert(
       typeof result.problem === "string" && result.problem.includes("failed"),
-      "canary: a failing hook is REPORTED, not thrown — a worktree without deps is the status quo, not a regression",
+      "a failing hook is REPORTED, not thrown — a worktree without deps is the status quo",
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -417,11 +387,8 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
 
 // ------------- #481: pi-ensemble itself provisions without a hook (real repo probe)
 {
-  // The actual dogfood: run `provisionWorktree` against THIS repo. If it has
-  // a `.pi/worktree-setup` hook the hook wins by design (covered by the
-  // "hook wins" test above); if absent, the symlink loop must find the
-  // nested `extension/node_modules` and link it, never claiming a useful
-  // link for an EMPTY `node_modules/` at the root.
+  // Dogfood: `provisionWorktree` against THIS repo — hook wins if present,
+  // else the symlink loop must link the nested `extension/node_modules`.
   const repoRoot = path.resolve(import.meta.dirname, "..", "..");
   const wt = mkdtempSync(path.join(tmpdir(), "wt-provision-"));
   try {
@@ -451,19 +418,14 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
 
 // --------------------- #533: a failed fetch must not abandon the mechanized path
 {
-  // Live #533: the driver's `git fetch origin main` failed (a transient
-  // publickey window), the mechanized path THREW on `origin/main` resolution,
-  // and the fallback ops dispatch created worktrees with raw
-  // `git worktree add` — none provisioned, and the develop gate died on the
-  // bare tree. The mechanized path must survive a failed fetch by falling
-  // back to the local mainline ref: an SSH auth window is exactly the
-  // "environment variance" the ops fallback exists for, and it would hit
-  // the same fetch.
+  // Live #533: a failed `git fetch` must not abandon the mechanized path —
+  // the fallback ops dispatch creates unprovisioned worktrees. Local
+  // mainline created explicitly: `git init`'s first-branch name follows
+  // init.defaultBranch (unset on the CI runner — 32815509116).
   const root = mkdtempSync(path.join(tmpdir(), "wt-provision-"));
   try {
     await initRepo(root, "node_modules/\n", { "package.json": "{}\n" });
-    // `git init` + the initial commit already leaves a local `main` branch
-    // (git >= 2.28's default) — the healthy-clone shape this test simulates.
+    await pexec('git checkout -q -B main', { cwd: root, env: { ...process.env, HOME: root } });
     const runs: string[] = [];
     const execFn = async (cmd: string, opts: { cwd?: string; maxBuffer?: number }) => {
       runs.push(cmd);
@@ -492,6 +454,44 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
       Object.values(setup.worktrees).length === 1,
       "...and the worktree is created by worktreeCreate, which provisions it (the hook/symlink path that the ops fallback skips)",
     );
+    // Neither resolvable: stub returns empty stdout for
+    // `rev-parse --verify --quiet` (the code's contract for a missing ref)
+    // so the `if (!baseSha)` guard fires the legible throw, asserted here
+    // rather than allowed to escape (the shape CI 32815509116 saw).
+    const root2 = mkdtempSync(path.join(tmpdir(), "wt-provision-"));
+    try {
+      await initRepo(root2, "", {});
+      // No local `main`: rename the initial branch.
+      await pexec("git branch -q -m main trunk", {
+        cwd: root2,
+        env: { ...process.env, HOME: root2 },
+      });
+      let threw = "";
+      try {
+        await mechanizedBranchSetup(
+          (async (cmd: string, opts: { cwd?: string; maxBuffer?: number }) => {
+            if (cmd.startsWith("git fetch")) throw new Error("Permission denied (publickey)");
+            if (cmd.includes("rev-parse --verify --quiet")) return { stdout: "" };
+            return pexec(cmd, { cwd: opts.cwd, maxBuffer: opts.maxBuffer ?? 64 * 1024 }).then(
+              (r) => ({ stdout: r.stdout }),
+            );
+          }) as never,
+          root2,
+          533,
+          [533],
+          ["task-a"],
+          "title",
+        );
+      } catch (e) {
+        threw = (e as Error).message;
+      }
+      assert(
+        threw.includes("could not resolve"),
+        "no local mainline AND failed fetch: the throw is legible, not a raw git error",
+      );
+    } finally {
+      rmSync(root2, { recursive: true, force: true });
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
