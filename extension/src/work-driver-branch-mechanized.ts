@@ -223,7 +223,10 @@ export async function mechanizedBranchSetup(
     return stdout.trim();
   };
   let baseSha = await sha(`origin/${mainline}`).catch(() => "");
-  if (!baseSha) baseSha = await sha(`refs/heads/${mainline}`);
+  // Same catch as the origin probe: a failing `rev-parse` throws, and when
+  // BOTH refs are missing the raw git error would otherwise escape instead
+  // of the legible message below.
+  if (!baseSha) baseSha = await sha(`refs/heads/${mainline}`).catch(() => "");
   if (!baseSha) {
     throw new Error(
       `could not resolve ${mainline} to a commit (no origin/${mainline} after fetch, no refs/heads/${mainline})`,
