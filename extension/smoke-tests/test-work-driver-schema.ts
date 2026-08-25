@@ -453,6 +453,12 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
   const badUncovered = icFindings({ verdicts: [{ id: "a", status: "uncovered" }], filesPresent: [] });
   assert(badUncovered.length === 1 && badUncovered[0].includes("uncoveredPaths"),
     "#540: an uncovered verdict without uncoveredPaths refuses reconstruction");
+  const goodUnverifiable = icFindings({ verdicts: [{ id: "a", status: "unverifiable", reason: "no declared paths" }], filesPresent: [] });
+  assert(goodUnverifiable.length === 0,
+    "#540: an unverifiable verdict WITH reason is accepted");
+  const badUnverifiable = icFindings({ verdicts: [{ id: "a", status: "unverifiable" }], filesPresent: [] });
+  assert(badUnverifiable.length === 1 && badUnverifiable[0].includes("reason"),
+    "#540: an unverifiable verdict without reason refuses reconstruction");
   const noVerdicts = icFindings({ filesPresent: [] });
   assert(noVerdicts.length === 1 && noVerdicts[0].includes("verdicts"),
     "#540: the current shape without a verdicts field refuses reconstruction");

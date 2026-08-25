@@ -47,14 +47,27 @@ export interface IncompleteConsolidation {
   /** Per-workstream verdicts — only workstreams the gate could NOT verify
    *   as covered (uncovered) or could not verify at all (unverifiable).
    *   Complete workstreams are implied by the rest of the workstream map.
-   *   Legacy entries (pre-#540 shape) may lack `status`/`uncoveredPaths`/
-   *   `reason`. */
-  verdicts: Array<ConsolidationVerdict | { id: string; paths: string[]; status?: undefined }>;
+   *   Legacy entries in state files (pre-#540 shape) may lack `status`/
+   *   `uncoveredPaths`/`reason` — readers must not be written against
+   *   that; see `missingWorkstreamsFromConsolidation` for the tolerant
+   *   reader adapter. */
+  verdicts: ConsolidationVerdict[];
   /** The committed file list (`git diff --name-only origin/<base>..HEAD`).
    *   Absent for state files written by the pre-#540 writer (legacy
    *   `paths`-only shape, no `filesPresent` key at all). */
   filesPresent?: string[];
 }
+
+/**
+ * #540 — the shape the READER adapters tolerate when indexing
+ * `incompleteConsolidation`'s verdicts: the current `ConsolidationVerdict[]`
+ * AND the legacy pre-#540 entry (no `status`, just `{ id, paths }`), which
+ * persisted state files still carry. Writers must NOT use this — new
+ * writes are `ConsolidationVerdict[]` only (see `IncompleteConsolidation.verdicts`).
+ */
+type TolerantConsolidationEntry =
+  | ConsolidationVerdict
+  | { id: string; paths: string[]; status?: undefined };
 
 /**
  * #540 — read `incompleteConsolidation` as a flat list of missing
@@ -71,16 +84,18 @@ export interface IncompleteConsolidation {
  * recorded verdicts name no uncovered workstream.
  */
 export function missingWorkstreamsFromConsolidation(
-  ic: IncompleteConsolidation | Array<{ id: string; paths: string[] }> | undefined,
+  ic: IncompleteConsolidation | Array<TolerantConsolidationEntry> | undefined,
 ): Array<{ id: string; paths: string[] }> {
   if (ic === undefined || ic === null) return [];
-  if (Array.isArray(ic)) return ic;
+  if (Array.isArray(ic)) {
+    return ic
+      .filter((e): e is { id: string; paths: string[] } => "paths" in e && Array.isArray(e.paths))
+      .map((e) => ({ id: e.id, paths: e.paths }));
+  }
   const out: Array<{ id: string; paths: string[] }> = [];
   for (const v of ic.verdicts) {
-    if ("status" in v && v.status === "uncovered") {
+    if (v.status === "uncovered") {
       out.push({ id: v.id, paths: v.uncoveredPaths });
-    } else if (!("status" in v) && "paths" in v) {
-      out.push({ id: v.id, paths: v.paths });
     }
   }
   return out;
@@ -92,7 +107,7 @@ export function missingWorkstreamsFromConsolidation(
  * in the legacy pre-#540 array shape (which recorded no file list).
  */
 export function filesPresentFromConsolidation(
-  ic: IncompleteConsolidation | Array<{ id: string; paths: string[] }> | undefined,
+  ic: IncompleteConsolidation | Array<TolerantConsolidationEntry> | undefined,
 ): string[] {
   if (ic === undefined || ic === null || Array.isArray(ic)) return [];
   return ic.filesPresent ?? [];

@@ -81,7 +81,11 @@ export const KNOWN_STATUSES: readonly unknown[] = ["running", "merged", "handoff
  * recognize — the same "extend the union, don't smuggle a field" rule
  * this module applies to event kinds and steps.
  */
-export const KNOWN_CONSOLIDATION_STATUSES: readonly unknown[] = ["complete", "uncovered"];
+export const KNOWN_CONSOLIDATION_STATUSES: readonly unknown[] = [
+  "complete",
+  "uncovered",
+  "unverifiable",
+];
 
 /** `cap-hit.nextStep` vocabulary. */
 const CAP_HIT_NEXT_STEPS: readonly unknown[] = ["handoff", "step-back", "ci"];
@@ -164,6 +168,11 @@ export function validateDiscriminants(state: unknown): string[] {
             if (e.status === "uncovered" && !Array.isArray(e.uncoveredPaths)) {
               out.push(
                 `pipelineState.incompleteConsolidation.verdicts[${i}].uncoveredPaths is missing or not an array (required when status is 'uncovered')`,
+              );
+            }
+            if (e.status === "unverifiable" && typeof e.reason !== "string") {
+              out.push(
+                `pipelineState.incompleteConsolidation.verdicts[${i}].reason is missing or not a string (required when status is 'unverifiable')`,
               );
             }
           });

@@ -85,19 +85,25 @@ export async function verifyConsolidation(
   const changedFiles = new Set(filesPresent);
   // A declared path counts as "in the diff" when a committed file equals
   // it or sits beneath it (a directory declaration covers its contents).
+  // The exact-match Set lookup runs first — it is O(1) and is the common
+  // case; the prefix scan only fires for directory declarations.
   const declaredPathInDiff = (p: string): boolean =>
-    Array.from(changedFiles).some((f) => f === p || f.startsWith(`${p}/`));
+    changedFiles.has(p) || Array.from(changedFiles).some((f) => f.startsWith(`${p}/`));
   // Normalised declared paths per workstream, so a sibling's set and this
   // workstream's paths compare like-for-like.
   const declaredOf = (ws: { paths: string[] }): string[] =>
     ws.paths.map(normaliseDeclaredPath).filter((p) => p.length > 0);
-  // A sibling S's FULL set is present iff every declared path of S is in
-  // the committed diff.
-  const siblingFullyPresent = (sid: string): boolean => {
+  // Precomputed once per workstream so the per-path covered-check below is
+  // an O(W) scan against precomputed data, not an O(W·F) recompute per path.
+  const siblingSets = new Map<string, Set<string>>();
+  const siblingFullyPresent = new Map<string, boolean>();
+  for (const sid of ids) {
     const s = workstreams[sid];
-    if (!s || s.paths.length === 0) return false;
-    return declaredOf(s).every(declaredPathInDiff);
-  };
+    if (!s || s.paths.length === 0) continue;
+    const set = new Set(declaredOf(s));
+    siblingSets.set(sid, set);
+    siblingFullyPresent.set(sid, Array.from(set).every(declaredPathInDiff));
+  }
   const missing: Array<{ id: string; paths: string[] }> = [];
   const verdicts: ConsolidationVerdict[] = [];
   for (const id of ids) {
@@ -114,9 +120,10 @@ export async function verifyConsolidation(
     const uncovered = own.filter((p) => {
       if (declaredPathInDiff(p)) return false;
       return !ids.some((sid) => {
+        if (sid === id) return false;
         const s = workstreams[sid];
-        if (sid === id || !s) return false;
-        return siblingFullyPresent(sid) && declaredOf(s).includes(p);
+        if (!s) return false;
+        return siblingFullyPresent.get(sid) === true && (siblingSets.get(sid)?.has(p) ?? false);
       });
     });
     if (uncovered.length > 0) {

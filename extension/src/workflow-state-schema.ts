@@ -1,7 +1,6 @@
 /**
- * /work workflow state — pipeline snapshot + top-level state shape, plus
- * pure (no-fs) helpers that operate on in-memory `WorkState`. Split out
- * of `workflow-state.ts` (AGENTS.md §12 file-size limit).
+ * /work workflow state — pipeline snapshot + top-level state shape / types.
+ * Split out of `workflow-state.ts` (AGENTS.md §12 file-size limit).
  */
 
 import type { WorkEvent, WorkStep } from "./workflow-state-events.ts";

@@ -31,7 +31,7 @@ import { verifyCmdFor } from "./work-driver-verify-cmd.ts";
 import { verifyConsolidation, verifyStepOutcome } from "./work-driver-verify.ts";
 import { activeIssuesOf, scratchDir } from "./work-driver-workspace.ts";
 import { appendEvent } from "./workflow-state.ts";
-import type { IncompleteConsolidation, WorkState } from "./workflow-state.ts";
+import type { ConsolidationVerdict, IncompleteConsolidation, WorkState } from "./workflow-state.ts";
 
 const execp = promisify(exec);
 
@@ -420,7 +420,7 @@ async function runCommitPrLocked(
     trace(
       `work-driver: commit-pr partial-consolidation detected — missing workstreams: ${consolidationCheck.missing.map((m) => m.id).join(", ")}`,
     );
-    const verdicts: IncompleteConsolidation["verdicts"] = consolidationCheck.verdicts
+    const verdicts: ConsolidationVerdict[] = consolidationCheck.verdicts
       .filter((v) => v.status !== "complete")
       .map((v) =>
         v.status === "uncovered"
