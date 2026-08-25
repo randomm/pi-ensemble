@@ -84,6 +84,23 @@ function commitPrRootFieldsOf(r: CommitPrRootInspect): {
 }
 
 /**
+ * #539 — the one classifier for the mechanized commit-pr fallback cause.
+ * `dirty-repoRoot` (integrate()'s preflight refusal) and `apply-conflict`
+ * are the two causes that occur in the wild; everything else is `other`.
+ * Single writer: the fallback site in `runCommitPrLocked`.
+ */
+export type CommitPrFallbackCause = "dirty-repoRoot" | "apply-conflict" | "other";
+
+export function classifyCommitPrFallback(reason: string): CommitPrFallbackCause {
+  // integrate()'s dirty-preflight refusal: anchored to the specific tail
+  // rather than any reason that merely mentions "dirty".
+  if (/refusing to integrate onto/.test(reason)) return "dirty-repoRoot";
+  if (/patch (does not apply|failed)|apply .*conflict|conflict.*apply/i.test(reason))
+    return "apply-conflict";
+  return "other";
+}
+
+/**
  * Wall-clock for the verify run against the consolidated tree. This is the
  * project's FAST suite, not the full one — it exists to catch "the
  * combination does not build", which is quick to discover. Default 15 min.
@@ -367,6 +384,8 @@ async function runCommitPrLocked(
         step: "commit-pr",
         role: "driver",
         body: `Mechanized commit-pr fell back to the ops dispatch: ${mech.reason}. Note: the repo root may contain partially staged consolidation from the mechanized attempt — verify with \`git status\` before re-applying patches.`,
+        // #539 — machine-readable fallback cause for the handoff renderers.
+        fallbackCause: classifyCommitPrFallback(mech.reason),
       });
     }
   }

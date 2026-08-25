@@ -357,6 +357,12 @@ export type WorkEvent =
       role: string;
       /** Free-text structural decision body (PM-readable). */
       body: string;
+      /**
+       * #539 — machine-readable fallback cause (single writer:
+       * runCommitPrLocked). `dirty-repoRoot` is the #533/#534 shape:
+       * integrate()'s preflight refused a dirty repoRoot.
+       */
+      fallbackCause?: "dirty-repoRoot" | "apply-conflict" | "other";
     }
   | {
       kind: "step-back-triggered";
