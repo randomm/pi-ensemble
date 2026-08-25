@@ -41,6 +41,7 @@ import fs from "node:fs/promises";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { mechanizedBranchSetup } from "../src/work-driver-branch-mechanized.ts";
 import {
   NEVER_SHARED,
   SHAREABLE_DEPS,
@@ -201,14 +202,15 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
     // `pkg/node_modules`. Pre-#481 the root one was linked and reported as
     // `linked: ["node_modules"]` — indistinguishable from success — while the
     // nested tree the verify command actually needs was never linked.
-    await initRepo(
-      root,
-      "node_modules/\npkg/node_modules/\n",
-      { "pkg/package.json": '{"name": "pkg", "dependencies": {}}\n' },
-    );
+    await initRepo(root, "node_modules/\npkg/node_modules/\n", {
+      "pkg/package.json": '{"name": "pkg", "dependencies": {}}\n',
+    });
     mkdirSync(path.join(root, "node_modules"), { recursive: true });
     mkdirSync(path.join(root, "pkg", "node_modules", "typebox"), { recursive: true });
-    writeFileSync(path.join(root, "pkg", "node_modules", "typebox", "index.js"), "module.exports={}\n");
+    writeFileSync(
+      path.join(root, "pkg", "node_modules", "typebox", "index.js"),
+      "module.exports={}\n",
+    );
     mkdirSync(wt, { recursive: true });
     await makeWorktreeFixture(root, "w");
 
@@ -222,10 +224,7 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
       result.linked.includes("node_modules"),
       "the nested pkg/node_modules is linked — the tree the verify command actually needs",
     );
-    assert(
-      result.problem === undefined,
-      "no problem: the nested tree was found and linked",
-    );
+    assert(result.problem === undefined, "no problem: the nested tree was found and linked");
     // The link lands at <worktree>/pkg/node_modules, not <worktree>/node_modules.
     assert(
       await fs
@@ -258,7 +257,9 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
     // for a bare worktree. Post-#481 it is skipped (empty) and, because the
     // root has a package.json, a `problem` is set so the branch step can trace
     // it. The worktree is still bare, but the driver now knows it is bare.
-    await initRepo(root, "node_modules/\n", { "package.json": '{"name": "root", "dependencies": {}}\n' });
+    await initRepo(root, "node_modules/\n", {
+      "package.json": '{"name": "root", "dependencies": {}}\n',
+    });
     mkdirSync(path.join(root, "node_modules"), { recursive: true });
     mkdirSync(wt, { recursive: true });
     await makeWorktreeFixture(root, "w");
@@ -267,7 +268,7 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
 
     assert(
       !result.linked.includes("node_modules"),
-      "an EMPTY candidate is never reported as a useful link (DoD: `linked: [\"node_modules\"]` must not be returned for a dir with no entries)",
+      'an EMPTY candidate is never reported as a useful link (DoD: `linked: ["node_modules"]` must not be returned for a dir with no entries)',
     );
     assert(
       result.problem !== undefined,
@@ -314,7 +315,7 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
   const root = scratch();
   const wt = path.join(root, ".worktrees", "w");
   try {
-    await initRepo(root, "node_modules/\n", { "package.json": '{}\n' });
+    await initRepo(root, "node_modules/\n", { "package.json": "{}\n" });
     mkdirSync(path.join(root, ".pi"), { recursive: true });
     writeFileSync(path.join(root, ".pi", "worktree-setup"), "#!/bin/sh\nbun install\n");
     mkdirSync(path.join(root, "node_modules"), { recursive: true });
@@ -348,7 +349,8 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
       if (cmd.startsWith("sh ")) throw new Error("hook exited 1");
       return { stdout: "" };
     };
-    const result = await provisionWorktree(execFn, root, wt);    assert(
+    const result = await provisionWorktree(execFn, root, wt);
+    assert(
       typeof result.problem === "string" && result.problem.includes("failed"),
       "canary: a failing hook is REPORTED, not thrown — a worktree without deps is the status quo, not a regression",
     );
@@ -361,7 +363,7 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
   const root = scratch();
   const wt = path.join(root, ".worktrees", "w");
   try {
-    await initRepo(root, "node_modules/\n", { "package.json": '{}\n' });
+    await initRepo(root, "node_modules/\n", { "package.json": "{}\n" });
     mkdirSync(path.join(root, "node_modules"), { recursive: true });
     writeFileSync(path.join(root, "node_modules", "marker"), "x");
     mkdirSync(wt, { recursive: true });
@@ -468,6 +470,54 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
     }
   } finally {
     rmSync(wt, { recursive: true, force: true });
+  }
+}
+
+// --------------------- #533: a failed fetch must not abandon the mechanized path
+{
+  // Live #533: the driver's `git fetch origin main` failed (a transient
+  // publickey window), the mechanized path THREW on `origin/main` resolution,
+  // and the fallback ops dispatch created worktrees with raw `git worktree add`
+  // — none of them provisioned, and the develop gate died on the bare tree.
+  // The mechanized path must survive a failed fetch by falling back to the
+  // local mainline ref: an SSH auth window is exactly the "environment
+  // variance" the ops fallback exists for, and it would hit the same fetch.
+  const root = scratch();
+  try {
+    await initRepo(root, "node_modules/\n", { "package.json": "{}\n" });
+    // `git init` + the initial commit already leaves a local `main` branch
+    // (git >= 2.28's default) — exactly the healthy-clone shape this test
+    // simulates; nothing to create.
+    const runs: string[] = [];
+    const execFn = async (cmd: string, opts: { cwd?: string; maxBuffer?: number }) => {
+      runs.push(cmd);
+      if (cmd.startsWith("git fetch")) throw new Error("Permission denied (publickey)");
+      return pexec(cmd, { cwd: opts.cwd, maxBuffer: opts.maxBuffer ?? 64 * 1024 }).then((r) => ({
+        stdout: r.stdout,
+      }));
+    };
+    const setup = await mechanizedBranchSetup(
+      execFn as never,
+      root,
+      533,
+      [533],
+      ["task-a"],
+      "title",
+    );
+    assert(
+      runs.some((c) => c.startsWith("git fetch")),
+      "the fetch is attempted (a fresh origin/main is still preferred)",
+    );
+    assert(
+      setup.baseSha.length === 40,
+      "a failed fetch falls back to the LOCAL mainline ref — the mechanized path survives an SSH window instead of handing the branch step to ops",
+    );
+    assert(
+      Object.values(setup.worktrees).length === 1,
+      "...and the worktree is created by worktreeCreate, which provisions it (the hook/symlink path that the ops fallback skips)",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 }
 
