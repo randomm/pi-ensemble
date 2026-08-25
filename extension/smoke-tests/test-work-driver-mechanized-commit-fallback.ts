@@ -21,9 +21,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DriverContext } from "../src/work-driver-context.ts";
-import { classifyCommitPrFallback } from "../src/work-driver-commit.ts";
 import { runWorkDriver } from "../src/work-driver.ts";
 import { readState } from "../src/workflow-state.ts";
+import type { WorkEvent } from "../src/workflow-state-events.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
@@ -119,24 +119,6 @@ const mkDispatchFn =
   const prevVerify = process.env.PI_ENSEMBLE_VERIFY;
   process.env.PI_ENSEMBLE_VERIFY = "1";
   try {
-    // #539 — classifier unit tests: the three causes classified correctly.
-    assert(
-      classifyCommitPrFallback(
-        "repo root has uncommitted changes, refusing to integrate onto feature/issue-533-x: leftover/a.txt, leftover/b.txt. Commit, stash, or discard them — integration would otherwise sweep them into the PR.",
-      ) === "dirty-repoRoot",
-      "classify: integrate's dirty-preflight refusal → dirty-repoRoot",
-    );
-    assert(
-      classifyCommitPrFallback("error: patch failed: src/x.rs:1; patch does not apply") ===
-        "apply-conflict",
-      "classify: git apply stderr → apply-conflict",
-    );
-    assert(
-      classifyCommitPrFallback("gh pr create succeeded but no PR number was parseable") ===
-        "other",
-      "classify: unrelated failure → other",
-    );
-
     // M2 — mechanical failure (git apply conflict) → plumb-report +
     // graceful fallback to the LLM ops dispatch.
     {
@@ -193,6 +175,29 @@ const mkDispatchFn =
             (e) => e.kind === "plumb-report" && /fell back to the ops dispatch/.test(e.body),
           ),
           "M2: apply conflict → plumb-report explains the fallback",
+        );
+        // #539 — the structured cause travels from integrate() to the event,
+        // no re-parse of the free-text reason. An apply failure is NOT
+        // guessed as apply-conflict: integrate()'s failure discriminator
+        // names only dirty-repoRoot structurally, so everything else is
+        // `other` (the text still says it is an apply failure).
+        assert(
+          after?.eventLog.some(
+            (e) =>
+              e.kind === "plumb-report" &&
+              e.step === "commit-pr" &&
+              e.fallbackCause === "other",
+          ),
+          "M2: apply failure → plumb-report carries fallbackCause=other (no structured cause)",
+        );
+        assert(
+          !after?.eventLog.some(
+            (e) =>
+              e.kind === "plumb-report" &&
+              e.step === "commit-pr" &&
+              e.fallbackCause === "apply-conflict",
+          ),
+          "M2: an apply failure is NOT guessed as apply-conflict",
         );
         assert(
           after?.eventLog.some(
@@ -315,8 +320,9 @@ const mkDispatchFn =
         await runWorkDriver(ctx).catch(() => {});
         const after = await readState(dir, 997);
         const plumb = after?.eventLog.find(
-          (e) => e.kind === "plumb-report" && e.step === "commit-pr",
-        ) as { body: string; fallbackCause?: string } | undefined;
+          (e): e is Extract<WorkEvent, { kind: "plumb-report" }> =>
+            e.kind === "plumb-report" && e.step === "commit-pr",
+        );
         assert(
           plumb !== undefined,
           "M4: dirty repoRoot → plumb-report exists",
@@ -326,8 +332,8 @@ const mkDispatchFn =
           "M4: plumb-report names the dirty path(s) from the integrate refusal",
         );
         assert(
-          plumb !== undefined && "fallbackCause" in plumb && plumb.fallbackCause === "dirty-repoRoot",
-          "M4: plumb-report carries fallbackCause=\"dirty-repoRoot\"",
+          plumb?.fallbackCause === "dirty-repoRoot",
+          "M4: plumb-report carries fallbackCause=\"dirty-repoRoot\" (typed against the WorkEvent contract)",
         );
         assert(
           after?.eventLog.some(

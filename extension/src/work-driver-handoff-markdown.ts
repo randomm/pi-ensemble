@@ -15,7 +15,11 @@ import {
   adversarialOutcomeSection,
   adversarialRoundsLine,
 } from "./work-driver-handoff-adversarial.ts";
-import { commitPrFallbackPlumbSection, commitPrRootFacts } from "./work-driver-handoff-commitpr.ts";
+import {
+  commitPrDirtyRootStep,
+  commitPrFallbackPlumbSection,
+  commitPrRootFacts,
+} from "./work-driver-handoff-commitpr.ts";
 import { type ParkReason, parkAction } from "./work-driver-intent.ts";
 import {
   type WorkEvent,
@@ -347,12 +351,6 @@ export function renderHandoffMarkdown(state: WorkState): string {
         ? "git rev-parse --abbrev-ref HEAD   # name the branch, then: git reset --hard <branch>"
         : `git reset --hard ${root.branch}`
       : "git reset --hard HEAD";
-    // #539 — dirty-repoRoot: the tree holds untracked residue (the very
-    // shape that wedged the mechanized path), so the recovery block must
-    // be sweep-safe: run git status first, commit ONLY the applied patch
-    // paths, never bare `git commit` after `add -A`.
-    const untrackedCount = root ? root.totalEntries - root.stagedCount : 0;
-    const dirtyUntracked = untrackedCount > 0 && !conflicted;
     if (filesPresent.length > 0) {
       const shown = filesPresent.slice(0, 10);
       lines.push(
@@ -363,13 +361,7 @@ export function renderHandoffMarkdown(state: WorkState): string {
       );
     }
     lines.push(
-      ...(dirtyUntracked
-        ? [
-            "# 0. The tree is NOT clean — it holds untracked residue from a prior cycle (or a sibling's in-flight work). Run git status first; commit ONLY the applied patch paths; never bare `git commit` after `add -A`. The dirty paths may belong to another cycle; check .pi/work-state/ before discarding.",
-            "git status",
-            "",
-          ]
-        : []),
+      ...commitPrDirtyRootStep(root, "", ""),
       "# 1. Inspect each missing workstream's worktree — the developer's work is still there uncommitted:",
       ...missing.map((m) => `git -C .worktrees/issue-${issue}-${m.id} status --porcelain`),
       "",

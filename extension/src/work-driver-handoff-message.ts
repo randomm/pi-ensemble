@@ -12,6 +12,7 @@ import { renderLensFindings } from "./lens-findings-render.ts";
 import { commitPrRootFactLines } from "./work-driver-commit-inspect.ts";
 import { MAX_REVIEW_ROUNDS } from "./work-driver-context.ts";
 import { explainCap } from "./work-driver-explain.ts";
+import { commitPrDirtyRootStep } from "./work-driver-handoff-commitpr.ts";
 import { type ParkReason, parkAction } from "./work-driver-intent.ts";
 import {
   type WorkEvent,
@@ -367,13 +368,6 @@ export function renderHandoffUserMessage(
         ? `git -C ${repoRoot} rev-parse --abbrev-ref HEAD   # name the branch, then: git -C ${repoRoot} reset --hard <branch>`
         : `git -C ${repoRoot} reset --hard ${root.branch}`
       : `git -C ${repoRoot} reset --hard HEAD`;
-    // #539 — dirty-repoRoot: the tree holds untracked residue (the very
-    // shape that wedged the mechanized path), so the recovery block must
-    // be sweep-safe: run git status first, commit ONLY the applied patch
-    // paths, never bare `git commit` after `add -A`. The dirty paths may
-    // belong to another cycle; check .pi/work-state/ before discarding.
-    const untrackedCount = root ? root.totalEntries - root.stagedCount : 0;
-    const dirtyUntracked = untrackedCount > 0 && !conflicted;
     lines.push(
       "",
       ...(filesPresent.length > 0
@@ -390,13 +384,7 @@ export function renderHandoffUserMessage(
       "",
       ...commitPrRootLines(state, repoRoot),
       "",
-      ...(dirtyUntracked
-        ? [
-            "  # 0. The tree is NOT clean — it holds untracked residue from a prior cycle (or a sibling's in-flight work). Run git status first; commit ONLY the applied patch paths; never bare `git commit` after `add -A`. The dirty paths may belong to another cycle; check .pi/work-state/ before discarding.",
-            `     git -C ${repoRoot} status`,
-            "",
-          ]
-        : []),
+      ...commitPrDirtyRootStep(root, "  ", `     git -C ${repoRoot} `),
       "  # 1. Inspect each missing workstream's worktree:",
       ...missing.map(
         (m) => `     git -C ${repoRoot}/.worktrees/issue-${issue}-${m.id} status --porcelain`,

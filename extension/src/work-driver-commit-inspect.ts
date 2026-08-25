@@ -227,17 +227,17 @@ export function commitPrRootFactLines(
  * cap's "clear it" phrasing).
  */
 export function commitPrRootBlurb(
-  // `totalEntries` is optional: pre-#539 state files record the same shape
+  // #539 — documented intentional loosening of `CommitPrRootState`: `totalEntries`
+  // is optional here because pre-#539 state files record the same shape
   // without it, and a missing field reads as "cleanness unknown" (the
-  // honest answer) rather than a second "clean" claim.
+  // honest answer) rather than a second "clean" claim. The canonical type
+  // stays one interface (workflow-state-schema.ts); the `?` is the only
+  // divergence, and it is written out so a future addition to
+  // `CommitPrRootState` reaches this parameter too.
   root:
-    | {
-        branch: string;
-        stagedCount: number;
-        unmergedPaths: string[];
-        /** #539 — total porcelain entries; > stagedCount means untracked residue. */
+    | (Omit<CommitPrRootState, "capturedAt" | "totalEntries"> & {
         totalEntries?: number;
-      }
+      })
     | undefined,
   err: string | undefined,
   noConflictTail: string,
