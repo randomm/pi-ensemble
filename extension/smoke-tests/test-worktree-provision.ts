@@ -8,16 +8,16 @@
  * `extension/node_modules` was never linked. The fix scans depth-1 package
  * directories, skips empty candidates, and sets `ProvisionResult.problem`
  * when a lockfile-bearing project has no usable tree. The `check-ignore`
- * probe goes through the injected `execFn` so its three exit states
- * (0 = ignored, 1 = not-ignored, ≥2 = git error) are each observable.
+ * probe goes through the injected `execFn` so its three exit states are
+ * each observable.
  */
 
 import { exec } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
-import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { mechanizedBranchSetup } from "../src/work-driver-branch-mechanized.ts";
 import {
   NEVER_SHARED,
@@ -46,14 +46,14 @@ function realExecFn(
   hookRuns?: string[],
   hookOutput = "",
 ): (cmd: string, opts: { cwd?: string }) => Promise<{ stdout: string }> {
+  const e = (cmd: string, cwd?: string) => pexec(cmd, { cwd }).then(({ stdout }) => ({ stdout }));
   return async (cmd: string, opts: { cwd?: string }) => {
     if (cmd.startsWith("sh ")) {
       hookRuns?.push(`${cmd} @ ${opts.cwd}`);
       return { stdout: hookOutput };
     }
     if (cmd.startsWith("git rev-parse")) return { stdout: ".git" };
-    const { stdout } = await pexec(cmd, { cwd: opts.cwd });
-    return { stdout };
+    return e(cmd, opts.cwd);
   };
 }
 
@@ -76,10 +76,9 @@ async function initRepo(
     mkdirSync(path.dirname(abs), { recursive: true });
     writeFileSync(abs, content);
   }
-  // Real git, with a dummy identity so commits work in CI.
-  const run = async (...args: string[]) => {
-    await pexec(`git ${args.join(" ")}`, { cwd: root, env: { ...process.env, HOME: root } });
-  };
+  // Real git, dummy identity so commits work in CI.
+  const run = (...args: string[]) =>
+    pexec(`git ${args.join(" ")}`, { cwd: root, env: { ...process.env, HOME: root } });
   await run("init -q");
   await run("config", "user.email", "test@example.com");
   await run("config", "user.name", "test");
@@ -92,7 +91,6 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
   const wt = path.join(root, ".worktrees", name);
   mkdirSync(wt, { recursive: true });
   writeFileSync(path.join(wt, ".git"), `gitdir: ${path.join(root, ".git", "worktrees", name)}\n`);
-  // Real worktrees get a per-worktree gitdir; create one.
   const perWt = path.join(root, ".git", "worktrees", name);
   mkdirSync(perWt, { recursive: true });
   writeFileSync(path.join(perWt, "gitdir"), `${wt}/.git\n`);
@@ -136,9 +134,8 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
 {
   const { root, wt } = fixture("w");
   try {
-    // `vendor/README.md` is committed, so `vendor` is a TRACKED directory —
-    // `git worktree add` already materialised it and linking would replace
-    // real content with a pointer elsewhere.
+    // `vendor/README.md` is committed, so `vendor` is a TRACKED directory
+    // that `git worktree add` materialised; linking would shadow its real content.
     await initRepo(root, "", { "vendor/README.md": "real vendor content\n" });
     mkdirSync(wt, { recursive: true });
     // A tracked directory is not ignored, so `isIgnored` returns false.
@@ -158,8 +155,8 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
   const { root, wt } = fixture("w");
   try {
     // The #479 live failure: an EMPTY `node_modules/` at the root and the
-    // real tree at `pkg/node_modules`. Pre-#481 the root one was linked and
-    // reported as `linked: ["node_modules"]` — indistinguishable from success.
+    // real tree at `pkg/node_modules` — pre-#481 the root one was linked
+    // and reported as `linked: ["node_modules"]` (indistinguishable from success).
     await initRepo(root, "node_modules/\npkg/node_modules/\n", {
       "pkg/package.json": '{"name": "pkg", "dependencies": {}}\n',
     });
@@ -210,8 +207,8 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
   const { root, wt } = fixture("w");
   try {
     // Only an EMPTY gitignored node_modules at the root, no nested package.
-    // Pre-#481 this returned `linked: ["node_modules"]` — a claim of success
-    // for a bare worktree. Post-#481 it is skipped and a `problem` is set.
+    // Pre-#481: `linked: ["node_modules"]` (a claim of success for a bare worktree);
+    // post-#481 it is skipped and a `problem` is set.
     await initRepo(root, "node_modules/\n", {
       "package.json": '{"name": "root", "dependencies": {}}\n',
     });
@@ -242,10 +239,8 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
 {
   const { root, wt } = fixture("w");
   try {
-    // A Rust project (Cargo.toml at root) with no `target/` (never shared)
-    // and no other shareable dep. The project plainly needs dependencies;
-    // none are findable; a `problem` is set. Provisioning still returns
-    // without throwing — the branch step continues.
+    // A Rust project (Cargo.toml) with no `target/` (never shared) and no
+    // other shareable dep; `problem` set but provisioning returns cleanly.
     await initRepo(root, "target/\n", { "Cargo.toml": '[package]\nname = "demo"\n' });
     mkdirSync(wt, { recursive: true });
     await makeWorktreeFixture(root, "w");
@@ -378,17 +373,14 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
   );
   assert(/tsc --noEmit/.test(cmd), "...and the gate typechecks");
   assert(/bun run check/.test(cmd), "...and lints");
-  assert(
-    /smoke-tests\/test-\*/.test(cmd),
-    "...and runs the offline smoke suite, not a hand-picked subset",
-  );
+  assert(/smoke-tests\/test-\*/.test(cmd), "...and runs the offline smoke suite");
   assert(/-live\.ts/.test(cmd), "...while excluding the live tests, as AGENTS.md §1 specifies");
 }
 
 // ------------- #481: pi-ensemble itself provisions without a hook (real repo probe)
 {
-  // Dogfood: `provisionWorktree` against THIS repo — hook wins if present,
-  // else the symlink loop must link the nested `extension/node_modules`.
+  // Dogfood: `provisionWorktree` against THIS repo (hook wins if present,
+  // else the symlink loop must link the nested `extension/node_modules`).
   const repoRoot = path.resolve(import.meta.dirname, "..", "..");
   const wt = mkdtempSync(path.join(tmpdir(), "wt-provision-"));
   try {
@@ -418,14 +410,12 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
 
 // --------------------- #533: a failed fetch must not abandon the mechanized path
 {
-  // Live #533: a failed `git fetch` must not abandon the mechanized path —
-  // the fallback ops dispatch creates unprovisioned worktrees. Local
-  // mainline created explicitly: `git init`'s first-branch name follows
-  // init.defaultBranch (unset on the CI runner — 32815509116).
+  // Live #533: a failed `git fetch` must not abandon the mechanized path.
+  // Local mainline created explicitly (init's default is runner-defined).
   const root = mkdtempSync(path.join(tmpdir(), "wt-provision-"));
   try {
     await initRepo(root, "node_modules/\n", { "package.json": "{}\n" });
-    await pexec('git checkout -q -B main', { cwd: root, env: { ...process.env, HOME: root } });
+    await pexec("git checkout -q -B main", { cwd: root, env: { ...process.env, HOME: root } });
     const runs: string[] = [];
     const execFn = async (cmd: string, opts: { cwd?: string; maxBuffer?: number }) => {
       runs.push(cmd);
@@ -455,17 +445,25 @@ async function makeWorktreeFixture(root: string, name: string): Promise<string> 
       "...and the worktree is created by worktreeCreate, which provisions it (the hook/symlink path that the ops fallback skips)",
     );
     // Neither resolvable: stub returns empty stdout for
-    // `rev-parse --verify --quiet` (the code's contract for a missing ref)
-    // so the `if (!baseSha)` guard fires the legible throw, asserted here
-    // rather than allowed to escape (the shape CI 32815509116 saw).
+    // `rev-parse --verify --quiet` (the code's contract for a missing ref).
+    // No local `main`: switch to `trunk`, then `update-ref -d refs/heads/main`
+    // (no-op if already absent — 32817064150 made this explicit). Self-asserted.
     const root2 = mkdtempSync(path.join(tmpdir(), "wt-provision-"));
     try {
       await initRepo(root2, "", {});
-      // No local `main`: rename the initial branch.
-      await pexec("git branch -q -m main trunk", {
+      const env2 = { ...process.env, HOME: root2 };
+      await pexec("git checkout -q -b trunk HEAD", { cwd: root2, env: env2 });
+      await pexec("git update-ref -d refs/heads/main", { cwd: root2, env: env2 });
+      const mainRef = await pexec("git rev-parse --verify --quiet refs/heads/main", {
         cwd: root2,
-        env: { ...process.env, HOME: root2 },
-      });
+        env: env2,
+      })
+        .then(() => "present")
+        .catch(() => "absent");
+      assert(
+        mainRef === "absent",
+        "fixture precondition: refs/heads/main is absent after the branch switch",
+      );
       let threw = "";
       try {
         await mechanizedBranchSetup(
