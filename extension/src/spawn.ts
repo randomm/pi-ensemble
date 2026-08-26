@@ -270,6 +270,40 @@ async function spawnSpecialistInner(
     }
   };
 
+  // #543 F1/F6 — dispatch caps (loop detector + token budget). The cap
+  // session (spawn-caps.ts) owns the per-spawn detector/tracker state, the
+  // grace-window timers and the killCause priority (loop > inactivity >
+  // timeout > token-budget > abort — the most specific wins). Created
+  // BEFORE `createInterface` below because the line handler references
+  // `caps` on the first stdout line: a `const caps` initialized after the
+  // attach would be in the TDZ for any early line (ReferenceError).
+  let timedOut = false;
+  let inactivityKilled = false;
+  let aborted = false;
+  // #543 H1 — grace-window kill race: observed EXITS (exit + 'close') set
+  // childExited immediately, before the `once(child, "exit")` await below
+  // can resolve. The guard relies on the `exit` event's ordering (it fires
+  // before the process is reaped); `close` is belt-and-braces — it fires
+  // only after `exit`, once stdio is fully drained.
+  let childExited = false;
+  child.on("exit", () => {
+    childExited = true;
+  });
+  child.on("close", () => {
+    childExited = true;
+  });
+  const caps: CapSession = createCapSession({
+    role: spec.role,
+    child,
+    onSteer: opts.onSteer,
+    totalTokens: () => runningState.totalTokens,
+    timedOut: () => timedOut,
+    inactivityKilled: () => inactivityKilled,
+    aborted: () => aborted,
+    capKillGraceMs: capKillGraceMs(),
+    childExited: () => childExited,
+  });
+
   // Inactivity watchdog state (#296): ANY stdout line counts as life —
   // parseable or not. Checked on a coarse interval below.
   let lastActivityAt = Date.now();
@@ -334,9 +368,10 @@ async function spawnSpecialistInner(
   // timeout hangs the parent indefinitely (observed in the wild: overnight
   // stuck session). The backstop only catches runaway loops; the inactivity
   // watchdog below is what detects true hangs, and it does so without a view
-  // on how fast the child's model happens to be.
+  // on how fast the child's model happens to be. `timedOut` / `inactivityKilled`
+  // / `aborted` are declared with the cap session above (the session reads
+  // them by closure, so they must exist before `createCapSession` runs).
   const timeoutMs = opts.timeoutMs ?? spawnBackstopMs();
-  let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
     child.kill("SIGTERM");
@@ -348,7 +383,6 @@ async function spawnSpecialistInner(
   // poll — half the budget, clamped to [250ms, 30s] so production budgets
   // poll cheaply and short test budgets still fire promptly.
   const inactivityMs = inactivityTimeoutMs();
-  let inactivityKilled = false;
   const inactivityPoll =
     inactivityMs > 0
       ? setInterval(
@@ -366,7 +400,6 @@ async function spawnSpecialistInner(
 
   // Propagate Pi's user-cancel (Esc) signal: kill the child so the tool
   // execute promise resolves and Pi un-stuck immediately.
-  let aborted = false;
   const onAbort = () => {
     aborted = true;
     child.kill("SIGTERM");
@@ -379,35 +412,6 @@ async function spawnSpecialistInner(
       opts.signal.addEventListener("abort", onAbort, { once: true });
     }
   }
-
-  // #543 H1 — grace-window kill race. Observed EXITS (exit + 'close') set
-  // childExited immediately; the `once(child, "exit")` await below can only
-  // resolve AFTER those events fire, so the poll callback sees the flag before
-  // the kill would otherwise be marked on a self-exiting child.
-  let childExited = false;
-  child.on("exit", () => {
-    childExited = true;
-  });
-  child.on("close", () => {
-    childExited = true;
-  });
-
-  // #543 F1/F6 — dispatch caps (loop detector + token budget). The cap
-  // session (spawn-caps.ts) owns the per-spawn detector/tracker state, the
-  // grace-window timers and the killCause priority (loop > inactivity >
-  // timeout > token-budget > abort — the most specific wins) — see its
-  // module doc.
-  const caps: CapSession = createCapSession({
-    role: spec.role,
-    child,
-    onSteer: opts.onSteer,
-    totalTokens: () => runningState.totalTokens,
-    timedOut: () => timedOut,
-    inactivityKilled: () => inactivityKilled,
-    aborted: () => aborted,
-    capKillGraceMs: capKillGraceMs(),
-    childExited: () => childExited,
-  });
 
   let exitCode: number | null = null;
   try {

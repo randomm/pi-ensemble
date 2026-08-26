@@ -65,20 +65,22 @@ export function explainCap(
       // operator sees WHICH call repeated (the #296 structured-kill contract
       // — a bare cause cannot say what looped).
       const ev = state.pipelineState.capEvidence;
-      const tool = ev?.tool ? `repeating \`${ev.tool}\`` : "repeating the same tool call";
-      const count = ev?.count ? ` ${ev.count} times` : "";
-      const range = ev?.turnRange ? ` (turns ${ev.turnRange[0]}–${ev.turnRange[1]})` : "";
-      const fp = ev?.fingerprint ? ` with normalised args \`${ev.fingerprint}\`` : "";
+      const loop = ev && ev.kind === "loop" ? ev : undefined;
+      const tool = loop?.tool ? `repeating \`${loop.tool}\`` : "repeating the same tool call";
+      const count = loop?.count ? ` ${loop.count} times` : "";
+      const range = loop?.turnRange ? ` (turns ${loop.turnRange[0]}–${loop.turnRange[1]})` : "";
+      const fp = loop?.fingerprint ? ` with normalised args \`${loop.fingerprint}\`` : "";
       return `a subagent was looped on — it kept re-issuing the same ${tool}${count}${range}${fp}, so the harness killed it before it burned more budget (override: PI_ENSEMBLE_DISPATCH_CAPS / PI_ENSEMBLE_CAP_KILL_GRACE_MS). This is a detected loop, NOT a provider fault: retrying the same prompt would loop again, so the fix is a changed approach (or a tighter prompt), not a re-dispatch`;
     }
     case "token-budget": {
       // #543 — the F6 cumulative token budget was crossed. The budget and the
       // spend at the kill live in pipelineState.capEvidence.
       const ev = state.pipelineState.capEvidence;
-      const budget = ev?.budgetTokens
-        ? ` ${Math.round(ev.budgetTokens).toLocaleString()} tokens`
+      const budgetEv = ev && ev.kind === "token-budget" ? ev : undefined;
+      const budget = budgetEv
+        ? ` ${Math.round(budgetEv.budgetTokens).toLocaleString()} tokens`
         : "";
-      const used = ev?.usedTokens ? ` (spent ${Math.round(ev.usedTokens).toLocaleString()})` : "";
+      const used = budgetEv ? ` (spent ${Math.round(budgetEv.usedTokens).toLocaleString()})` : "";
       return `a subagent crossed its cumulative token budget${budget}${used} — a cost cap, not a provider fault (override: PI_ENSEMBLE_TOKEN_BUDGET_<ROLE>). The budget bounds context-driven spend; raise it only if the work genuinely needs the context, or re-dispatch with a tighter prompt so it fits`;
     }
     case "explore-already-complete":

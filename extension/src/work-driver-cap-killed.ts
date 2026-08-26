@@ -44,8 +44,12 @@ export function isCapKilled(result: { killCause?: string }): boolean {
 }
 
 /** The cap string for a dispatch-cap kill, or undefined. Accepts a
- * `DispatchResult` or any event carrying a `killCause`. Returns the FIXED
- * literal so the caller can assign it to a cap-hit `cap` without a cast. */
+ * `DispatchResult`, a `dispatch-failed` WorkEvent, or any object carrying a
+ * `killCause` — ONE place owns the killCause → cap-string mapping (the step
+ * router, the adversarial / lens cap-kill adapters and the checkpoint all
+ * route through here so the two fixed literals cannot drift apart). Returns
+ * the FIXED literal so the caller can assign it to a cap-hit `cap` without
+ * a cast. */
 export function capKilledString(result: { killCause?: string }): CapString | undefined {
   if (!isCapKilled(result)) return undefined;
   return result.killCause === "token-budget" ? "token-budget" : "loop-detected";

@@ -120,6 +120,11 @@ export class TokenBudgetTracker {
   killed = false;
   private lastMessageEndAt = 0;
   private readonly budget: number;
+  /** #544 — the grace window the tracker was armed with, snapshotted at
+   * construction. Reading `capKillGraceMs()` again on every poll would let a
+   * mid-spawn env mutation desync the token-budget window from the loop
+   * detector's (createCapSession reads it once and passes it to both). */
+  private readonly capKillGraceMs: number;
   private readonly onSteer?: (msg: string, source: SteerSource) => void;
   private readonly kill: () => void;
   private readonly tokens: () => number;
@@ -129,11 +134,20 @@ export class TokenBudgetTracker {
     onSteer: ((msg: string, source: SteerSource) => void) | undefined,
     kill: () => void,
     tokens: () => number,
+    graceMs: number = capKillGraceMs(),
   ) {
     this.budget = tokenBudgetFor(role);
     this.onSteer = onSteer;
     this.kill = kill;
     this.tokens = tokens;
+    this.capKillGraceMs = graceMs;
+  }
+
+  /** The budget the tracker was constructed with — the number its kill fired
+   * on. Attribution (spawn-caps.ts capKillAttribution) must record THIS, not
+   * a re-read of the env, which can differ if the env was mutated mid-spawn. */
+  get budgetTokens(): number {
+    return this.budget;
   }
 
   /** Called on every assistant message_end. Triggers the budget cap once. */
@@ -152,7 +166,7 @@ export class TokenBudgetTracker {
         /* child already gone — the kill below still fires */
       }
     }
-    if (capKillGraceMs() > 0) {
+    if (this.capKillGraceMs > 0) {
       this.killArmed = true;
     } else {
       this.killed = true;
@@ -163,7 +177,7 @@ export class TokenBudgetTracker {
   /** Grace-window poll: kill once grace ms elapse with no new message_end. */
   poll(): void {
     if (!this.killArmed || this.killed) return;
-    if (Date.now() - this.lastMessageEndAt >= capKillGraceMs()) {
+    if (Date.now() - this.lastMessageEndAt >= this.capKillGraceMs) {
       this.killed = true;
       this.kill();
     }

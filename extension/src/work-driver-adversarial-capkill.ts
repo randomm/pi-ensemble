@@ -16,6 +16,7 @@
  */
 
 import type { AdversarialOutcome } from "./work-driver-adversarial-types.ts";
+import { capKilledString } from "./work-driver-cap-killed.ts";
 import type { CapEvidence } from "./workflow-state-cap.ts";
 import type { WorkEvent } from "./workflow-state.ts";
 
@@ -38,13 +39,8 @@ export function capHitForCapKill(
       evidence?: CapEvidence;
     }
   | undefined {
-  const killCause = (o as AdversarialOutcome & { killCause?: string }).killCause;
-  const cap =
-    killCause === "loop"
-      ? ("loop-detected" as const)
-      : killCause === "token-budget"
-        ? ("token-budget" as const)
-        : undefined;
+  const killCause = o.killCause;
+  const cap = capKilledString({ killCause });
   if (!o.ok && (o.infra || o.threw) && cap) {
     const evidence: CapEvidence | undefined = o.loopEvidence
       ? { kind: "loop", tool: o.loopEvidence.tool, count: o.loopEvidence.count }

@@ -1,18 +1,25 @@
 /**
  * work-driver-handoff-recovery.chat — the in-chat twin of
  * `recoveryCommandsMarkdown` in work-driver-handoff-recovery.md.ts
- * (the GitHub-body renderer). Same cap → command mapping, rendered for
- * the Pi chat: `#`-prefixed lines indented two spaces (no bash fence),
- * `git -C <repoRoot>`-qualified paths, absolute scratch paths.
+ * (the GitHub-body renderer). PURE PRESENTER over the shared decision in
+ * work-driver-handoff-recovery.ts (`recoveryStepsForCap`): it re-qualifies
+ * the shared literal lines to absolute paths (`git -C <repoRoot>`,
+ * absolute scratch), emits the cap-specific PROSE, and falls back to the
+ * branch-name-predicate branches when the shared recipe is empty. The
+ * WHICH-cap-yields-WHICH-step decision lives in the shared module — one
+ * place, so the two surfaces cannot drift apart.
  *
  * Split out of work-driver-handoff-message.ts (AGENTS.md §12
- * file-size limit). The mapping itself (which cap yields which
- * commands) lives in this module; the markdown renderer is pure
- * presentation over the same decisions.
+ * file-size limit).
  */
 
 import { killDetail } from "./kill-detail.ts";
 import { commitPrDirtyRootStep } from "./work-driver-handoff-commitpr.ts";
+import {
+  type RecoveryStep,
+  recoveryStepsForCap,
+  requalifyLine,
+} from "./work-driver-handoff-recovery.ts";
 import { type ParkReason, parkAction } from "./work-driver-intent.ts";
 import {
   type WorkEvent,
@@ -21,7 +28,29 @@ import {
   missingWorkstreamsFromConsolidation,
 } from "./workflow-state.ts";
 
-type Cap = Extract<WorkEvent, { kind: "cap-hit" }>["cap"];
+/** Resolve a step's shared lines to this surface's concrete lines. */
+function resolveLines(
+  step: RecoveryStep,
+  ctx: { repoRoot: string; scratchDirAbs: string; handoffBodyPath: string },
+): string[] {
+  return step.lines.map((line) => {
+    if (line === `cat ${ctx.handoffBodyPath}`) return line;
+    return requalifyLine(line, ctx.repoRoot, ctx.scratchDirAbs);
+  });
+}
+
+/** Render a step's comment + commands in this surface's indentation. */
+function renderStep(
+  step: RecoveryStep,
+  refCtx: { repoRoot: string; scratchDirAbs: string; handoffBodyPath: string },
+  reason: ParkReason,
+  issue: number,
+): string[] {
+  const comment = step.comment.map((c) =>
+    c === "1. Do this: <park-action>" ? `1. Do this: ${parkAction(reason, issue)}` : c,
+  );
+  return [...comment.map((c) => `  # ${c}`), ...resolveLines(step, refCtx).map((l) => `     ${l}`)];
+}
 
 export function recoveryCommandsChat(
   state: WorkState,
@@ -30,9 +59,7 @@ export function recoveryCommandsChat(
 ): string[] {
   const ps = state.pipelineState;
   const issue = state.issue;
-  const capHit = [...state.eventLog].reverse().find((e) => e.kind === "cap-hit");
-  const cap: Cap | undefined = capHit ? capHit.cap : undefined;
-  const lines: string[] = ["", "What to do next — pick one:"];
+  const { cap, steps } = recoveryStepsForCap(state);
   const handoffBodyPath =
     (
       state.eventLog
@@ -40,25 +67,12 @@ export function recoveryCommandsChat(
         .reverse()
         .find((e) => e.kind === "handoff-emitted") as { handoffBodyPath?: string } | undefined
     )?.handoffBodyPath ?? `${scratchDirAbs}/handoff-comment.md`;
-  if (cap === "explore-already-complete") {
-    lines.push(
-      "",
-      "  # 1. Verify by reading the issue + the explore report:",
-      `     gh issue view ${issue}`,
-      `     cat ${handoffBodyPath}`,
-      "",
-      "  # 2. If you agree the issue is done, close it:",
-      `     gh issue close ${issue} --comment "Verified complete by /work — see prior PR"`,
-      "",
-      "  # 3. If you disagree, add context and re-run /work:",
-      `     gh issue comment ${issue} --body "Additional context: <what /work missed>"`,
-      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
-      "     # then restart Pi",
-      "",
-      "  # 4. Abandon the handoff entry (no code was written; safe to discard):",
-      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
-    );
-  } else if (cap === "awaiting-human-merge") {
+  const refCtx = { repoRoot, scratchDirAbs, handoffBodyPath };
+  const reason = (ps.normalisedSpec?.parkReason ?? "underspecified") as ParkReason;
+  const lines: string[] = ["", "What to do next — pick one:"];
+
+  // Cap-specific PROSE the surface renders before its steps.
+  if (cap === "awaiting-human-merge") {
     const hold = ps.mergeHold;
     const pr = ps.prNumber;
     lines.push(
@@ -67,82 +81,20 @@ export function recoveryCommandsChat(
       hold?.authorityGranted
         ? `Merging is permitted here (${hold.authoritySource}), but the evidence gate refused: ${hold.evidenceReason ?? "no evidence"}.`
         : "Nothing grants this driver authority to merge in this project. That is the default: merging is opt-in.",
-      "",
-      "  # 1. See what the checks actually say:",
-      `     gh pr checks ${pr ?? "<pr>"}`,
-      "",
-      "  # 2. Review and merge it yourself:",
-      `     gh pr view ${pr ?? "<pr>"} --web`,
-      ...(hold?.authorityGranted
-        ? []
-        : [
-            "",
-            "  # 3. Or grant the driver authority — either add an explicit line to AGENTS.md",
-            '  #    (e.g. "LLMs are allowed to squash merge PRs"), or pass --merge:',
-            `     /work ${issue} --merge`,
-          ]),
     );
   } else if (cap === "existing-pr-detected") {
     const pr = ps.existingPr;
-    const head = pr?.headRefName ?? "<branch>";
     lines.push(
       "",
-      `Existing PR #${pr?.number ?? "?"} on \`${head}\` (matched by ${pr?.matchedBy ?? "?"}).`,
+      `Existing PR #${pr?.number ?? "?"} on \`${pr?.headRefName ?? "<branch>"}\` (matched by ${pr?.matchedBy ?? "?"}).`,
       "No branch was created and no subagent ran.",
-      "",
-      "  # 1. Look at what the open PR already contains:",
-      `     gh pr view ${pr?.number ?? "<pr>"} --json state,mergeable,files`,
-      "",
-      "  # 2. Continue that PR instead of starting over (preferred):",
-      `     git -C ${repoRoot} fetch origin`,
-      `     git -C ${repoRoot} checkout ${head}`,
-      "",
-      "  # 3. Or abandon it, then re-run — the pre-flight will pass once it is closed:",
-      `     gh pr close ${pr?.number ?? "<pr>"} --comment "Superseded; restarting via /work"`,
-      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
-      "     # then restart Pi",
-      "",
-      "  # 4. Or proceed anyway, accepting a second PR for this issue:",
-      "     PI_ENSEMBLE_PR_PREFLIGHT=0 pi",
-    );
-  } else if (cap === "explore-needs-clarification") {
-    lines.push(
-      "",
-      "  # 1. Read what explore couldn't determine:",
-      `     cat ${handoffBodyPath}`,
-      "",
-      "  # 2. Edit the issue body to add the missing acceptance criteria / scope:",
-      `     gh issue edit ${issue}`,
-      "",
-      "  # 3. Re-run /work once the issue is clearer:",
-      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
-      "     # then restart Pi",
-      "",
-      "  # 4. Abandon the handoff entry:",
-      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
     );
   } else if (cap === "explore-bodies-empty") {
     const failed = ps.emptyBodyIssues ?? [];
-    const failedList = failed.map((f) => `#${f.issue}`).join(", ") || `#${issue}`;
-    const probeIssue = failed[0]?.issue ?? issue;
     lines.push(
       "",
       "Empty/error body fetches:",
       ...failed.map((f) => `  #${f.issue} — ${f.reason}`),
-      "",
-      "  # 1. Confirm gh auth + version (most common cause: projectCards GraphQL deprecation in older gh):",
-      "     gh auth status",
-      "     gh --version",
-      "",
-      "  # 2. Probe a failing issue via REST (works when `gh issue view` is broken):",
-      `     gh api repos/<owner>/<repo>/issues/${probeIssue} --jq .body | head`,
-      "",
-      "  # 3. If gh issue view is hijacked, check for a misbehaving gh extension:",
-      "     gh extension list",
-      "",
-      `  # 4. Once fixed, re-run /work — the cycle halts cleanly with no code written for ${failedList}:`,
-      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
-      "     # then restart Pi",
     );
   } else if (cap === "step-back-revise-spec") {
     const sb = [...state.eventLog]
@@ -159,25 +111,31 @@ export function recoveryCommandsChat(
       "",
       "Proposed revision (preview — full text in the GitHub handoff body):",
       `  ${(sb?.proposedRevision ?? "(not parsed)").slice(0, 160)}${(sb?.proposedRevision?.length ?? 0) > 160 ? "..." : ""}`,
-      "",
-      "  # 1. Read the proposed revision + handoff context:",
-      `     cat ${handoffBodyPath}`,
-      "",
-      "  # 2. Revise the issue body via /plan (or gh issue edit):",
-      `     /plan ${issue}    # or: gh issue edit ${issue}`,
-      "",
-      "  # 3. Restart /work from scratch against the revised spec:",
-      `     /work ${issue} --restart`,
-      "",
-      "  # 4. Abandon this cycle entirely:",
-      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
     );
-  } else if (cap === "commit-pr-incomplete-consolidation") {
+  } else if (cap === "review-incomplete") {
+    lines.push(
+      "",
+      "The six-pass review is INCOMPLETE — at least one lens could not finish,",
+      "so the diff was not fully reviewed. The completed lenses' verdicts are",
+      "shown above; the cap-hit checkpoint block says what was saved on the",
+      "killed lens's side.",
+    );
+  } else if (cap === "intent-park") {
+    // #398 — this cap fires in `explore`, BEFORE the branch step: no branch,
+    // no worktree, no PR, nothing written. `parkAction` already has the text.
+    lines.push(
+      "",
+      "No branch, no worktree and no PR — the cycle halted at intent resolution,",
+      "before plan or branch ran. There is nothing to inspect, push or abandon.",
+    );
+  }
+
+  if (cap === "commit-pr-incomplete-consolidation") {
+    // Interleaved with the surface's consolidated-verdict sections (the
+    // files-present list, the commitPrRoot state block, the unmerged-paths
+    // conflict hint) — the shared decision supplies the per-workstream
+    // inspect/apply sequence these sections wrap.
     const missing = missingWorkstreamsFromConsolidation(ps.incompleteConsolidation);
-    // #540 — the PRESENT side of the verdict, mirrored from the markdown
-    // renderer: the committed file list the gate recorded next to the
-    // missing list. Absent on pre-#540 state files (the field was a bare
-    // array then) — say nothing rather than render a hollow line.
     const filesPresent = filesPresentFromConsolidation(ps.incompleteConsolidation);
     const root = ps.commitPrRoot;
     const conflicted = (root?.unmergedPaths ?? []).length > 0;
@@ -189,6 +147,18 @@ export function recoveryCommandsChat(
         ? `git -C ${repoRoot} rev-parse --abbrev-ref HEAD   # name the branch, then: git -C ${repoRoot} reset --hard <branch>`
         : `git -C ${repoRoot} reset --hard ${root.branch}`
       : `git -C ${repoRoot} reset --hard HEAD`;
+    const step1 = steps.find(
+      (s) => s.section === "commit-pr-incomplete-consolidation" && s.comment[0]?.startsWith("1."),
+    );
+    const step2 = steps.find(
+      (s) => s.section === "commit-pr-incomplete-consolidation" && s.comment[0]?.startsWith("2."),
+    );
+    const step3 = steps.find(
+      (s) => s.section === "commit-pr-incomplete-consolidation" && s.comment[0]?.startsWith("3."),
+    );
+    const step4 = steps.find(
+      (s) => s.section === "commit-pr-incomplete-consolidation" && s.comment[0]?.startsWith("4."),
+    );
     lines.push(
       "",
       ...(filesPresent.length > 0
@@ -205,9 +175,10 @@ export function recoveryCommandsChat(
       "",
       ...commitPrDirtyRootStep(root, "  ", `     git -C ${repoRoot} `),
       "  # 1. Inspect each missing workstream's worktree:",
-      ...missing.map(
-        (m) => `     git -C ${repoRoot}/.worktrees/issue-${issue}-${m.id} status --porcelain`,
-      ),
+      ...resolveLines(
+        step1 ?? { section: "commit-pr-incomplete-consolidation", comment: [], lines: [] },
+        refCtx,
+      ).map((l) => `     ${l}`),
       "",
       ...(conflicted
         ? [
@@ -219,67 +190,35 @@ export function recoveryCommandsChat(
             "",
           ]
         : []),
-      "  # 2. Apply each missing diff to the integration branch. Stage inside the",
-      "  #    worktree FIRST — `git diff HEAD` alone silently omits untracked new",
-      "  #    files — and use --3way, which resolves two workstreams touching",
-      "  #    different regions of one file instead of rejecting the second:",
-      ...missing.flatMap((m) => [
-        `     git -C ${repoRoot}/.worktrees/issue-${issue}-${m.id} add -A`,
-        `     git -C ${repoRoot}/.worktrees/issue-${issue}-${m.id} diff --cached --binary | git -C ${repoRoot} apply --3way --binary --index`,
-      ]),
+      ...(step2?.comment ?? []).map((c) => `  # ${c}`),
+      ...resolveLines(
+        step2 ?? { section: "commit-pr-incomplete-consolidation", comment: [], lines: [] },
+        refCtx,
+      ).map((l) => `     ${l}`),
       "",
-      "  # 3. Verify all workstreams' files now appear, then commit + push:",
-      `     git -C ${repoRoot} diff --name-only --cached`,
-      `     git -C ${repoRoot} commit -m '<concise>'`,
-      `     git -C ${repoRoot} push`,
+      ...(step3?.comment ?? []).map((c) => `  # ${c}`),
+      ...resolveLines(
+        step3 ?? { section: "commit-pr-incomplete-consolidation", comment: [], lines: [] },
+        refCtx,
+      ).map((l) => `     ${l}`),
       "",
-      "  # 4. Or: abandon + restart from scratch:",
-      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
-      `     /work ${issue} --restart`,
+      ...(step4?.comment ?? []).map((c) => `  # ${c}`),
+      ...resolveLines(
+        step4 ?? { section: "commit-pr-incomplete-consolidation", comment: [], lines: [] },
+        refCtx,
+      ).map((l) => `     ${l}`),
     );
-  } else if (cap === "intent-park") {
-    // #398 — this cap fires in `explore`, BEFORE the branch step: no branch,
-    // no worktree, no PR, nothing written. It used to fall through to the
-    // generic block below and tell the operator to retry a timeout that never
-    // happened, keep worktree changes that do not exist, and push a branch
-    // that was never created. `parkAction` already produces the right text.
-    const reason = (ps.normalisedSpec?.parkReason ?? "underspecified") as ParkReason;
-    lines.push(
-      "",
-      "No branch, no worktree and no PR — the cycle halted at intent resolution,",
-      "before plan or branch ran. There is nothing to inspect, push or abandon.",
-      "",
-      `  # 1. Do this: ${parkAction(reason, issue)}`,
-      "",
-      "  # 2. Read the resolver's own reasoning before deciding:",
-      `     cat ${repoRoot}/.pi/work-state/${issue}/spec.txt`,
-      "",
-      "  # 3. Then re-run — the state file is discarded automatically on --restart:",
-      `     /work ${issue} --restart`,
-    );
-  } else if (cap === "review-incomplete") {
-    // #543 F5 — the review could not be completed (a loop/token-budget cap
-    // killed one of the six lenses, or a lens failed every retry). The
-    // completed lenses' verdicts are preserved in the event log and
-    // rendered above (lastFindings + workstream-verdict sections); the
-    // recovery is to re-run the review, not to inspect or push the tree.
-    lines.push(
-      "",
-      "The six-pass review is INCOMPLETE — at least one lens could not finish,",
-      "so the diff was not fully reviewed. The completed lenses' verdicts are",
-      "shown above; the cap-hit checkpoint block says what was saved on the",
-      "killed lens's side.",
-      "",
-      "  # 1. Read what the completed lenses found (above) + the driver status file:",
-      `     cat ${scratchDirAbs}/status-code-review-specialist.md`,
-      "",
-      "  # 2. Re-run the review once the cause (looping lens / infra) is resolved:",
-      `     /work ${issue} --restart`,
-      "",
-      "  # 3. Or abandon the cycle:",
-      `     rm ${repoRoot}/.pi/work-state/${issue}.json`,
-    );
-  } else if (!ps.branchName) {
+    return lines;
+  }
+
+  if (steps.length > 0) {
+    for (const step of steps) {
+      lines.push("", ...renderStep(step, refCtx, reason, issue));
+    }
+    return lines;
+  }
+
+  if (!ps.branchName) {
     // Nothing was created, so the generic block below is all wrong: it tells
     // the operator to inspect a worktree that does not exist and push a branch
     // that was never made. This used to be special-cased per cap, which meant

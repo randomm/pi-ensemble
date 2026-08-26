@@ -37,7 +37,11 @@ export function lensCapKillEvent(
     label: killedLens ? `lens:${killedLens.lens}` : `lens-review×6 (round ${round})`,
     ms,
     at,
-    exitCode: 1,
+    // #544 — the cap engine kills with SIGTERM, so the observed exit is 143
+    // (128 + 15). The previous hardcoded 1 made this event structurally
+    // indistinguishable from a genuine exit-1 failure to consumers branching
+    // on exitCode; `killCause` remains the authoritative signal.
+    exitCode: 143,
     killCause: capKill,
     errorTail: `killed by pi-ensemble (${capKill === "loop" ? "loop detected" : "token budget crossed"}) — self-inflicted cap, not a provider fault`,
     usage: summary.usage,

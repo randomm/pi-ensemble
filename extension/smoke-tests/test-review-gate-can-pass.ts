@@ -191,13 +191,18 @@ const roundCap: WorkEvent = {
   const approvedIdx = lens.indexOf('summary.verdict === "APPROVED"');
   const issuesIdx = lens.indexOf('kind: "lens-issues-found"');
   const capIdx = lens.indexOf("appendReviewCapHit(");
-  const incompleteIdx = lens.search(/cap:\s*\(capKilled \?\? String\.raw`review-incomplete`\)/);
+  const constIdx = lens.indexOf('REVIEW_INCOMPLETE_CAP = "review-incomplete"');
+  const fallbackIdx = lens.indexOf("capKilled ?? REVIEW_INCOMPLETE_CAP");
   assert(
-    approvedIdx >= 0 && issuesIdx >= 0 && capIdx >= 0 && incompleteIdx >= 0,
-    "all four landmarks are present in work-driver-lens-verdicts.ts",
+    approvedIdx >= 0 &&
+      issuesIdx >= 0 &&
+      capIdx >= 0 &&
+      constIdx >= 0 &&
+      fallbackIdx >= 0,
+    "all five landmarks are present in work-driver-lens-verdicts.ts (incl. the named REVIEW_INCOMPLETE_CAP const + its bare `??` fallback)",
   );
   assert(
-    capIdx > issuesIdx && capIdx < incompleteIdx,
+    capIdx > issuesIdx && capIdx < fallbackIdx,
     "canary: appendReviewCapHit is called inside the ISSUES_FOUND branch only — it ran unconditionally",
   );
   assert(

@@ -13,6 +13,7 @@
  */
 
 import * as lifecycle from "./lifecycle-events.ts";
+import type { RoleName } from "./roles.ts";
 import { trace } from "./trace.ts";
 import { capKilledString } from "./work-driver-cap-killed.ts";
 import { STEP_FAILURE_POLICY } from "./work-driver-context.ts";
@@ -263,7 +264,7 @@ export async function routeStepOutcome(
           nextStep: "handoff",
         };
         if (capEvent.cap === "loop-detected" || capEvent.cap === "token-budget") {
-          capEvent.role = (tail as { role?: string }).role as typeof capEvent.role;
+          capEvent.role = (tail as { role?: RoleName }).role;
           // #543 F4(j) — the operator-facing explanation of WHAT looped (or
           // how much was spent) lives on `pipelineState.capEvidence`. The
           // structured evidence is already on the dispatch-failed event (the

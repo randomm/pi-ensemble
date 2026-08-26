@@ -27,11 +27,11 @@
 import { mock } from "bun:test";
 
 import {
-  capKillGraceMs,
   createLoopDetector,
   loopDetectorEnabled,
   loopSteerText,
 } from "../src/loop-detector.ts";
+import { capKillGraceMs } from "../src/spawn-support.ts";
 import type { LoopDetectionEvent, LoopDetector } from "../src/loop-detector.ts";
 import type { PiContentBlock } from "../src/pi-event-shapes.ts";
 import { createCapSession } from "../src/spawn-caps.ts";

@@ -4,11 +4,20 @@
  */
 
 import type { runLensReview } from "./lens-review.ts";
-import { DISPATCH_CAP_KILL_CAUSES, capKilledString } from "./work-driver-cap-killed.ts";
+import { capKilledString, isCapKilled } from "./work-driver-cap-killed.ts";
 import type { DriverContext } from "./work-driver-context.ts";
 import { appendReviewCapHit } from "./work-driver-lens-cap.ts";
 import { appendEvent } from "./workflow-state-update.ts";
 import type { WorkState } from "./workflow-state.ts";
+
+/** #544 — the REVIEW_INCOMPLETE fallback cap. Named const so the
+ * structural landmark test-review-gate-can-pass.ts reads is the const's
+ * presence + the bare `capKilled ??` fallback (stable), not a
+ * `String.raw`-concatenated literal co-depending on the test's regex. */
+export const REVIEW_INCOMPLETE_CAP = "review-incomplete" as Extract<
+  import("./workflow-state-events.ts").WorkEvent,
+  { kind: "cap-hit" }
+>["cap"];
 
 export async function applyLensVerdict(
   summary: Awaited<ReturnType<typeof runLensReview>>,
@@ -60,30 +69,20 @@ export async function applyLensVerdict(
     // The cap string comes from the lens summary (which lens the cap engine
     // killed), not from the event log: runLens records the summary and
     // returns BEFORE the cap-kill dispatch-failed event is appended, so the
-    // log cannot be the source here. The `review`-`incomplete` fallback below
-    // is the structural landmark the gate canary reads off this file, so the
-    // cap expression must stay a bare `?? "review-incomplete"` literal here.
-    const capKillLens = summary.lenses.find((l) =>
-      (DISPATCH_CAP_KILL_CAUSES as readonly string[]).includes(l.killCause ?? ""),
-    );
-    // The REVIEW_INCOMPLETE fallback below is the structural landmark
-    // test-review-gate-can-pass.ts reads off this file, so the cap
-    // expression must stay a bare `?? "review-incomplete"` literal —
-    // no intermediate variable, no reassignment. The concatenation keeps
-    // the literal off the comment-stripped source scan while the typed
-    // const keeps it a union member, not a bare string.
+    // log cannot be the source here. The expression below —
+    // `capKilled ?? REVIEW_INCOMPLETE_CAP` — is the structural landmark
+    // test-review-gate-can-pass.ts reads off this file: the named const +
+    // the bare `??` fallback keep it stable without a String.raw concat.
+    const capKillLens = summary.lenses.find((l) => isCapKilled({ killCause: l.killCause }));
     const capKilled = capKillLens
       ? capKilledString({ killCause: capKillLens.killCause })
       : undefined;
     state = appendEvent(state, {
       kind: "cap-hit",
       at: Date.now(),
-      // F4(g) REVIEW_INCOMPLETE fallback — concat + assertion because a bare
-      // literal here would collide with the structural-landmark comment above.
-      cap: (capKilled ?? String.raw`review-incomplete`) as Extract<
-        import("./workflow-state-events.ts").WorkEvent,
-        { kind: "cap-hit" }
-      >["cap"],
+      // F4(g) REVIEW_INCOMPLETE fallback — a cap-killed lens records its
+      // fixed literal; anything else is a review that could not complete.
+      cap: capKilled ?? REVIEW_INCOMPLETE_CAP,
       reviewRound: round,
       nextStep: "handoff",
     });

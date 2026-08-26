@@ -15,7 +15,7 @@ export type WideningScanEvent = {
   /**
    * Issue #279 — type-widening scan results.
    *
-   * The deterministic scanner (invariant-scan.ts fires before
+   * The deterministic scanner (invariant-scan.ts) fires before
    * lens-review, capturing compiler-enforced invariants being
    * removed or weakened. Findings are injected into the lens
    * context with framing "the ARCHITECTURE lens must answer: what

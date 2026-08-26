@@ -7,7 +7,7 @@
  * 5s SIGKILL, with the structured cause set BEFORE the kill, so
  * DispatchResult.killCause, lastActivity and the stderr attribution line
  * follow #296's structured-kill contract. killCause priority
- * (resolveKillCause): loop > inactivity > timeout > token-budget > abort —
+ * (resolveKillCause): loop > inactivity > token-budget > timeout > abort —
  * the most specific wins (the #296 invariant; #296's three values are
  * untouched). A budget-killed child that ALSO tripped the wall-clock
  * backstop is a token-budget kill, not a timeout: the attribution drives
@@ -25,7 +25,7 @@ import type { SteerSource } from "./dispatch-steer.ts";
 import { type LoopDetector, createLoopDetector, loopDetectorEnabled } from "./loop-detector.ts";
 import type { PiContentBlock } from "./pi-event-shapes.ts";
 import type { LoopObserver } from "./progress.ts";
-import { TokenBudgetTracker, tokenBudgetFor } from "./spawn-support.ts";
+import { TokenBudgetTracker } from "./spawn-support.ts";
 import type { DispatchResult } from "./types.ts";
 
 /** The shared kill: SIGTERM + 5s SIGKILL escalation. */
@@ -35,7 +35,7 @@ function killChild(child: ChildProcess): void {
 }
 
 /**
- * #543 — killCause priority: loop > inactivity > timeout > token-budget >
+ * #543 — killCause priority: loop > inactivity > token-budget > timeout >
  * abort (the most specific wins — the #296 invariant; #296's three values are
  * untouched).
  *
@@ -98,10 +98,15 @@ export function capKillAttribution(
       if (ev) result.loopEvidence = ev;
     }
     if (killCause === "token-budget") {
-      // The tracker's budget is read at construction from the role env, and
-      // the used count is the running total the tracker's check() read when
-      // it triggered, so the pair is consistent with the kill.
-      result.tokenBudget = { budget: tokenBudgetFor(spec.role), used: totalTokens };
+      // The tracker's budget + the used count are the PAIR the kill fired
+      // on: the budget the tracker was armed with, the token total its
+      // check() read when it triggered. Attribution records exactly that
+      // pair — not a re-read of the role env (a mid-spawn env mutation
+      // could desync it from what actually killed the child).
+      const tracker = caps.tokenBudgetTracker;
+      if (tracker) {
+        result.tokenBudget = { budget: tracker.budgetTokens, used: totalTokens };
+      }
     }
   }
 }
@@ -193,7 +198,7 @@ export function createCapSession(opts: CapSessionOpts): CapSession {
       : undefined;
   loopGracePoll?.unref();
 
-  const tokenBudgetTracker =
+  const tracker =
     capsOn && opts.onSteer
       ? new TokenBudgetTracker(
           opts.role,
@@ -204,8 +209,10 @@ export function createCapSession(opts: CapSessionOpts): CapSession {
             if (!opts.childExited()) killChild(opts.child);
           },
           opts.totalTokens,
+          graceMs,
         )
       : undefined;
+  const tokenBudgetTracker = tracker;
   const budgetGracePoll =
     capsOn && graceMs > 0 && tokenBudgetTracker
       ? setInterval(() => tokenBudgetTracker.poll(), 500)

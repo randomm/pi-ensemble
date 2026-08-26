@@ -56,16 +56,15 @@ export const LOOP_KILL_AT = 10;
  * `message_end` has arrived since trigger. Rationale: the same
  * false-positive shape killed #296's per-role wall-clock caps, a cap
  * firing mid-long-tool-call discards in-progress work. The window is
- * wall-clock, so the caller (spawn.ts) is responsible for honouring it;
- * this module only tracks when the last `message_end` arrived.
+ * wall-clock, so the caller (spawn.ts via spawn-caps.ts) is responsible for
+ * honouring it; this module only tracks when the last `message_end`
+ * arrived.
  *
- * Override: `PI_ENSEMBLE_CAP_KILL_GRACE_MS` (0 disables).
+ * The single definition lives in `spawn-support.ts` (`capKillGraceMs`,
+ * override `PI_ENSEMBLE_CAP_KILL_GRACE_MS`, 0 disables). This module once
+ * carried its own copy — deleted in #544 because the two copies could drift
+ * and the detector's was dead (never imported).
  */
-export function capKillGraceMs(): number {
-  const env = Number(process.env.PI_ENSEMBLE_CAP_KILL_GRACE_MS);
-  if (Number.isFinite(env) && env >= 0) return env;
-  return 5 * 60_000;
-}
 
 /**
  * Master switch — `PI_ENSEMBLE_DISPATCH_CAPS=0` disables F1/F6/F3a-reattach

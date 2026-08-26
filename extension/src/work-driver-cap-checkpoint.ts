@@ -15,6 +15,14 @@
  * failure degrades to `statusFile: undefined`. The cycle is already
  * routed to handoff by the step router; the checkpoint only adds the
  * driver-authored record of what was on disk.
+ *
+ * #544 — the checkpoint is IDEMPOTENT (a resume re-run returns the existing
+ * record instead of overwriting a `tree: "committed"` record with a false
+ * dirty-uncommitted), it checks out the KILLED child's worktree (parsed
+ * from the dispatch-failed label, not the first worktree), it typechecks
+ * before the `--no-verify` commit (`typechecked` on the record), and its
+ * state write is a MERGE of the on-disk file (a crash leaves either the
+ * routed state or the merged state, never a half-state).
  */
 
 import { exec } from "node:child_process";
@@ -22,10 +30,21 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { excludeToolListFor } from "./role-tools.ts";
+import { isRoleName } from "./roles.ts";
 import { trace } from "./trace.ts";
 import type { DriverContext } from "./work-driver-context.ts";
 import { normaliseDeclaredPath } from "./work-driver-verify.ts";
 import { scratchDir } from "./work-driver-workspace.ts";
+import {
+  type CapedPartialState,
+  type WorkEvent,
+  type WorkState,
+  type WorkStep,
+  readState,
+  writeState,
+} from "./workflow-state.ts";
+
+const checkpointExecp = promisify(exec);
 
 /** #543 (M5) — structurally write-gated roles: the SAME set role-tools.ts
  * passes `--exclude-tools write,edit,multiedit` to (explore /
@@ -35,24 +54,56 @@ import { scratchDir } from "./work-driver-workspace.ts";
 function isWriteGatedRole(role: string): boolean {
   return excludeToolListFor(role).length > 0;
 }
-import {
-  type CapedPartialState,
-  type WorkEvent,
-  type WorkState,
-  type WorkStep,
-  writeState,
-} from "./workflow-state.ts";
 
-const checkpointExecp = promisify(exec);
+/**
+ * #544 (8a) — the workstream id the killed developer's dispatch-failed
+ * event refers to. The fan-out labels its children `developer[<id>]`
+ * (N=1: `developer`, whose workstream is `default`). Parsing the label
+ * (rather than grabbing `worktrees[firstKey]`) is what keeps a
+ * multi-workstream checkpoint from inspecting the WRONG worktree when the
+ * killed child was workstream B.
+ */
+function workstreamIdFromLabel(label: string): string | undefined {
+  const m = label.match(/^developer\[(.+)\]$/);
+  return m ? m[1] : undefined;
+}
+
+/**
+ * #544 (8d) — typecheck the worktree's TypeScript BEFORE the checkpoint
+ * commit (recovery, not the full gate — the full suite runs on the
+ * integrated branch). Runs `bunx tsc --noEmit` in the worktree's
+ * `extension/` directory; `false` when the typecheck fails, `undefined`
+ * when the worktree has no `extension/` (nothing to check — the record
+ * omits the field). Never throws.
+ */
+async function typecheckWorktree(cwd: string): Promise<boolean | undefined> {
+  const ext = path.join(cwd, "extension");
+  try {
+    await fs.access(ext);
+  } catch {
+    return undefined;
+  }
+  try {
+    await checkpointExecp("bunx tsc --no-emit", { cwd: ext, maxBuffer: 256 * 1024 });
+    return true;
+  } catch (err) {
+    trace(
+      `work-driver: checkpoint typecheck failed in ${cwd}: ${(err as Error).message?.slice(0, 120)}`,
+    );
+    return false;
+  }
+}
 
 /**
  * #543 F5 — perform the driver-owned checkpoint for the most recent
  * dispatch-cap kill in this step, if any. Returns the state unchanged
  * when there was no cap kill. The checkpoint is performed on the
- * worktree the step operated in (the workstreams' worktrees for
- * develop/lens, repoRoot otherwise), and the resulting
- * `capedPartialState` is recorded on pipelineState for the handoff
- * renderers to consume.
+ * worktree the KILLED child worked in (the per-workstream worktree for
+ * develop; the lens worktree for lens-review / lens-fix; repoRoot
+ * otherwise), and the resulting `capedPartialState` is MERGED into the
+ * on-disk state file (8f) so a crash between the router's write and this
+ * one leaves either the routed state or the merged state — never a
+ * half-state.
  */
 export async function checkpointCapedDispatch(
   ctx: DriverContext,
@@ -76,18 +127,38 @@ export async function checkpointCapedDispatch(
   if (!capKill) return state;
   const cap = capKill.killCause === "token-budget" ? "token-budget" : "loop-detected";
   const role = capKill.role;
-  // The tree the step operated in. develop fans out to per-workstream
-  // worktrees; lens-review / lens-fix work in the lens worktree; the
-  // fallback is repoRoot (single-task / pre-worktree cycles).
   const ps = state.pipelineState;
   const worktrees = ps.worktrees ?? {};
-  const firstWs = Object.keys(worktrees)[0];
+
+  // #544 (8b) — idempotency: a resume re-runs the checkpoint after the
+  // first one committed. The second commit would fail (nothing staged)
+  // and overwrite the correct `tree: "committed"` record with a false
+  // dirty-uncommitted. When a record for the same cap+role already carries
+  // a commitSha, return it untouched.
+  const existing = ps.capedPartialState;
+  if (existing && existing.cap === cap && existing.role === role && existing.commitSha) {
+    return state;
+  }
+
+  // #544 (8c) — stale-kill re-scan: in a multi-round lens cycle the reverse
+  // scan above can land on a PRIOR round's cap kill (already checkpointed).
+  // A newer capedPartialState than the kill event means a later checkpoint
+  // already handled a newer kill — skip.
+  if (existing && (existing.cap !== cap || existing.role !== role) && existing.at > capKill.at) {
+    return state;
+  }
+
+  // The tree the killed child operated in. develop fans out to
+  // per-workstream worktrees (the label names the workstream); lens-review /
+  // lens-fix work in the lens worktree; the fallback is repoRoot (single-task
+  // / pre-worktree cycles).
+  const wsId = step === "develop" ? workstreamIdFromLabel(capKill.label) : undefined;
   const cwd =
     step === "lens-review" || step === "lens-fix"
-      ? (worktrees.default ?? (firstWs ? worktrees[firstWs] : undefined) ?? ctx.repoRoot)
-      : firstWs
-        ? worktrees[firstWs]
-        : ctx.repoRoot;
+      ? (worktrees.default ?? (wsId ? worktrees[wsId] : undefined) ?? ctx.repoRoot)
+      : wsId
+        ? (worktrees[wsId] ?? worktrees.default ?? ctx.repoRoot)
+        : (worktrees.default ?? ctx.repoRoot);
   // #543 (M5) — a structurally write-gated child (role-tools.ts exclude set)
   // can NEVER have written files: the checkpoint is report-only — no stage,
   // no commit — and capedPartialState.reportOnly tells the handoff renderers
@@ -108,6 +179,7 @@ export async function checkpointCapedDispatch(
   let commitSha: string | undefined;
   let remainingFiles: string[] = [];
   let sweptForeign = 0;
+  let typechecked: boolean | undefined;
   try {
     if (reportOnly) {
       // (M5) — skip the stage+commit entirely for write-gated roles. The
@@ -127,6 +199,11 @@ export async function checkpointCapedDispatch(
       if (dirty.length === 0) {
         tree = "clean";
       } else {
+        // #544 (8d) — typecheck BEFORE the --no-verify commit. The hook is
+        // skipped so the checkpoint never blocks on the project's full gate,
+        // but the commit must not silently claim a tree that does not even
+        // typecheck: the `typechecked` flag lets the handoff say so.
+        typechecked = await typecheckWorktree(cwd);
         // Stage the porcelain paths (skip driver artefacts: .pi/ and tmp/)
         // and commit. The commit message is driver-attributed so the
         // operator can tell the checkpoint from a child's seam commit.
@@ -226,6 +303,12 @@ export async function checkpointCapedDispatch(
       sweptForeign > 0
         ? `  (${sweptForeign} untracked path(s) outside the declared workstream scope were NOT committed and remain on disk)`
         : "";
+    const typecheckLine =
+      typechecked === false
+        ? "Typecheck (bunx tsc --no-emit) FAILED at the checkpoint — the committed code is broken as-is; fix before pushing."
+        : typechecked === true
+          ? "Typecheck (bunx tsc --no-emit) passed at the checkpoint."
+          : "";
     const content = [
       `# Cap-kill status — ${step} / ${role} (cap: ${cap})`,
       "",
@@ -237,6 +320,7 @@ export async function checkpointCapedDispatch(
       "## Done",
       "",
       done,
+      typecheckLine,
       "",
       "## Remaining (uncommitted after the checkpoint)",
       "",
@@ -261,7 +345,9 @@ export async function checkpointCapedDispatch(
   }
   const cps: CapedPartialState = {
     cap,
-    role: role as CapedPartialState["role"],
+    // #544 (8e) — a role that is not a known RoleName is OMITTED (the
+    // record proceeds without it) rather than force-cast.
+    ...(isRoleName(role) ? { role } : {}),
     tree,
     at: Date.now(),
     ...(commitSha ? { commitSha } : {}),
@@ -271,14 +357,35 @@ export async function checkpointCapedDispatch(
     // the handoff renderers, never written. Write-gated children are
     // report-only; that is what the handoff should say.
     ...(reportOnly ? { reportOnly: true } : {}),
+    ...(typechecked !== undefined ? { typechecked } : {}),
   };
-  const next = {
-    ...state,
-    pipelineState: { ...state.pipelineState, capedPartialState: cps },
-  };
-  await writeState(ctx.repoRoot, next);
+  // #544 (8f) — MERGE the checkpoint into the on-disk state file: read the
+  // current file (routeStepOutcome may have written it since this step's
+  // state snapshot), overlay capedPartialState, write once. A crash leaves
+  // either the routed state or the merged state — never a half-state.
+  let merged: WorkState = state;
+  try {
+    const onDisk = await readState(ctx.repoRoot, ctx.issue);
+    if (onDisk) {
+      merged = {
+        ...onDisk,
+        pipelineState: { ...onDisk.pipelineState, capedPartialState: cps },
+      };
+    } else {
+      merged = {
+        ...state,
+        pipelineState: { ...state.pipelineState, capedPartialState: cps },
+      };
+    }
+  } catch (err) {
+    trace(
+      `work-driver: checkpoint state merge fell back to in-memory state: ${(err as Error).message?.slice(0, 120)}`,
+    );
+    merged = { ...state, pipelineState: { ...state.pipelineState, capedPartialState: cps } };
+  }
+  await writeState(ctx.repoRoot, merged);
   trace(
     `work-driver: checkpoint for ${step}/${role} (cap=${cap}) — tree=${tree} sha=${commitSha ?? "(none)"} statusFile=${statusFile}`,
   );
-  return next;
+  return merged;
 }

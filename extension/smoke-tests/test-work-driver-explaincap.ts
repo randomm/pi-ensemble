@@ -33,7 +33,13 @@ for (const [cap, kind, needle] of [
     ...s,
     pipelineState: {
       ...s.pipelineState,
-      capEvidence: { kind, count: 10, tool: "bash", fingerprint: "ls /a" },
+      // #544 — CapEvidence is a discriminated union: the kind's required
+      // fields (count for loop, the budget arithmetic for token-budget)
+      // must be present.
+      capEvidence:
+        kind === "loop"
+          ? { kind, count: 10, tool: "bash", fingerprint: "ls /a" }
+          : { kind, budgetTokens: 100_000, usedTokens: 110_000 },
     },
   };
   s = appendEvent(s, {

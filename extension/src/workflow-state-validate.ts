@@ -126,7 +126,9 @@ const CAP_EVIDENCE_KINDS: readonly unknown[] = ["loop", "token-budget"];
 /** #543 F5 — `pipelineState.capedPartialState.tree` vocabulary. */
 const KNOWN_CAPPED_PARTIAL_TREES: readonly unknown[] = ["committed", "dirty-uncommitted", "clean"];
 
-/** #543 F5 — `pipelineState.capedPartialState.role` vocabulary. */
+/** #543 F5 — `pipelineState.capedPartialState.role` vocabulary. The
+ * dispatch-cap kill is attributed to a role the driver can name, so a
+ * fabricated `cap-hit.role` is rejected with the same rule. */
 const KNOWN_CAPPED_PARTIAL_ROLES: readonly unknown[] = [
   "project-manager",
   "developer",
@@ -317,7 +319,7 @@ export function validateDiscriminants(state: unknown): string[] {
         if (typeof cpso.cap !== "string" || cpso.cap.length === 0) {
           out.push("pipelineState.capedPartialState.cap is missing or not a string");
         }
-        if (!KNOWN_CAPPED_PARTIAL_ROLES.includes(cpso.role)) {
+        if (cpso.role !== undefined && !KNOWN_CAPPED_PARTIAL_ROLES.includes(cpso.role)) {
           out.push(
             `pipelineState.capedPartialState.role has unknown value ${JSON.stringify(cpso.role)}`,
           );
@@ -329,6 +331,9 @@ export function validateDiscriminants(state: unknown): string[] {
         }
         if (typeof cpso.at !== "number" || !Number.isFinite(cpso.at)) {
           out.push("pipelineState.capedPartialState.at is not a finite number");
+        }
+        if (cpso.typechecked !== undefined && typeof cpso.typechecked !== "boolean") {
+          out.push("pipelineState.capedPartialState.typechecked is not a boolean");
         }
         if (cpso.tree === "committed" && typeof cpso.commitSha !== "string") {
           out.push(
@@ -358,6 +363,21 @@ export function validateDiscriminants(state: unknown): string[] {
       }
       if (e.kind === "cap-hit" && !CAP_HIT_NEXT_STEPS.includes(e.nextStep)) {
         out.push(`eventLog[${i}].nextStep has unknown value ${JSON.stringify(e.nextStep)}`);
+      }
+      // #543 — the dispatch-cap kill hits (loop-detected / token-budget)
+      // carry the killed child's `role`. It stays OPTIONAL on the event
+      // (every other cap has no role), but when PRESENT it must name a real
+      // role — an unknown string would flow to the checkpoint and the
+      // handoff renderers as a confident wrong attribution.
+      if (
+        e.kind === "cap-hit" &&
+        (e.cap === "loop-detected" || e.cap === "token-budget") &&
+        e.role !== undefined &&
+        !KNOWN_CAPPED_PARTIAL_ROLES.includes(e.role)
+      ) {
+        out.push(
+          `eventLog[${i}].role has unknown value ${JSON.stringify(e.role)} (cap ${String(e.cap)} names a killed child)`,
+        );
       }
       // #543 — a cap-hit's `cap` must be a known fixed literal, a
       // `verify-failed:` / `step-failed:` template value, or nothing else. A

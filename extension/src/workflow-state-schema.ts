@@ -3,6 +3,7 @@
  * Split out of `workflow-state.ts` (AGENTS.md §12 file-size limit).
  */
 
+import type { Verdict } from "./lens-review.ts";
 import type { CapEvidence, CapedPartialState } from "./workflow-state-cap.ts";
 import type { WorkEvent, WorkStep } from "./workflow-state-events.ts";
 
@@ -209,11 +210,10 @@ export interface PipelineState {
   /**
    * #380 — why the cycle stopped at the merge step: merge authority
    * (citation-verified grant) and executed `gh` evidence, both defaulting
-   * to "no". Absent unless the merge was held.
-   */
-  /**
-   * #384 — why lens-review could not read the diff, when it could not. The
-   * git error verbatim, so the operator does not have to reproduce it.
+   * to "no". Absent unless the merge was held. `mergeHold` below carries
+   * the structured record; `lensDiffError` (#384) names the git error when
+   * lens-review could not read the diff it is supposed to review, so the
+   * operator does not have to reproduce it.
    */
   lensDiffError?: string;
   mergeHold?: {
@@ -259,14 +259,10 @@ export interface PipelineState {
   /** #500 — the git error, when the post-fallback inspection could not run. */
   commitPrRootError?: string;
   /**
-   * #543 F5 — the most recent six-pass review's per-lens outcomes, persisted
-   * by `runLens` so a REVIEW_INCOMPLETE handoff can render the COMPLETED
-   * lenses' verdicts (the "preserved sibling verdicts") without re-parsing
-   * the event log. One loop-killed lens is not a silent 1-of-6 loss; the
-   * other five's outcomes are what the operator needs to see. Additive;
-   * ambiguous. Surfaced in handoff renderers + PR body so the operator
-   * sees WHICH issues were dropped and WHY. Empty for single-issue
-   * cycles and for older state files.
+   * PR10 — the issues that did NOT make the active set, with the
+   * per-issue verdict and the reason explore gave. Surfaced in handoff
+   * renderers + PR body so the operator sees WHICH issues were dropped
+   * and WHY. Empty for single-issue cycles and for older state files.
    */
   droppedIssues?: Array<{
     issue: number;
@@ -306,11 +302,13 @@ export interface PipelineState {
    * #543 F5 — the most recent six-pass review's per-lens outcomes, persisted
    * by `runLens` so a REVIEW_INCOMPLETE handoff can render the completed
    * lenses' verdicts (one loop-killed lens is not a silent 1-of-6 loss).
+   * `verdict` is the closed `Verdict` union from lens-review.ts (type-only
+   * import; no cycle — lens-review does not import the state schema).
    * Additive; absent on pre-#543 state files / before the first review.
    */
   lensReviewSummary?: {
     round: number;
-    verdict: string;
+    verdict: Verdict;
     lenses: Array<{ lens: string; ok: boolean; blocked: boolean; findings: number }>;
   };
   /**
