@@ -24,6 +24,11 @@ export function lensCapKillEvent(
   if (!capKill) return undefined;
   const killedLens =
     summary.lenses.find((l) => l.killCause === capKill) ?? summary.lenses.find((l) => l.blocked);
+  // #543 — the structured trigger evidence (tool+count for loop, budget+used
+  // for token-budget) is carried on the event so the step router can persist
+  // it on `pipelineState.capEvidence` (the F4(j) render path). Absent when
+  // the lens summary did not thread it (pre-#543 lens summary shape).
+  const ev = summary.capKillEvidence;
   return {
     kind: "dispatch-failed",
     step: "lens-review",
@@ -36,5 +41,11 @@ export function lensCapKillEvent(
     killCause: capKill,
     errorTail: `killed by pi-ensemble (${capKill === "loop" ? "loop detected" : "token budget crossed"}) — self-inflicted cap, not a provider fault`,
     usage: summary.usage,
+    ...(ev && capKill === "loop" && "tool" in ev
+      ? { loopEvidence: { tool: ev.tool, count: ev.count } }
+      : {}),
+    ...(ev && capKill === "token-budget" && "budget" in ev
+      ? { tokenBudget: { budget: ev.budget, used: ev.used } }
+      : {}),
   };
 }

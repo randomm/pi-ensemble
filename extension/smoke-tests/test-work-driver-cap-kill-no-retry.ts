@@ -15,10 +15,10 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { DriverContext } from "../src/work-driver-context.ts";
-import { runAdversarial } from "../src/work-driver-adversarial.ts";
-import { initialState, readState, writeState } from "../src/workflow-state.ts";
 import type { DispatchResult, ExtensionAPI } from "../src/types.ts";
+import { runAdversarial } from "../src/work-driver-adversarial.ts";
+import type { DriverContext } from "../src/work-driver-context.ts";
+import { initialState, readState, writeState } from "../src/workflow-state.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
@@ -63,7 +63,10 @@ for (const [killCause, cap] of [
     await fs.mkdir(path.join(dir, ".git", "info"), { recursive: true });
     const s = initialState(543, 1_000_000);
     const tree: Record<string, string> = {};
-    const streams: Record<string, { id: string; scope: string; paths: string[]; outOfScope: string[] }> = {};
+    const streams: Record<
+      string,
+      { id: string; scope: string; paths: string[]; outOfScope: string[] }
+    > = {};
     for (const w of ["task-a", "task-b"]) {
       tree[w] = `${dir}/.worktrees/${w}`;
       streams[w] = { id: w, scope: w, paths: [], outOfScope: [] };
@@ -116,7 +119,7 @@ for (const [killCause, cap] of [
       },
     };
 
-    let state = await readState(dir, 543)!;
+    const state = await readState(dir, 543)!;
     const after = await runAdversarial(ctx, state, Date.now());
     const caps = after.eventLog.filter((e) => e.kind === "cap-hit" && e.cap === cap);
     const infraCaps = after.eventLog.filter(

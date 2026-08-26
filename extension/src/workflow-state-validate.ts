@@ -266,18 +266,39 @@ export function validateDiscriminants(state: unknown): string[] {
         if (!CAP_EVIDENCE_KINDS.includes(ceo.kind)) {
           out.push(`pipelineState.capEvidence.kind has unknown value ${JSON.stringify(ceo.kind)}`);
         }
-        if (typeof ceo.count !== "number" || !Number.isFinite(ceo.count)) {
-          out.push("pipelineState.capEvidence.count is missing or not a finite number");
+        // (H3) — the repeat count is the trigger evidence for the LOOP kind
+        // only: the token-budget evidence's story is the budget arithmetic
+        // (budgetTokens / usedTokens), and a count there would be fiction.
+        if (ceo.kind === "loop") {
+          if (typeof ceo.count !== "number" || !Number.isFinite(ceo.count)) {
+            out.push(
+              "pipelineState.capEvidence.count is missing or not a finite number (required for kind 'loop')",
+            );
+          }
         }
         if (ceo.turnRange !== undefined && !Array.isArray(ceo.turnRange)) {
           out.push("pipelineState.capEvidence.turnRange is not an array");
         }
-        for (const field of ["budgetTokens", "usedTokens"] as const) {
-          if (
-            ceo[field] !== undefined &&
-            (typeof ceo[field] !== "number" || !Number.isFinite(ceo[field] as number))
-          ) {
-            out.push(`pipelineState.capEvidence.${field} is not a finite number`);
+        // (H3) — the budget arithmetic is REQUIRED for the token-budget kind
+        // (that IS the evidence); for any other kind it is only checked when
+        // present, so a loop record carrying a stray budgetTokens is not
+        // rejected.
+        if (ceo.kind === "token-budget") {
+          for (const field of ["budgetTokens", "usedTokens"] as const) {
+            if (typeof ceo[field] !== "number" || !Number.isFinite(ceo[field] as number)) {
+              out.push(
+                `pipelineState.capEvidence.${field} is missing or not a finite number (required for kind 'token-budget')`,
+              );
+            }
+          }
+        } else {
+          for (const field of ["budgetTokens", "usedTokens"] as const) {
+            if (
+              ceo[field] !== undefined &&
+              (typeof ceo[field] !== "number" || !Number.isFinite(ceo[field] as number))
+            ) {
+              out.push(`pipelineState.capEvidence.${field} is not a finite number`);
+            }
           }
         }
       }

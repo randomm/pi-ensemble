@@ -75,6 +75,37 @@ export function capedPartialStateLines(state: WorkState, indent: string): string
       `${indent}- **report-only** — this role is structurally write-gated; no commit was expected or made. The driver-authored status file below is the report, not the killed child's final text.`,
     );
   }
+  // #543 (M7) — on a REVIEW_INCOMPLETE cap (one lens cap-killed, the rest
+  // completed), the handoff's "verdicts shown above" promise is FALSE:
+  // there is no lens-issues-found event for a killed-lens round. Render the
+  // surviving lenses' verdicts from `pipelineState.lensReviewSummary` so
+  // the operator sees the 5-of-6 that DID run. Shared by both renderers.
+  const lrs = state.pipelineState.lensReviewSummary;
+  const capHitEvt = state.eventLog
+    .slice()
+    .reverse()
+    .find(
+      (e): e is Extract<(typeof state.eventLog)[number], { kind: "cap-hit" }> =>
+        e.kind === "cap-hit",
+    );
+  if (
+    lrs &&
+    capHitEvt &&
+    (capHitEvt.cap === "review-incomplete" ||
+      capHitEvt.cap === "loop-detected" ||
+      capHitEvt.cap === "token-budget")
+  ) {
+    const completed = lrs.lenses.filter((l) => !l.blocked);
+    if (completed.length > 0) {
+      lines.push(
+        `${indent}### Completed lenses (round ${lrs.round}, verdict: ${lrs.verdict})`,
+        ...completed.map(
+          (l) => `${indent}- ${l.lens}: ${l.ok ? "clean" : "issues"} (${l.findings} finding(s))`,
+        ),
+        "",
+      );
+    }
+  }
   lines.push(
     `${indent}- **status file** (driver-authored — done / remaining / current state): \`${statusPath}\``,
     "",

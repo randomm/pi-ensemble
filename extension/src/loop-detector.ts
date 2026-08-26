@@ -15,8 +15,10 @@
  *     silent turns BETWEEN repeats; a sliding window would never see 10
  *     in-frame. A since-last-distinct streak does.
  *   - **Full block list per `message_end`.** A single assistant turn can
- *     carry two identical toolCall blocks; each counts. `progress.ts`'s
- *     `latestToolName` is overwritten per block and cannot be used.
+ *     carry two identical toolCall blocks; EACH counts (the two-blocks
+ *     multiplier — one 5-block turn can cross both thresholds in a single
+ *     observe). `progress.ts`'s `latestToolName` is overwritten per block
+ *     and cannot be used.
  *   - **Ops-role children are EXEMPT.** ops runs deterministic git/gh;
  *     capping them manufactures partial-state incidents. The caller (spawn.ts)
  *     skips creating the detector for role === "ops".

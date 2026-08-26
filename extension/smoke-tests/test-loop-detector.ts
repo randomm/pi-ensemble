@@ -318,6 +318,7 @@ const STEER_TEXT_BASH_5 =
     inactivityKilled: () => false,
     aborted: () => false,
     capKillGraceMs: 0,
+    childExited: () => false,
   });
   assert(session.loopObserver === undefined, "F1(f): ops-role child gets NO loop observer at all");
   // The loop as it would arrive: identical bash args across 20 turns.
@@ -350,6 +351,7 @@ const STEER_TEXT_BASH_5 =
       inactivityKilled: () => false,
       aborted: () => false,
       capKillGraceMs: 1000,
+      childExited: () => false,
     });
     assert(session.loopObserver !== undefined, "F1(g): developer child gets a loop observer");
     // biome-ignore lint/style/noNonNullAssertion: assert()-guarded above; the observer is defined when caps are on
@@ -399,6 +401,7 @@ const STEER_TEXT_BASH_5 =
       inactivityKilled: () => false,
       aborted: () => false,
       capKillGraceMs: 0,
+      childExited: () => false,
     });
     for (let turn = 0; turn < 10; turn++) {
       session.loopObserver?.([bash('rg "needle" src/ --line-number')], turn);

@@ -11,6 +11,8 @@
  */
 
 import { formatSingleReport } from "../src/async-jobs-report.ts";
+import { capHitForCapKill } from "../src/work-driver-adversarial-capkill.ts";
+import type { AdversarialOutcome } from "../src/work-driver-adversarial-types.ts";
 import {
   classifyFailureCause,
   failureCauseReason,
@@ -125,7 +127,7 @@ for (const [killCause, needle] of [
   ["loop", "loop detected"],
   ["token-budget", "token budget"],
 ] as const) {
-  const report = formatSingleReport("f4-" + killCause, "developer", {
+  const report = formatSingleReport(`f4-${killCause}`, "developer", {
     role: "developer",
     ok: false,
     text: "",
@@ -179,12 +181,78 @@ for (const [killCause, needle] of [
       );
       assert(ev.killCause === killCause, `buildCompletionEvent: ${killCause} killCause preserved`);
     } else {
-      assert(
-        false,
-        `buildCompletionEvent: ${killCause} kill → dispatch-failed (got ${ev.kind})`,
-      );
+      assert(false, `buildCompletionEvent: ${killCause} kill → dispatch-failed (got ${ev.kind})`);
     }
   }
+}
+
+// (M3) evidence threading: the adversarial cap-kill adapter threads the
+// loop outcome's loopEvidence / tokenBudget into the cap-hit's CapEvidence
+// (kind + count for loop; budgetTokens/usedTokens for token-budget) so
+// explainCap renders the trigger detail. Pre-fix the evidence was never
+// written — explainCap rendered the fallback sentence for every kill.
+{
+  const baseOutcome = (over: Partial<AdversarialOutcome>): AdversarialOutcome =>
+    ({
+      id: "task-a",
+      ok: false,
+      rounds: 3,
+      records: [],
+      infra: true,
+      threw: false,
+      skipped: false,
+      priorInfra: false,
+      ...over,
+    }) as AdversarialOutcome;
+
+  const loopKill = capHitForCapKill(
+    baseOutcome({ killCause: "loop", loopEvidence: { tool: "bash", count: 12 } }),
+    2,
+  );
+  assert(loopKill !== undefined, "M3: loop cap kill → cap-hit (not an infra cap)");
+  if (loopKill) {
+    assert(loopKill.event.cap === "loop-detected", "M3: loop kill → fixed literal 'loop-detected'");
+    assert(
+      loopKill.event.role === "adversarial-developer",
+      "M3: the role travels in the role field, never in the cap string",
+    );
+    assert(
+      loopKill.evidence?.kind === "loop" &&
+        loopKill.evidence.count === 12 &&
+        loopKill.evidence.tool === "bash",
+      "M3: loopEvidence threaded into capEvidence (kind/count/tool)",
+    );
+  }
+
+  const budgetKill = capHitForCapKill(
+    baseOutcome({ killCause: "token-budget", tokenBudget: { budget: 200_000, used: 210_400 } }),
+    2,
+  );
+  assert(budgetKill !== undefined, "M3: token-budget cap kill → cap-hit");
+  if (budgetKill) {
+    assert(
+      budgetKill.event.cap === "token-budget",
+      "M3: token-budget kill → fixed literal 'token-budget'",
+    );
+    assert(
+      budgetKill.evidence?.kind === "token-budget" &&
+        budgetKill.evidence.budgetTokens === 200_000 &&
+        budgetKill.evidence.usedTokens === 210_400,
+      "M3: tokenBudget threaded into capEvidence (budgetTokens/usedTokens)",
+    );
+  }
+
+  // A genuine infra failure (no cap killCause) is NOT a cap — it must not
+  // take the cap path (the F4(g) precision: only loop/token-budget do).
+  assert(
+    capHitForCapKill(baseOutcome({}), 2) === undefined,
+    "M3: a plain infra failure (no cap killCause) is NOT a cap kill",
+  );
+  assert(
+    capHitForCapKill(baseOutcome({ ok: true, infra: false, priorVerdict: "approved" }), 2) ===
+      undefined,
+    "M3: an approved outcome is never a cap kill",
+  );
 }
 
 console.log(`\nexit ${exit}`);

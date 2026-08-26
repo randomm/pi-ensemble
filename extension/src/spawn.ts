@@ -57,7 +57,7 @@ import type { PiJsonEvent, SpawnOptions } from "./pi-event-shapes.ts";
 import { emptyRunningState, ingestEvent } from "./progress.ts";
 import { excludeToolsFor } from "./role-tools.ts";
 import { ROLES, type RoleName, isRoleName } from "./roles.ts";
-import { type CapSession, createCapSession } from "./spawn-caps.ts";
+import { type CapSession, capKillAttribution, createCapSession } from "./spawn-caps.ts";
 import { collapseEvents } from "./spawn-collapse-events.ts";
 import {
   applyUserExtension,
@@ -380,10 +380,23 @@ async function spawnSpecialistInner(
     }
   }
 
+  // #543 H1 — grace-window kill race. Observed EXITS (exit + 'close') set
+  // childExited immediately; the `once(child, "exit")` await below can only
+  // resolve AFTER those events fire, so the poll callback sees the flag before
+  // the kill would otherwise be marked on a self-exiting child.
+  let childExited = false;
+  child.on("exit", () => {
+    childExited = true;
+  });
+  child.on("close", () => {
+    childExited = true;
+  });
+
   // #543 F1/F6 — dispatch caps (loop detector + token budget). The cap
   // session (spawn-caps.ts) owns the per-spawn detector/tracker state, the
   // grace-window timers and the killCause priority (loop > inactivity >
-  // timeout > abort) — see its module doc.
+  // timeout > token-budget > abort — the most specific wins) — see its
+  // module doc.
   const caps: CapSession = createCapSession({
     role: spec.role,
     child,
@@ -393,6 +406,7 @@ async function spawnSpecialistInner(
     inactivityKilled: () => inactivityKilled,
     aborted: () => aborted,
     capKillGraceMs: capKillGraceMs(),
+    childExited: () => childExited,
   });
 
   let exitCode: number | null = null;
@@ -421,17 +435,6 @@ async function spawnSpecialistInner(
   if (inactivityKilled) {
     appendStderr(`\n[pi-ensemble] killed after ${inactivityMs}ms inactivity`);
   }
-  if (caps.loopKilled()) {
-    const ev = caps.loopEvidence();
-    appendStderr(
-      `\n[pi-ensemble] killed: loop detected (${ev?.tool ?? "unknown"} repeated ${ev?.count ?? 0} times after normalization; override: PI_ENSEMBLE_DISPATCH_CAPS / PI_ENSEMBLE_CAP_KILL_GRACE_MS)`,
-    );
-  }
-  if (caps.tokenBudgetTracker?.killed) {
-    appendStderr(
-      `\n[pi-ensemble] killed: token budget exceeded (${runningState.totalTokens} tokens used; override: PI_ENSEMBLE_TOKEN_BUDGET_${spec.role.toUpperCase()})`,
-    );
-  }
   if (aborted) {
     appendStderr("\n[pi-ensemble] cancelled by user (Esc)");
   }
@@ -448,19 +451,17 @@ async function spawnSpecialistInner(
     exitCode,
     stderr,
   );
+  // #543 F1/F6 — the cap-kill stderr lines + killCause + structured trigger
+  // evidence (loopEvidence / tokenBudget) follow #296's structured-kill
+  // contract, resolved by priority in spawn-caps.ts's capKillAttribution.
+  capKillAttribution(caps, spec, runningState.totalTokens, appendStderr, result);
   result.transcriptPath = transcriptPath;
   result.modelSource = modelChoice.source;
-  // Structured kill-cause (#296; #543 extends the priority with loop first):
-  // downstream classification branches on this BEFORE errorStop/exitCode so
-  // self-kills are never blamed on the provider. A looped child that was ALSO
-  // silent past the inactivity window is a loop first: the loop is the
-  // diagnosis, the silence is its symptom.
-  const killCause = caps.killCause();
-  if (killCause) {
-    result.killCause = killCause;
-    if (killCause === "timeout") result.killBudgetMs = timeoutMs;
-    if (killCause === "inactivity") result.killBudgetMs = inactivityMs;
-  }
+  // The cap-kill cause + evidence were already resolved above (capKillAttribution,
+  // after the stderr lines are appended). The wall-clock budgets for the
+  // timeout/inactivity kills are set HERE — only meaningful for those causes.
+  if (result.killCause === "timeout") result.killBudgetMs = timeoutMs;
+  if (result.killCause === "inactivity") result.killBudgetMs = inactivityMs;
   // A killed child never completed its assignment, whatever its exit code.
   if (result.killCause) {
     result.ok = false;

@@ -118,6 +118,18 @@ export interface DispatchResult {
   /** The budget (ms) that expired for killCause "timeout"/"inactivity". */
   killBudgetMs?: number;
   /**
+   * #543 — set when killCause is "loop". The structured trigger evidence the
+   * F1 detector had at kill time: the tool name and the streak count.
+   * `buildCompletionEvent` uses this so the state-file errorTail names WHAT
+   * looped, not just the cause. Absent for every other killCause.
+   */
+  loopEvidence?: { tool: string; count: number };
+  /**
+   * #543 — set when killCause is "token-budget". The F6 budget + the
+   * cumulative tokens observed at the kill. Absent for every other killCause.
+   */
+  tokenBudget?: { budget: number; used: number };
+  /**
    * What the child last emitted before we killed it. Present only on a kill.
    *
    * A bare cause cannot distinguish a child that went quiet after forty tool

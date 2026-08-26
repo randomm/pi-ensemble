@@ -11,8 +11,8 @@
  * filed separately when the live setup catches a real running child).
  */
 
-import { formatSingleReport } from "../src/async-jobs.ts";
 import { childHandles, jobs } from "../src/async-jobs-registry.ts";
+import { formatSingleReport } from "../src/async-jobs.ts";
 import { steerChild } from "../src/dispatch-steer.ts";
 import { type LifecycleDetails, emitSteered, formatLine } from "../src/lifecycle-events.ts";
 import type { DispatchResult } from "../src/types.ts";
@@ -52,7 +52,8 @@ function makeStdin(opts: { fail?: boolean } = {}): { write: (s: string) => void;
     stdin.lines.length === 1 &&
       JSON.stringify(JSON.parse(stdin.lines[0])) ===
         JSON.stringify({ type: "steer", message: "stop and report status" }) &&
-      stdin.lines[0] === JSON.stringify({ type: "steer", message: "stop and report status" }) + "\n",
+      stdin.lines[0] ===
+        JSON.stringify({ type: "steer", message: "stop and report status" }) + "\n",
     "steerChild: the stdin line is exactly the {type:'steer', message} envelope",
   );
   assert(stdin.lines[0].endsWith("\n"), "steerChild: the RPC line is newline-terminated");
@@ -79,7 +80,10 @@ function makeStdin(opts: { fail?: boolean } = {}): { write: (s: string) => void;
 // 0c. F2 — steerChild: no such job → delivered:false reason 'no-such-job'.
 {
   const r = steerChild("j-ghost", "hello", "pm-tool");
-  assert(r.delivered === false && r.reason === "no-such-job", "steerChild: unknown jobId → no-such-job");
+  assert(
+    r.delivered === false && r.reason === "no-such-job",
+    "steerChild: unknown jobId → no-such-job",
+  );
 }
 
 // 0d. F2 — steerChild: orchestrator-shaped jobId resolves to the active inner child.
@@ -105,10 +109,14 @@ function makeStdin(opts: { fail?: boolean } = {}): { write: (s: string) => void;
   });
   const r = steerChild(jobId, "refocus", "pm-tool");
   assert(r.delivered === true, "steerChild: orchestrator jobId resolves to active inner child");
-  assert(r.label === "adversarial-developer", "steerChild: orchestrator steer reports the inner child label");
+  assert(
+    r.label === "adversarial-developer",
+    "steerChild: orchestrator steer reports the inner child label",
+  );
   assert(
     inner.lines.length === 1 &&
-      JSON.stringify(JSON.parse(inner.lines[0])) === JSON.stringify({ type: "steer", message: "refocus" }) &&
+      JSON.stringify(JSON.parse(inner.lines[0])) ===
+        JSON.stringify({ type: "steer", message: "refocus" }) &&
       inner.lines[0] === JSON.stringify({ type: "steer", message: "refocus" }) + "\n",
     "steerChild: orchestrator steer writes the envelope to the inner child's stdin",
   );
@@ -161,7 +169,7 @@ function makeStdin(opts: { fail?: boolean } = {}): { write: (s: string) => void;
   const pmLine = formatLine(pm);
   assert(!pmLine.includes("["), "pm-tool steer (no source) renders no source tag");
   assert(
-    pmLine === "▸ ensemble: ⤳ steered developer · \"wrap up now\"",
+    pmLine === '▸ ensemble: ⤳ steered developer · "wrap up now"',
     "pm-tool steer line is byte-identical to the pre-#543 shape",
   );
 
@@ -173,7 +181,10 @@ function makeStdin(opts: { fail?: boolean } = {}): { write: (s: string) => void;
     steerMessage: "stop the repeated grep",
     steerSource: "driver-loop-detector",
   };
-  assert(formatLine(loop).includes("[driver-loop-detector]"), "loop-detector steer tags the source");
+  assert(
+    formatLine(loop).includes("[driver-loop-detector]"),
+    "loop-detector steer tags the source",
+  );
 }
 
 // 1. formatLine handles all five lifecycle kinds.

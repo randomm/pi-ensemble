@@ -8,13 +8,12 @@
  */
 
 import { exec } from "node:child_process";
-import path from "node:path";
 import { promisify } from "node:util";
 import { dispatchCore } from "./dispatch.ts";
 import { trace } from "./trace.ts";
 import type { DispatchResult } from "./types.ts";
+import { buildCompletionEvent } from "./work-driver-completion-event.ts";
 import type { DriverContext } from "./work-driver-context.ts";
-import { parseAbort } from "./work-driver-diff.ts";
 import { readDoctrineAtBase } from "./work-driver-doctrine.ts";
 import { synthesizeDriverCompletion } from "./work-driver-events.ts";
 import { detectMainline, restoreCheckout } from "./work-driver-git.ts";
@@ -30,39 +29,12 @@ import { DOCTRINE_FILES, type DoctrineDoc, judgePolicy } from "./work-driver-pol
 import { inlineMergePrompt } from "./work-driver-prompts-late.ts";
 import { beginDispatch, clearDispatch } from "./work-driver-resume.ts";
 import { activeIssuesOf, scratchDir, teardownWorkspaceTmp } from "./work-driver-workspace.ts";
-import { withUsage } from "./workflow-state-events-usage.ts";
-import {
-  type WorkState,
-  type WorkStep,
-  appendEvent,
-  writeDispatchArtifact,
-  writeState,
-} from "./workflow-state.ts";
+import { type WorkState, type WorkStep, appendEvent, writeState } from "./workflow-state.ts";
 import { worktreePrune, worktreeRemove } from "./worktree.ts";
-
-/**
- * Threshold above which a dispatch's text payload moves to a claim-check
- * artifact file under `.pi/work-state/<issue>/<id>.txt` instead of being
- * inlined into the event-log entry. Keeps state file scans fast (the file
- * is parsed on every driver wake).
- */
-const ARTIFACT_THRESHOLD_BYTES = 4_000;
 
 const execp = promisify(exec);
 
-/** #543 — env knob named in a self-kill's errorTail (loop/token name the cap knobs). */
-function overrideEnvForKillCause(killCause: NonNullable<DispatchResult["killCause"]>): string {
-  switch (killCause) {
-    case "timeout":
-      return "PI_ENSEMBLE_SPAWN_TIMEOUT_MS";
-    case "loop":
-    case "token-budget":
-      return "PI_ENSEMBLE_DISPATCH_CAPS + PI_ENSEMBLE_CAP_KILL_GRACE_MS";
-    case "inactivity":
-    case "abort":
-      return "PI_ENSEMBLE_INACTIVITY_TIMEOUT_MS";
-  }
-}
+export { buildCompletionEvent } from "./work-driver-completion-event.ts";
 
 /**
  * PR10 — Parse a `merge-commit: <sha>` marker line from ops's merge reply.
@@ -73,153 +45,8 @@ function overrideEnvForKillCause(killCause: NonNullable<DispatchResult["killCaus
  */
 export function parseMergeCommit(text: string | undefined): string | undefined {
   if (!text) return undefined;
-  // Lenient: anchor on `merge-commit`, then allow ANY non-hex characters
-  // (markdown emphasis, colons, backticks, whitespace) up to the SHA.
-  // The SHA itself is the only required structural element. Per-line
-  // (multiline mode) so a multi-line ops reply can have the marker
-  // anywhere on its own line.
   const m = text.match(/^[ \t]*[*_`]*\s*merge-commit\b[^0-9a-f\n]*([0-9a-f]{7,40})[^0-9a-f\n]*$/im);
   return m?.[1];
-}
-
-/**
- * Build a dispatch-completed (or dispatch-failed-provider / dispatch-
- * failed) event from a DispatchResult. Handles the claim-check threshold
- * for large summaries.
- */
-export async function buildCompletionEvent(
-  ctx: DriverContext,
-  step: WorkStep,
-  role: string,
-  label: string,
-  result: DispatchResult,
-): Promise<
-  Extract<
-    Parameters<typeof appendEvent>[1],
-    {
-      kind: "dispatch-completed" | "dispatch-failed-provider" | "dispatch-failed";
-    }
-  >
-> {
-  const at = Date.now();
-  const jobId = result.transcriptPath ? path.basename(result.transcriptPath, ".json") : "unknown";
-
-  // Structured kill-cause (#296; #543 adds loop/token-budget) wins over
-  // everything: a child pi-ensemble itself killed is OUR failure, never a
-  // provider failure. The errorTail names the budget + override knob.
-  if (result.killCause) {
-    const detail =
-      result.killCause === "abort"
-        ? "[pi-ensemble] cancelled (abort signal)"
-        : `[pi-ensemble] killed after ${result.killBudgetMs}ms ${result.killCause}` +
-          ` (override: ${overrideEnvForKillCause(result.killCause)})`;
-    // Attribute the silence, not just the budget. `linesSeen: 0` means the
-    // child never spoke — a provider stall / auth failure / bad model id — a
-    // different problem from one that went quiet after real work.
-    const la = result.lastActivity;
-    const attribution = la
-      ? ` · last output: ${la.kind} ${Math.round(la.agoMs / 1000)}s before the kill, after ${la.linesSeen} line(s)`
-      : "";
-    return withUsage(
-      {
-        kind: "dispatch-failed",
-        step,
-        role,
-        jobId,
-        label,
-        ms: result.ms,
-        at,
-        exitCode: result.exitCode ?? null,
-        errorTail: `${detail}${attribution}`,
-        killCause: result.killCause,
-      },
-      result.usage,
-    );
-  }
-  if (result.errorStop) {
-    return withUsage(
-      {
-        kind: "dispatch-failed-provider",
-        step,
-        role,
-        jobId,
-        label,
-        ms: result.ms,
-        at,
-        providerMessage: result.errorStop.message,
-        transcriptPath: result.transcriptPath,
-      },
-      result.usage,
-    );
-  }
-  if (!result.ok) {
-    return withUsage(
-      {
-        kind: "dispatch-failed",
-        step,
-        role,
-        jobId,
-        label,
-        ms: result.ms,
-        at,
-        exitCode: result.exitCode ?? null,
-        errorTail: result.text?.slice(-200),
-      },
-      result.usage,
-    );
-  }
-
-  // ABORT detection (PR2): the subagent's PROCESS exited 0 but it
-  // refused the requested action (dirty worktree, --ff-only refusal, etc).
-  // Without this check, branch step's "**ABORT: Working tree is not
-  // clean**" on issue #553 was recorded as success and the driver
-  // continued develop on main with 41 untracked files. Treat the abort
-  // as dispatch-failed so the driver's existing fail-path halts cleanly.
-  const abortLine = parseAbort(result.text);
-  if (abortLine) {
-    return withUsage(
-      {
-        kind: "dispatch-failed",
-        step,
-        role,
-        jobId,
-        label,
-        ms: result.ms,
-        at,
-        exitCode: result.exitCode ?? null,
-        errorTail: abortLine.slice(0, 500),
-      },
-      result.usage,
-    );
-  }
-
-  // Successful completion. Spill large text bodies to a claim-check
-  // artifact under .pi/work-state/<issue>/<jobId>.txt so the state file
-  // stays small.
-  const text = result.text ?? "";
-  let summary: string | undefined;
-  let artifactPath: string | undefined;
-  if (Buffer.byteLength(text, "utf8") > ARTIFACT_THRESHOLD_BYTES) {
-    artifactPath = await writeDispatchArtifact(ctx.repoRoot, ctx.issue, jobId, text);
-  } else {
-    summary = text;
-  }
-  return withUsage(
-    {
-      kind: "dispatch-completed",
-      step,
-      role,
-      jobId,
-      label,
-      ok: true,
-      ms: result.ms,
-      at,
-      transcriptPath: result.transcriptPath,
-      summary,
-      artifactPath,
-    },
-    result.usage,
-  );
 }
 
 /**

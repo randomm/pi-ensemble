@@ -26,6 +26,7 @@ import {
   transientRetryBackoffMs,
   transientRetryEnabled,
 } from "./work-driver-failure-taxonomy.ts";
+import type { CapEvidence } from "./workflow-state-cap.ts";
 import type { WorkEvent } from "./workflow-state-events.ts";
 import { type WorkState, type WorkStep, appendEvent, writeState } from "./workflow-state.ts";
 
@@ -263,6 +264,35 @@ export async function routeStepOutcome(
         };
         if (capEvent.cap === "loop-detected" || capEvent.cap === "token-budget") {
           capEvent.role = (tail as { role?: string }).role as typeof capEvent.role;
+          // #543 F4(j) — the operator-facing explanation of WHAT looped (or
+          // how much was spent) lives on `pipelineState.capEvidence`. The
+          // structured evidence is already on the dispatch-failed event (the
+          // loopEvidence / tokenBudget fields), so persist it here, at the
+          // moment the cap-hit is emitted. Without this write, `explainCap`
+          // renders the fallback sentence for every real cap kill — the
+          // exact dead-seam shape the reviewer flagged.
+          // The evidence fields exist on the `dispatch-failed` member of the
+          // union only — narrow first, so the read is structural, not a
+          // widened property access on both members.
+          const df = tail.kind === "dispatch-failed" ? tail : undefined;
+          const ev: CapEvidence | undefined =
+            capEvent.cap === "loop-detected"
+              ? df?.loopEvidence
+                ? { kind: "loop", tool: df.loopEvidence.tool, count: df.loopEvidence.count }
+                : undefined
+              : df?.tokenBudget
+                ? {
+                    kind: "token-budget",
+                    budgetTokens: df.tokenBudget.budget,
+                    usedTokens: df.tokenBudget.used,
+                  }
+                : undefined;
+          if (ev) {
+            state = {
+              ...state,
+              pipelineState: { ...state.pipelineState, capEvidence: ev },
+            };
+          }
         }
         state = appendEvent(state, capEvent);
         // Set currentStep='handoff' but LEAVE status='running' so the

@@ -421,8 +421,9 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
     // this loop iteration should re-enter without reaching nextStep().
     const routed = await routeStepOutcome(ctx, state, step, stepOrd, stepRound, stepStartedAt);
     state = routed.state;
-    // #543 F5 — driver-owned checkpoint after a dispatch-cap kill
-    // (never throws; failure degrades to the uncommitted handoff).
+    // #543 F5 — driver-owned checkpoint after a dispatch-cap kill. Must stay
+    // BEFORE the `routed.retry` continue so a retried step never checkpoints
+    // the same kill twice. Never throws; failure degrades to the uncommitted.
     state = await checkpointCapedDispatch(ctx, state, step);
     if (routed.retry) continue;
 

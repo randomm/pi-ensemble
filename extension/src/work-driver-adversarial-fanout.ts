@@ -21,6 +21,10 @@ import {
   reentryPassBatchSpan,
   roundsRecords,
 } from "./work-driver-adversarial-reentry.ts";
+import {
+  ADVERSARIAL_PER_WS_MAX_RETRIES,
+  type AdversarialOutcome,
+} from "./work-driver-adversarial-types.ts";
 import type { DriverContext } from "./work-driver-context.ts";
 import { fetchDiff } from "./work-driver-diff.ts";
 import {
@@ -32,57 +36,7 @@ import { buildCompletionEvent } from "./work-driver-merged.ts";
 import { type WorkEvent, type WorkState, appendEvent } from "./workflow-state.ts";
 
 /** #486 — the driver's per-workstream adversarial retry budget. Matches the #308 router's TRANSIENT_MAX_RETRIES shape (2 retries = up to 3 total attempts). */
-export const ADVERSARIAL_PER_WS_MAX_RETRIES = 2;
 
-export type AdversarialRoundStatus =
-  | "CRITICAL_ISSUES_FOUND"
-  | "ISSUES_FOUND"
-  | "MINOR_OBSERVATIONS"
-  | "APPROVED";
-
-export interface AdversarialRoundRecord {
-  round: number;
-  status: AdversarialRoundStatus;
-  verdictParsed: boolean;
-}
-
-export interface AdversarialOutcome {
-  id: string;
-  ok: boolean;
-  /** Reviews this workstream actually executed. */
-  rounds: number;
-  /** #485 — per-round verdict records, persisted verbatim. */
-  records: AdversarialRoundRecord[];
-  /** #298 — the loop died on infrastructure: no verdict exists. */
-  infra: boolean;
-  /** The loop threw before any review ran. */
-  threw: boolean;
-  /** #286 — empty diff, loop skipped (counts as a pass). */
-  skipped: boolean;
-  /** #486 — a prior run's infra-failure outcome for this workstream. */
-  priorInfra: boolean;
-  /** #486 — a prior run's VERDICT outcome (approved / rejected / skipped-empty-diff). Final and NOT re-run on re-entry; the event loop below re-emits the prior verdict from this record so the log stays complete after the splice replaces the prior pass's batch. */
-  priorVerdict?: "approved" | "rejected" | "skipped-empty-diff";
-  rejectionText?: string;
-  /** Non-blocking findings outstanding when this workstream passed. */
-  passFindings?: string;
-  errorTail?: string;
-  /** #543 — a loop / token-budget cap kill, threaded from the inner spawn. */
-  killCause?: "loop" | "token-budget";
-  completionEvent?: WorkEvent;
-  failureEvent?: WorkEvent;
-  branchEvent?: WorkEvent;
-}
-
-/**
- * Fan the adversarial loop out across the named workstreams, applying the
- * #486 in-step per-workstream infra retry, and return the deterministic
- * per-workstream event batch. Re-entry (the previous fan-out already
- * recorded NO-VERDICT outcomes in `state.eventLog`): only the infra-failed
- * workstreams re-run, while their per-workstream budget holds. When nothing
- * left is retryable, returns `parked: true` — the caller appends the
- * `adversarial-infra-failure` cap-hit.
- */
 export async function fanOutAdversarial(
   ctx: DriverContext,
   state: WorkState,
@@ -255,11 +209,10 @@ export async function fanOutAdversarial(
       // A pass that carried unresolved findings says so in its headline.
       passFindings: ok && result.text?.includes("PASSED WITH FINDINGS") ? result.text : undefined,
       errorTail: result.errorStop?.message ?? undefined,
-      // #543 — thread a loop / token-budget cap kill so the aggregate parks
-      // with the fixed-literal cap INSTEAD of the generic infra cap.
-      ...(result.killCause === "loop" || result.killCause === "token-budget"
-        ? { killCause: result.killCause }
-        : {}),
+      // #543 — thread a loop / token-budget cap kill (+ its trigger
+      // evidence) so the aggregate parks with the fixed-literal cap
+      // INSTEAD of the generic infra cap (see work-driver-adversarial).
+      ...capKillOutcomeFields(result),
       completionEvent,
       branchEvent:
         ids.length > 1
@@ -497,4 +450,26 @@ export async function fanOutAdversarial(
     parked: false,
     parkedInfra: !priorHadInfraFailure && ids.length > 1 && outcomes.some(exhaustedNoVerdict),
   };
+}
+
+/**
+ * #543 — the cap-kill fields of an AdversarialOutcome: the killCause
+ * (loop / token-budget) + its structured trigger evidence, threaded from
+ * the inner spawn's DispatchResult. Empty when the result carries no cap
+ * kill. Split from runOne's return (AGENTS.md §12 file-size limit).
+ */
+function capKillOutcomeFields(result: DispatchResult): Partial<AdversarialOutcome> {
+  if (result.killCause === "loop") {
+    return {
+      killCause: "loop",
+      ...(result.loopEvidence ? { loopEvidence: result.loopEvidence } : {}),
+    };
+  }
+  if (result.killCause === "token-budget") {
+    return {
+      killCause: "token-budget",
+      ...(result.tokenBudget ? { tokenBudget: result.tokenBudget } : {}),
+    };
+  }
+  return {};
 }

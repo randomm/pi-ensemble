@@ -16,58 +16,22 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { makeRunId } from "./spawn.ts";
 import { trace } from "./trace.ts";
+import { capHitForCapKill } from "./work-driver-adversarial-capkill.ts";
+import { fanOutAdversarial } from "./work-driver-adversarial-fanout.ts";
+import { reentryPassBatchSpan } from "./work-driver-adversarial-reentry.ts";
 import {
   ADVERSARIAL_PER_WS_MAX_RETRIES,
   type AdversarialOutcome,
-  fanOutAdversarial,
-} from "./work-driver-adversarial-fanout.ts";
-import { reentryPassBatchSpan } from "./work-driver-adversarial-reentry.ts";
+} from "./work-driver-adversarial-types.ts";
 import type { DriverContext } from "./work-driver-context.ts";
 import { integrate, withIntegrationLock } from "./work-driver-integrate.ts";
 import { commitLensFixChanges, lensWorktree } from "./work-driver-lens.ts";
 import { scratchDir } from "./work-driver-workspace.ts";
 import type { PipelineState } from "./workflow-state-schema.ts";
+import { type WorkEvent, type WorkState, appendEvent } from "./workflow-state.ts";
 import type { ExecFn } from "./worktree.ts";
 
-import { type WorkEvent, type WorkState, appendEvent } from "./workflow-state.ts";
-
 const execp = promisify(exec);
-
-/**
- * #543 — F4(g): a loop / token-budget cap kill is a CAP, not an infra
- * failure. It parks with the fixed-literal cap (`loop-detected` /
- * `token-budget`) INSTEAD of `adversarial-infra-failure` — the two are
- * distinct events, and a cap kill is never retried.
- *
- * The synthesized loop result carries no errorTail, so the structured signal
- * a cap kill leaves on the workstream is its `killCause` (threaded through
- * from the inner spawn by `infraFailureResult`). A genuine infra failure
- * (provider severance, generic crash) has no cap killCause, so the check is
- * precise: only loop / token-budget kills take the cap path.
- */
-function capHitForCapKill(
-  o: AdversarialOutcome,
-  reviewRound: number,
-): Extract<WorkEvent, { kind: "cap-hit" }> | undefined {
-  const killCause = (o as AdversarialOutcome & { killCause?: string }).killCause;
-  const cap =
-    killCause === "loop"
-      ? ("loop-detected" as const)
-      : killCause === "token-budget"
-        ? ("token-budget" as const)
-        : undefined;
-  if (!o.ok && (o.infra || o.threw) && cap) {
-    return {
-      kind: "cap-hit",
-      at: Date.now(),
-      cap,
-      reviewRound,
-      nextStep: "handoff",
-      role: "adversarial-developer",
-    };
-  }
-  return undefined;
-}
 
 /**
  * #287 Part C — re-integrate a lens-fix made in a worktree.
@@ -198,7 +162,13 @@ export async function runAdversarial(
       .map((o) => capHitForCapKill(o, state.pipelineState.reviewRound))
       .find(Boolean);
     if (capKill) {
-      next = appendEvent(next, capKill);
+      next = appendEvent(next, capKill.event);
+      if (capKill.evidence) {
+        next = {
+          ...next,
+          pipelineState: { ...next.pipelineState, capEvidence: capKill.evidence },
+        };
+      }
       return next;
     }
     const noVerdict = new Set(infraShortfall.map((o) => o.id));
@@ -387,7 +357,13 @@ export async function runAdversarial(
         .map((o) => capHitForCapKill(o, state.pipelineState.reviewRound))
         .find(Boolean);
       if (capKill) {
-        next = appendEvent(next, capKill);
+        next = appendEvent(next, capKill.event);
+        if (capKill.evidence) {
+          next = {
+            ...next,
+            pipelineState: { ...next.pipelineState, capEvidence: capKill.evidence },
+          };
+        }
         return next;
       }
       // No header to strip on re-entry (the re-entry pass does not

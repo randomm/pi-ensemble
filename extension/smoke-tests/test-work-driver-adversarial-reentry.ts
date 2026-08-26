@@ -15,8 +15,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { DriverContext } from "../src/work-driver-context.ts";
 import { runAdversarial } from "../src/work-driver-adversarial.ts";
+import type { DriverContext } from "../src/work-driver-context.ts";
 import { initialState, readState, writeState } from "../src/workflow-state.ts";
 import type { WorkEvent } from "../src/workflow-state.ts";
 
@@ -60,7 +60,10 @@ process.env.PI_ENSEMBLE_ADVERSARIAL_EMPTY_SKIP = "0";
     await fs.mkdir(path.join(dir, ".git", "info"), { recursive: true });
     const s = initialState(961, 1_000_000);
     const tree: Record<string, string> = {};
-    const streams: Record<string, { id: string; scope: string; paths: string[]; outOfScope: string[] }> = {};
+    const streams: Record<
+      string,
+      { id: string; scope: string; paths: string[]; outOfScope: string[] }
+    > = {};
     for (const w of ["task-a", "task-b"]) {
       tree[w] = `${dir}/.worktrees/${w}`;
       streams[w] = { id: w, scope: w, paths: [], outOfScope: [] };
@@ -188,7 +191,10 @@ process.env.PI_ENSEMBLE_ADVERSARIAL_EMPTY_SKIP = "0";
     await fs.mkdir(path.join(dir, ".git", "info"), { recursive: true });
     const s = initialState(962, 1_000_000);
     const tree: Record<string, string> = {};
-    const streams: Record<string, { id: string; scope: string; paths: string[]; outOfScope: string[] }> = {};
+    const streams: Record<
+      string,
+      { id: string; scope: string; paths: string[]; outOfScope: string[] }
+    > = {};
     for (const w of ["task-a", "task-b"]) {
       tree[w] = `${dir}/.worktrees/${w}`;
       streams[w] = { id: w, scope: w, paths: [], outOfScope: [] };
@@ -360,7 +366,10 @@ process.env.PI_ENSEMBLE_ADVERSARIAL_EMPTY_SKIP = "0";
     await fs.mkdir(path.join(dir, ".git", "info"), { recursive: true });
     const s = initialState(963, 1_000_000);
     const tree: Record<string, string> = {};
-    const streams: Record<string, { id: string; scope: string; paths: string[]; outOfScope: string[] }> = {};
+    const streams: Record<
+      string,
+      { id: string; scope: string; paths: string[]; outOfScope: string[] }
+    > = {};
     for (const w of ["task-a", "task-b"]) {
       tree[w] = `${dir}/.worktrees/${w}`;
       streams[w] = { id: w, scope: w, paths: [], outOfScope: [] };

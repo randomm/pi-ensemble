@@ -62,7 +62,14 @@ export function resumeEnabled(): boolean {
 // `PI_ENSEMBLE_SESSION_REATTACH=1` opts in; at ship it defaults OFF (=0).
 // ---------------------------------------------------------------------------
 
-/** F3a escape hatch: PI_ENSEMBLE_SESSION_REATTACH=1 enables re-attach. */
+/** F3a escape hatch: PI_ENSEMBLE_SESSION_REATTACH=1 enables re-attach.
+ * Pending: #543 F3a — the crash-resume path (classifyRunningState + a future
+ * re-attach dispatch helper) is the intended caller; the F3a seam is shipped
+ * as default-off infrastructure (PI_ENSEMBLE_SESSION_REATTACH=0, no
+ * production caller, no dispatch-started transcriptPath wiring yet) so it
+ * cannot change behaviour. Wired when the resume step learns to call
+ * resolveReattach/reattachArgs/reattachPrompt for a single-dispatch step.
+ */
 export function sessionReattachEnabled(): boolean {
   return process.env.PI_ENSEMBLE_SESSION_REATTACH === "1";
 }
@@ -80,7 +87,10 @@ export const FAN_OUT_STEPS: ReadonlySet<WorkStep> = new Set<WorkStep>([
   "adversarial",
 ]);
 
-/** The floor on a re-attach grant: never less than 5 minutes. */
+/** The floor on a re-attach grant: never less than 5 minutes. Deliberate
+ * grace: a re-attaching child re-reads its own session (compaction / token
+ * catch-up) before it can do useful work, so a grant tighter than this floor
+ * would kill it before it speaks — the #296 false-positive shape. */
 export const REATTACH_GRANT_FLOOR_MS = 5 * 60_000;
 
 /**
@@ -91,6 +101,10 @@ export const REATTACH_GRANT_FLOOR_MS = 5 * 60_000;
  * the step is NOT a fan-out, the in-flight dispatch carried a transcript path,
  * and that file exists on disk. Everything else is `{ mode: "re-dispatch" }`
  * (fail-open) — a missing transcript or a fan-out step re-dispatches.
+ *
+ * Pending: #543 F3a — no production caller yet; the resume step does not
+ * currently record `transcriptPath` on `dispatch-started`, so this returns
+ * `re-dispatch` for every state file that reaches it today.
  */
 export function resolveReattach(
   step: WorkStep,
