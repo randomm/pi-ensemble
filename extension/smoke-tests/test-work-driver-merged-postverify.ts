@@ -23,13 +23,15 @@ import {
   executeAndVerifyMerge,
   mechanizedMerge,
 } from "../src/work-driver-merged-mechanized.ts";
-import { mkStateMerged } from "./test-work-driver-merged-mechanized.ts";
 import { setupSpawnGuard } from "./test-helpers.ts";
+import { mkStateMerged } from "./work-driver-merged-fixtures.ts";
 
 setupSpawnGuard();
 
 let exit = 0;
+let passCount = 0;
 function assert(cond: boolean, msg: string) {
+  passCount++;
   if (cond) console.log(`✓ ${msg}`);
   else {
     console.error(`✗ ${msg}`);
@@ -43,8 +45,9 @@ function mkPi(): ExtensionAPI {
 
 // Same shapes as test-work-driver-merged-mechanized.ts — typed end-to-end
 // (no `as unknown as` casts on DriverContext / WorkState). The WorkState
-// fixture reuses that file's shared `mkStateMerged` helper, which builds the
-// typed shape without erasure casts.
+// fixture comes from the side-effect-free shared helper
+// work-driver-merged-fixtures.ts, which builds the typed shape without
+// erasure casts.
 function mkCtx(issue: number, exec: VerifyExecFn): DriverContext {
   return {
     repoRoot: "/fake",
@@ -102,6 +105,10 @@ function mkExec(
     return fn(cmd);
   };
   const r = await executeAndVerifyMerge(42, "squash", fn2, "/fake");
+  // First marker of THIS suite: proves postverify executes its own
+  // assertions (previously masked by the imported executable test's
+  // process.exit, issue #356).
+  assert(true, "#356 postverify suite: running own assertions");
   assert("merged" in r && r.merged === true, "#356: post-verify transient error → merged:true");
   assert(
     r.merged && r.warningNote !== undefined,
@@ -344,6 +351,16 @@ function mkExec(
     "#356: transient 502 → warning note, no permanent suffix",
   );
 }
+
+// Terminal self-check: every assertion in this suite is labelled #356, so
+// the pass count is a visible fingerprint that THIS file executed its own
+// assertions (not the imported executable test's 26 mechanized labels).
+const expectedOwn = 21;
+const executedBefore = passCount + 1; // +1 = this self-check's own call
+assert(
+  executedBefore >= expectedOwn,
+  `#356 postverify self-check: this suite executed ${executedBefore - 1} preceding + this assertion`,
+);
 
 console.log(`\nexit ${exit}`);
 process.exit(exit);

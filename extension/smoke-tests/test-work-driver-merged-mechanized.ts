@@ -19,8 +19,9 @@ import {
 } from "../src/work-driver-merged-mechanized.ts";
 import { runMerged } from "../src/work-driver-merged.ts";
 import { inlineMergePrompt } from "../src/work-driver-prompts-late.ts";
-import { type WorkState, initialState } from "../src/workflow-state.ts";
+import type { WorkState } from "../src/workflow-state.ts";
 import { setupSpawnGuard } from "./test-helpers.ts";
+import { mkStateMerged } from "./work-driver-merged-fixtures.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
@@ -76,29 +77,6 @@ function mkCtx(
     }),
     ...(opts?.dispatchFn ? { dispatchFn: opts.dispatchFn } : {}),
   } as DriverContext;
-}
-
-// Shared by this file and test-work-driver-merged-postverify.ts. Builds a
-// valid WorkState at the `merged` step by spreading a typed object — no
-// `as any`/double-cast erasure of the WorkState shape.
-export function mkStateMerged(
-  issue: number,
-  pr: number,
-  branch: string,
-  extra: Partial<import("../src/workflow-state.ts").PipelineState> = {},
-): WorkState {
-  const s = initialState(issue, 1_000_000);
-  return {
-    ...s,
-    pipelineState: {
-      ...s.pipelineState,
-      currentStep: "merged",
-      lastCompletedStep: "ci",
-      branchName: branch,
-      prNumber: pr,
-      ...extra,
-    },
-  };
 }
 
 process.env.PI_ENSEMBLE_TRANSIENT_RETRY_BACKOFF_MS = "0";
