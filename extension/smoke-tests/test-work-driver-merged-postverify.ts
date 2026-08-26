@@ -18,11 +18,12 @@
  */
 
 import type { DriverContext } from "../src/work-driver-context.ts";
-import type { VerifyExecFn } from "../src/work-driver-git.ts";
+import { type VerifyExecFn } from "../src/work-driver-git.ts";
 import {
   executeAndVerifyMerge,
   mechanizedMerge,
 } from "../src/work-driver-merged-mechanized.ts";
+import { mkStateMerged } from "./test-work-driver-merged-mechanized.ts";
 import { setupSpawnGuard } from "./test-helpers.ts";
 
 setupSpawnGuard();
@@ -38,6 +39,19 @@ function assert(cond: boolean, msg: string) {
 
 function mkPi(): ExtensionAPI {
   return { sendUserMessage: () => {} } as unknown as ExtensionAPI;
+}
+
+// Same shapes as test-work-driver-merged-mechanized.ts — typed end-to-end
+// (no `as unknown as` casts on DriverContext / WorkState). The WorkState
+// fixture reuses that file's shared `mkStateMerged` helper, which builds the
+// typed shape without erasure casts.
+function mkCtx(issue: number, exec: VerifyExecFn): DriverContext {
+  return {
+    repoRoot: "/fake",
+    issue,
+    pi: mkPi(),
+    verifyExecFn: exec,
+  } as DriverContext;
 }
 
 interface MockExec {
@@ -178,10 +192,7 @@ function mkExec(
     }
     return { stdout: "" };
   };
-  const r = await mechanizedMerge(
-    { repoRoot: "/fake", issue: 100, pi: mkPi(), verifyExecFn: fn } as DriverContext,
-    { pipelineState: { prNumber: 42 } } as unknown as Parameters<typeof mechanizedMerge>[1],
-  );
+  const r = await mechanizedMerge(mkCtx(100, fn), mkStateMerged(100, 42, "feature/issue-100"));
   assert(r.ok === true, "#356: mechanizedMerge — transient post-verify → ok:true");
   assert(r.ok && r.notes.length === 1, "#356: exactly one warning note");
   assert(
@@ -212,10 +223,7 @@ function mkExec(
     }
     return { stdout: "" };
   };
-  const r = await mechanizedMerge(
-    { repoRoot: "/fake", issue: 100, pi: mkPi(), verifyExecFn: fn } as DriverContext,
-    { pipelineState: { prNumber: 42 } } as unknown as Parameters<typeof mechanizedMerge>[1],
-  );
+  const r = await mechanizedMerge(mkCtx(100, fn), mkStateMerged(100, 42, "feature/issue-100"));
   assert(r.ok === false, "#356: mechanizedMerge — non-MERGED post-verify → ok:false");
   assert(
     "reason" in r && /state is OPEN/.test(r.reason),
@@ -236,11 +244,105 @@ function mkExec(
     if (cmd.includes("gh pr merge")) return { stdout: "Merged" };
     return { stdout: "" };
   };
-  const r = await mechanizedMerge(
-    { repoRoot: "/fake", issue: 100, pi: mkPi(), verifyExecFn: fn } as DriverContext,
-    { pipelineState: { prNumber: 42 } } as unknown as Parameters<typeof mechanizedMerge>[1],
-  );
+  const r = await mechanizedMerge(mkCtx(100, fn), mkStateMerged(100, 42, "feature/issue-100"));
   assert(r.ok === true && r.notes.length === 0, "#356: happy path — no warning notes");
+}
+
+// ---- permanent post-verify failures must NOT be reported as success ----
+//
+// A deterministically permanent gh failure (bad credentials, PR gone /
+// unresolvable) means re-verification will never succeed either, and #356's
+// merged-with-warning behaviour exists for TRANSIENT transport failures
+// only. Reporting those as merged:true with a warning note is a false
+// success — the cycle must fall back to the LLM ops dispatch.
+
+{
+  // A 401 (expired token) is permanent: gh will keep failing until the
+  // operator re-auths, so this is NOT a transport blip to wave off.
+  const fn: VerifyExecFn = async (cmd) => {
+    if (cmd.includes("gh pr view")) {
+      const e = new Error("HTTP 401: Bad credentials") as Error & { stderr?: string };
+      e.stderr = "HTTP 401: Bad credentials";
+      throw e;
+    }
+    return { stdout: "" };
+  };
+  const r = await executeAndVerifyMerge(42, "squash", fn, "/fake");
+  assert(
+    "ok" in r && r.ok === false,
+    "#356: permanent 401 post-verify → ok:false (NOT a false success)",
+  );
+  assert(
+    "ok" in r && r.ok === false && /verification failed/.test(r.reason),
+    "#356: permanent post-verify failure reason names the failed call",
+  );
+}
+
+{
+  // A 404 / unresolvable PR is equally permanent.
+  const fn: VerifyExecFn = async (cmd) => {
+    if (cmd.includes("gh pr view")) {
+      const e = new Error(
+        "GraphQL: Could not resolve a reference to '42' (resource not found)",
+      ) as Error & { stderr?: string };
+      e.stderr = e.message;
+      throw e;
+    }
+    return { stdout: "" };
+  };
+  const r = await executeAndVerifyMerge(42, "squash", fn, "/fake");
+  assert(
+    "ok" in r && r.ok === false,
+    "#356: permanent 404/not-found post-verify → ok:false",
+  );
+}
+
+{
+  // mechanizedMerge full path: permanent 401 → ok:false (the caller emits a
+  // plumb-report and falls back to the ops dispatch rather than a merged
+  // event with a warning).
+  const fn: VerifyExecFn = async (cmd) => {
+    if (cmd.includes("gh repo view")) {
+      return {
+        stdout: '{"squashMergeAllowed":true,"mergeCommitAllowed":false,"rebaseMergeAllowed":false}',
+      };
+    }
+    if (cmd.includes("gh pr view")) {
+      const e = new Error("HTTP 401: Bad credentials") as Error & { stderr?: string };
+      e.stderr = "HTTP 401: Bad credentials";
+      throw e;
+    }
+    return { stdout: "" };
+  };
+  const r = await mechanizedMerge(mkCtx(100, fn), mkStateMerged(100, 42, "feature/issue-100"));
+  assert(
+    r.ok === false,
+    "#356: mechanizedMerge — permanent post-verify → ok:false (ops fallback)",
+  );
+  assert(
+    r.ok === false && /HTTP 401/.test(r.reason),
+    "#356: mechanizedMerge permanent failure reason carries the gh error",
+  );
+}
+
+{
+  // A 502 (transient) still gets merged-with-warning, no false failure.
+  const fn: VerifyExecFn = async (cmd) => {
+    if (cmd.includes("gh pr view")) {
+      const e = new Error("HTTP 502 Bad Gateway") as Error & { stderr?: string };
+      e.stderr = "HTTP 502 Bad Gateway";
+      throw e;
+    }
+    return { stdout: "" };
+  };
+  const r = await executeAndVerifyMerge(42, "squash", fn, "/fake");
+  assert("merged" in r && r.merged === true, "#356: transient 502 → merged:true (unchanged)");
+  assert(
+    r.merged &&
+      r.warningNote !== undefined &&
+      !/re-verify PR #42 state manually/.test(r.warningNote),
+    "#356: transient 502 → warning note, no permanent suffix",
+  );
 }
 
 console.log(`\nexit ${exit}`);

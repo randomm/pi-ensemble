@@ -93,16 +93,31 @@ function mkCtx(
   } as DriverContext;
 }
 
-function mkState(issue: number, pr: number, branch: string): WorkState {
+// Shared by this file and test-work-driver-merged-postverify.ts. Builds a
+// valid WorkState at the `merged` step by spreading a typed object — no
+// `as any`/double-cast erasure of the WorkState shape.
+export function mkStateMerged(
+  issue: number,
+  pr: number,
+  branch: string,
+  extra: Partial<import("../src/workflow-state.ts").PipelineState> = {},
+): WorkState {
   const s = initialState(issue, 1_000_000);
-  (s as any).pipelineState = {
-    ...s.pipelineState,
-    currentStep: "merged",
-    lastCompletedStep: "ci",
-    branchName: branch,
-    prNumber: pr,
+  return {
+    ...s,
+    pipelineState: {
+      ...s.pipelineState,
+      currentStep: "merged",
+      lastCompletedStep: "ci",
+      branchName: branch,
+      prNumber: pr,
+      ...extra,
+    },
   };
-  return s;
+}
+
+function mkState(issue: number, pr: number, branch: string): WorkState {
+  return mkStateMerged(issue, pr, branch);
 }
 
 // mkState with baseSha + worktrees populated so runMerged's doctrine read
@@ -114,17 +129,7 @@ function mkStateFull(
   baseSha: string,
   worktrees: Record<string, string>,
 ): WorkState {
-  const s = initialState(issue, 1_000_000);
-  (s as any).pipelineState = {
-    ...s.pipelineState,
-    currentStep: "merged",
-    lastCompletedStep: "ci",
-    branchName: branch,
-    prNumber: pr,
-    baseSha,
-    worktrees,
-  };
-  return s;
+  return mkStateMerged(issue, pr, branch, { baseSha, worktrees });
 }
 
 process.env.PI_ENSEMBLE_TRANSIENT_RETRY_BACKOFF_MS = "0";
@@ -218,12 +223,20 @@ setupSpawnGuard();
   );
 }
 {
+  // Permanent gh failure (404-style "not found") on both pre-check and
+  // post-verify: gh cannot resolve the PR at all, so this is NOT the
+  // transient transport blip #356's merged-with-warning behaviour covers.
+  // It must return ok:false so runMerged emits the plumb-report and falls
+  // back to the LLM ops dispatch rather than reporting a false success.
   const { fn } = mkExec({
     "gh pr view": { error: true, stderr: "not found" },
     "gh pr merge": { stdout: "Merged" },
   });
   const r = await executeAndVerifyMerge(123, "squash", fn, "/fake");
-  assert("merged" in r && r.merged && r.warningNote !== undefined, "executeAndVerifyMerge: pre-check+post-verify fail → merged w/ warning");
+  assert(
+    "ok" in r && r.ok === false && /permanent gh error/.test(r.reason),
+    "executeAndVerifyMerge: permanent post-verify failure → ok:false (NOT merged-with-warning)",
+  );
 }
 
 // ---- inlineMergePrompt tests ----

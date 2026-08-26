@@ -137,13 +137,33 @@ export async function executeAndVerifyMerge(
       };
     }
   } catch (err) {
-    // #356 — the merge command succeeded (gh pr merge exited 0); the
-    // verification call itself hit a transient gh/network error. Returning
-    // ok:false here would cause the caller to emit a false merge-failure
-    // plumb-report and fall back to an LLM ops dispatch against an already-
-    // merged PR. The merged event still fires; a warning note records that
-    // post-merge state verification was inconclusive.
-    const note = `post-merge verification inconclusive (transient gh pr view error: ${(err as Error).message?.slice(0, 200) ?? "unknown"})`;
+    const e = err as Error & { stderr?: string };
+    const msg = e.message ?? "unknown";
+    // Distinguish a deterministically PERMANENT gh failure from a transient
+    // transport blip. The taxonomy is shared: `gh`'s stderr carries the same
+    // 4xx/"not found" wording `judgePrIdentity` (work-driver-git.ts) and the
+    // mainline resolution paths match on — a permanent failure will keep
+    // failing until the operator fixes auth or the PR, so #356's
+    // merged-with-warning behaviour must NOT swallow it. Reporting it as
+    // merged-success would leave an unverifiable merge looking green.
+    const permanent = /\b(401|403|404)\b|not found|could not resolve/i.test(
+      `${e.stderr ?? ""}\n${msg}`,
+    );
+    if (permanent) {
+      trace(`work-driver: permanent post-merge verification failure: ${msg.slice(0, 200)}`);
+      return {
+        ok: false,
+        reason: `post-merge verification failed with a permanent gh error: ${msg.slice(0, 300)}`,
+      };
+    }
+    // #356 — TRANSIENT failure: the merge command succeeded (gh pr merge
+    // exited 0); the verification call itself hit a gh/network error.
+    // Returning ok:false here would cause the caller to emit a false
+    // merge-failure plumb-report and fall back to an LLM ops dispatch
+    // against an already-merged PR. The merged event still fires; a
+    // warning note records that post-merge state verification was
+    // inconclusive.
+    const note = `post-merge verification inconclusive (gh pr view error: ${msg.slice(0, 200) ?? "unknown"})`;
     trace(`work-driver: ${note}`);
     return { merged: true, warningNote: note };
   }
