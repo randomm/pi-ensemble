@@ -223,7 +223,7 @@ setupSpawnGuard();
     "gh pr merge": { stdout: "Merged" },
   });
   const r = await executeAndVerifyMerge(123, "squash", fn, "/fake");
-  assert("ok" in r && r.ok === false, "executeAndVerifyMerge: pre-check fails → error");
+  assert("merged" in r && r.merged && r.warningNote !== undefined, "executeAndVerifyMerge: pre-check+post-verify fail → merged w/ warning");
 }
 
 // ---- inlineMergePrompt tests ----

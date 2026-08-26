@@ -73,14 +73,22 @@ export async function deriveMergeMethod(
  * success and returns immediately. This is what makes a crash mid-
  * restoration recoverable.
  *
- * Returns `{ merged: true }` on success, `{ ok: false }` on failure.
+ * #356 — post-merge verification distinguishes two failure modes:
+ *   - The `gh pr view` call itself throws (transient `gh` error) AFTER
+ *     `gh pr merge` already succeeded → returns `{ merged: true, warningNote }`.
+ *     Re-running the merge is impossible and a retry is out of scope;
+ *     the merged event still fires with a warning note.
+ *   - `gh pr view` returns a state other than MERGED → genuine failure,
+ *     returns `{ ok: false }`.
+ *
+ * Returns `{ merged: true, warningNote? }` on success, `{ ok: false }` on failure.
  */
 export async function executeAndVerifyMerge(
   prNumber: number,
   method: MergeMethod,
   execFn: VerifyExecFn,
   repoRoot: string,
-): Promise<{ merged: true } | { ok: false; reason: string }> {
+): Promise<{ merged: true; warningNote?: string } | { ok: false; reason: string }> {
   // First check: is the PR already merged? (idempotent on resume)
   try {
     const { stdout } = await execFn(`gh pr view ${prNumber} --json state --jq '.state'`, {
@@ -129,10 +137,15 @@ export async function executeAndVerifyMerge(
       };
     }
   } catch (err) {
-    return {
-      ok: false,
-      reason: `post-merge verification failed: ${(err as Error).message?.slice(0, 200)}`,
-    };
+    // #356 — the merge command succeeded (gh pr merge exited 0); the
+    // verification call itself hit a transient gh/network error. Returning
+    // ok:false here would cause the caller to emit a false merge-failure
+    // plumb-report and fall back to an LLM ops dispatch against an already-
+    // merged PR. The merged event still fires; a warning note records that
+    // post-merge state verification was inconclusive.
+    const note = `post-merge verification inconclusive (transient gh pr view error: ${(err as Error).message?.slice(0, 200) ?? "unknown"})`;
+    trace(`work-driver: ${note}`);
+    return { merged: true, warningNote: note };
   }
 
   return { merged: true };
@@ -187,6 +200,7 @@ export async function mechanizedMerge(
     return { ok: false, reason: mergeResult.reason, method: methodResult.method };
   }
 
+  const notes: string[] = mergeResult.warningNote ? [mergeResult.warningNote] : [];
   trace(`work-driver: PR #${prNumber} merged via --${methodResult.method} ✓`);
-  return { ok: true, method: methodResult.method, notes: [] };
+  return { ok: true, method: methodResult.method, notes };
 }
