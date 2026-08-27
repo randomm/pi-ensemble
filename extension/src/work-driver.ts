@@ -77,6 +77,7 @@ import {
 import { routeStepOutcome } from "./work-driver-step-router.ts";
 import { runCi, runStepBack } from "./work-driver-stepback-ci.ts";
 import { scratchDir, setupWorkspaceTmp, teardownWorkspaceTmp } from "./work-driver-workspace.ts";
+import { runWorktreeSweep } from "./work-driver-worktree-sweep.ts";
 import * as workWidget from "./work-widget.ts";
 import { validateDiscriminants } from "./workflow-state-validate.ts";
 import {
@@ -255,6 +256,12 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
     if (!attention.checked) {
       trace(`work-driver: needs-human-attention check did not run for #${ctx.issue}`);
     }
+  }
+
+  // Launch sweep: sweep other cycles' state files and unreferenced worktrees.
+  // Guarded by PI_ENSEMBLE_WORKTREE_SWEEP=0.
+  if (process.env.PI_ENSEMBLE_WORKTREE_SWEEP !== "0") {
+    await runWorktreeSweep(ctx.repoRoot, ctx.issue, ctx.issues);
   }
 
   // #382 — a `running` state file means one of three things, and the driver

@@ -315,6 +315,9 @@ export function renderTerminalStatus(state: WorkState, repoRoot: string): string
           ...shown.map((f) => `    ${f}`),
         );
       }
+      if (snap.retainedWorktrees?.length) {
+        lines.push("  retained worktrees:", ...snap.retainedWorktrees.map((wt) => `    ${wt}`));
+      }
     }
   }
 
