@@ -88,13 +88,17 @@ export async function runHandoff(
   );
   // In-cycle teardown: purge build artifacts and retain worktrees as needed.
   // Guarded by PI_ENSEMBLE_WORKTREE_TEARDOWN=0.
+  // Wrapped in try/catch: teardown must never prevent a handoff from completing.
   if (process.env.PI_ENSEMBLE_WORKTREE_TEARDOWN !== "0") {
-    const retained = await runWorktreeTeardown(
-      ctx.repoRoot,
-      state.pipelineState.branchName,
-      state.pipelineState.worktrees,
-    );
-    snap.retainedWorktrees = retained;
+    try {
+      const retained = await runWorktreeTeardown({
+        repoRoot: ctx.repoRoot,
+        state,
+      });
+      snap.retainedWorktrees = retained;
+    } catch (err) {
+      trace(`work-driver: worktree teardown failed (non-fatal): ${err}`);
+    }
   }
   next = {
     ...next,

@@ -1,9 +1,13 @@
+import { exec } from "node:child_process";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { trace } from "./trace.ts";
 import { processAlive } from "./work-driver-resume.ts";
 import type { WorkEvent, WorkState } from "./workflow-state.ts";
 import type { ExecFn } from "./worktree.ts";
+
+const defaultExecFn: ExecFn = promisify(exec) as unknown as ExecFn;
 
 /**
  * Result of resolving a sweep target.
@@ -255,7 +259,7 @@ export async function runWorktreeSweep(opts: {
   repoRoot: string;
   launchingCycleIssue: number;
   liveCycles: Set<number>;
-  execFn: ExecFn;
+  execFn?: ExecFn;
   /** Set to false to disable the sweep (for testing/env var). */
   enabled?: boolean;
 }): Promise<{
@@ -269,7 +273,7 @@ export async function runWorktreeSweep(opts: {
     return { ran: false, checked: 0, purged: [], removed: [], skipped: [] };
   }
 
-  const { repoRoot, launchingCycleIssue, liveCycles, execFn } = opts;
+  const { repoRoot, launchingCycleIssue, liveCycles, execFn = defaultExecFn } = opts;
   const worktreesDir = join(repoRoot, ".worktrees");
   let dirs: string[];
   try {
@@ -360,7 +364,7 @@ export async function runWorktreeSweep(opts: {
 export async function runWorktreeTeardown(opts: {
   repoRoot: string;
   state: WorkState;
-  execFn: ExecFn;
+  execFn?: ExecFn;
   /** Set to false to disable the teardown (for testing/env var). */
   enabled?: boolean;
 }): Promise<string[]> {
@@ -368,7 +372,7 @@ export async function runWorktreeTeardown(opts: {
     return [];
   }
 
-  const { repoRoot, state, execFn } = opts;
+  const { repoRoot, state, execFn = defaultExecFn } = opts;
   const worktrees = state.pipelineState.worktrees;
   if (!worktrees || Object.keys(worktrees).length === 0) {
     return [];

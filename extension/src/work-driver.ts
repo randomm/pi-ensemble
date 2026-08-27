@@ -203,12 +203,8 @@ export async function runWorkDriver(ctx: DriverContext): Promise<DriverOutcome> 
 }
 
 async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
-  // PR12 — `/work N --restart`: skip readState and start fresh from
-  // `initialState(issue)`. Used after the operator revises the issue
-  // body via /plan (or gh issue edit) following a prior terminal cycle
-  // (handoff / aborted / merged). Branch step's existing-branch logic
-  // handles worktree leftovers at runtime; this flag only wipes the
-  // driver's state file.
+  // PR12 — `/work N --restart`: skip readState, start fresh. Branch step
+  // handles worktree leftovers at runtime; this flag only wipes state.
   let state =
     ctx.restart === true
       ? initialState(ctx.issue)
@@ -216,21 +212,13 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
   if (ctx.restart === true) {
     trace(`work-driver: --restart wiped state for issue #${ctx.issue} (fresh cycle)`);
   }
-  // PR10 — persist the full multi-issue list on first run. On resume,
-  // honour what's already in the file (the user may have continued a
-  // single-issue cycle by re-invoking /work N; we don't widen scope
-  // silently). Only fresh state files (issues===undefined) take the
-  // ctx.issues list. On --restart, the freshly-initialised state has
-  // issues===undefined so the ctx.issues list flows through.
+  // PR10 — persist multi-issue list on first run; honour existing on resume
+  // (don't widen scope silently). --restart yields issues===undefined → flows through.
   if (ctx.issues && ctx.issues.length > 0 && state.issues === undefined) {
     state = { ...state, issues: ctx.issues };
   }
 
-  // PR12 — surface a clear notify when /work re-invocation finds the
-  // state already terminal (handoff / aborted / merged) and the
-  // operator didn't pass --restart. Pre-PR12 this silently fell
-  // through to the end of the function — the operator saw nothing
-  // and PM ended up recommending /do as a workaround.
+  // PR12 — surface a clear notify when state is already terminal and no --restart.
   if (state.pipelineState.status !== "running" && ctx.restart !== true) {
     const terminalStatus = state.pipelineState.status;
     notifyAgent(
@@ -258,10 +246,13 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
     }
   }
 
-  // Launch sweep: sweep other cycles' state files and unreferenced worktrees.
-  // Guarded by PI_ENSEMBLE_WORKTREE_SWEEP=0.
+  // Launch sweep: other cycles' stale worktrees. Guarded by PI_ENSEMBLE_WORKTREE_SWEEP=0.
   if (process.env.PI_ENSEMBLE_WORKTREE_SWEEP !== "0") {
-    await runWorktreeSweep(ctx.repoRoot, ctx.issue, ctx.issues);
+    await runWorktreeSweep({
+      repoRoot: ctx.repoRoot,
+      launchingCycleIssue: ctx.issue,
+      liveCycles: new Set(ctx.issues),
+    });
   }
 
   // #382 — a `running` state file means one of three things, and the driver
