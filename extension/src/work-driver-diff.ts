@@ -16,6 +16,9 @@ import type { WorkState, WorkStep } from "./workflow-state.ts";
 
 const execp = promisify(exec);
 
+/** Validate a git SHA before shell interpolation. */
+const VALID_BASEDIFF_SHA_RE = /^[0-9a-f]{40}$/;
+
 /**
  * Resolve a diff for the given working directory.
  *
@@ -28,14 +31,20 @@ const execp = promisify(exec);
  * actual worktree state.
  *
  * #451 — the bare `git diff HEAD` is DELIBERATE pre-commit semantics, not
- * a ref-resolution bug. `fetchDiff` is always per-worktree (`cwd` is one
- * of the cycle's worktrees, or the last-resort repoRoot fallback recorded
- * by the branch step): adversarial review runs pre-commit, and
- * `integrate()` never leaves uncommitted work behind in a worktree, so
- * "working tree vs its own HEAD" is exactly the uncommitted developer
- * work to review. The load-bearing discipline is which cwd the caller
- * scopes it to — a worktree, never the repo root once it leaves the
- * feature branch (the branch-step fallbacks carry their own notes). That
+ * a ref-resolution bug, and is the fallback for backwards compatibility.
+ * The preferred primary path when `baseSha` is provided is
+ * `git diff baseSha..HEAD`, which captures committed changes — without
+ * this, once the developer commits their work `git diff HEAD` returns
+ * empty and adversarial would trivially approve (#453). Logic:
+ *   1. If baseSha is a valid 40-char hex SHA, try `git diff baseSha..HEAD`.
+ *      If the result is non-empty, return it — this is the committed work.
+ *   2. Fall back to `git diff HEAD` for uncommitted changes (pre-commit
+ *      compat, or when baseSha is absent / the baseSha range is empty).
+ *
+ * `fetchDiff` is always per-worktree (`cwd` is one of the cycle's
+ * worktrees, or the last-resort repoRoot fallback recorded by the branch
+ * step). The load-bearing discipline is which cwd the caller scopes it to —
+ * a worktree, never the repo root once it leaves the feature branch. That
  * is what the grep canary in test-work-driver-diff-head-canary.ts
  * protects: no new bare `git diff HEAD` in a REPO-ROOT verification or
  * diff-fetch path, and this per-worktree call stays documented.
@@ -46,14 +55,33 @@ const execp = promisify(exec);
  *  - cwd isn't a git repo
  *  - `git diff` returned non-zero or threw (e.g., permissions)
  *
- * The subagent prompts already include the cwd; an empty-diff result
- * lets adversarial / lens-review hint correctly ("nothing changed, no
- * review needed"). The hard cap on diff size (1 MiB) prevents a runaway
- * worktree state from bloating the dispatch prompt — pi-ai providers
- * have their own context limits and a 1 MB diff is already a red flag.
+ * The hard cap on diff size (1 MiB) prevents a runaway worktree state
+ * from bloating the dispatch prompt.
  */
-export async function fetchDiff(cwd: string | undefined): Promise<string> {
+export async function fetchDiff(cwd: string | undefined, baseSha?: string): Promise<string> {
   if (!cwd) return "";
+  // #453 — try committed diff first when baseSha is available and valid.
+  // `git diff baseSha..HEAD` shows everything the developer committed,
+  // which `git diff HEAD` misses once the working tree is clean.
+  if (baseSha && VALID_BASEDIFF_SHA_RE.test(baseSha)) {
+    try {
+      const { stdout } = await execp(`git diff ${baseSha}..HEAD`, {
+        cwd,
+        maxBuffer: 1024 * 1024,
+      });
+      if (stdout.trim()) return stdout;
+    } catch (err) {
+      trace(
+        `work-driver: fetchDiff(${cwd}, baseSha..HEAD) failed: ${(err as Error).message?.slice(
+          0,
+          200,
+        )}`,
+      );
+    }
+  }
+  // Fallback: uncommitted diff — DELIBERATE pre-commit semantics for callers
+  // without a baseSha and for the case where baseSha..HEAD is empty
+  // (developer hasn't committed yet).
   try {
     const { stdout } = await execp("git diff HEAD", {
       cwd,

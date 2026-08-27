@@ -75,15 +75,23 @@ export async function fanOutAdversarial(
   // errorTail. The span is captured by the caller on the ORIGINAL event
   // log — BEFORE this pass's events are appended.
   const passStart = priorBatchSpan ? priorBatchSpan[0] : state.eventLog.length;
+  // #453 — per-workstream baseSha: adversarial now reviews committed work
+  // via `git diff baseSha..HEAD`, falling back to `git diff HEAD` for
+  // the pre-commit / no-baseSha case. Captured once and closed over by
+  // runOne so every round (getDiff callback) re-reads the same range.
+  const baseSha = state.pipelineState.baseSha;
+
   const runOne = async (id: string): Promise<AdversarialOutcome> => {
     const cwd = state.pipelineState.worktrees?.[id] ?? ctx.repoRoot;
     const label = ids.length > 1 ? `adversarial[${id}]` : "adversarial_loop";
     const startedAt = Date.now();
     const orchestratorJobId = makeRunId();
-    // Per-workstream diff: a single `git diff HEAD` from this worktree —
-    // exactly what ONE developer wrote. The cross-workstream merge happens
-    // later in commit-pr; this gate judges each workstream independently.
-    const diff = await fetchDiff(cwd);
+    // Per-workstream diff: `fetchDiff(cwd, baseSha)` tries baseSha..HEAD
+    // first (committed developer work) and falls back to `git diff HEAD`
+    // (uncommitted / no-baseSha). Without the baseSha path, once the
+    // developer commits `git diff HEAD` returns empty and adversarial
+    // would trivially approve everything (#453).
+    const diff = await fetchDiff(cwd, baseSha);
 
     // #286 — empty-diff short-circuit (a full reviewer spawn on an empty
     // diff is pure waste; lens review has had this guard since PR6).
@@ -129,10 +137,9 @@ export async function fanOutAdversarial(
               ? `/work issue #${ctx.issue}: gating diff for workstream "${id}" before commit (Step 5).`
               : `/work issue #${ctx.issue}: gating diff before commit (Step 5).`,
           workCwd: cwd,
-          // Re-read before each round. Without this, rounds 2+ are prompted
-          // with the pre-fix diff and the reviewer has to notice for itself
-          // that its earlier objections were already addressed.
-          getDiff: () => fetchDiff(cwd),
+          // Re-read before each round, using the same baseSha..HEAD range so
+          // committed work is visible on every round (not just the first).
+          getDiff: () => fetchDiff(cwd, baseSha),
           // #278 — the reviewer judges the diff against what was ASKED FOR,
           // not just against generic code quality. Absent on cycles resumed
           // from older state files, which degrade to the previous behaviour.
