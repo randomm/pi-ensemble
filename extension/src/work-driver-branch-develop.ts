@@ -29,20 +29,11 @@ import { beginDispatch, clearDispatch } from "./work-driver-resume.ts";
 import { salvageKnownDirtyWorktrees } from "./work-driver-branch-salvage.ts";
 import { verifyStepOutcome } from "./work-driver-verify.ts";
 import { activeIssuesOf, scratchDir } from "./work-driver-workspace.ts";
-import type { WorktreeProvisionOutcome } from "./workflow-state-events-provision.ts";
+import { makeWorktreeProvisionedEvent } from "./workflow-state-events-provision.ts";
 import { type WorkState, appendEvent } from "./workflow-state.ts";
 import { DirtyWorktreeError, gitErrorDetail } from "./worktree.ts";
 
 const execp = promisify(exec);
-
-/** Map ProvisionResult.via + problem to the machine-readable event outcome. */
-function provisionOutcome(
-  via: "hook" | "symlink" | "none",
-  problem: string | undefined,
-): WorktreeProvisionOutcome {
-  if (via === "hook") return problem ? "hook-failed" : "hook-ran";
-  return via === "symlink" ? "symlink" : "none";
-}
 
 /**
  * Step 3 — Setup: ops creates the feature branch + worktrees.
@@ -134,14 +125,10 @@ export async function runBranch(
       for (const [id, cwd] of Object.entries(setup.worktrees)) {
         const pr = setup.provisions[id];
         if (pr) {
-          withProvisions = appendEvent(withProvisions, {
-            kind: "worktree-provisioned",
-            at: Date.now(),
-            worktreeId: id,
-            worktreePath: cwd,
-            outcome: provisionOutcome(pr.via, pr.problem),
-            problem: pr.problem,
-          });
+          withProvisions = appendEvent(
+            withProvisions,
+            makeWorktreeProvisionedEvent(id, cwd, pr.via, pr.problem),
+          );
         }
       }
       return {

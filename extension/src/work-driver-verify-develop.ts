@@ -52,7 +52,7 @@ function formatExecError(
  * exists (e.g. the branch step predates this event).
  */
 function provisionDepsHint(state: WorkState, cwd: string): string {
-  const event = (state.eventLog as Array<{ kind: string }>)
+  const event = state.eventLog
     .filter((e): e is WorktreeProvisionedEvent => e.kind === "worktree-provisioned")
     .find((e) => e.worktreePath === cwd);
   if (!event) {
@@ -85,6 +85,16 @@ function provisionDepsHint(state: WorkState, cwd: string): string {
         " `provisionWorktree`; the worktree contains only tracked files." +
         " Run `.pi/worktree-setup` manually in the worktree, or fix the SSH/env" +
         " issue that caused the mechanized branch step to fall back"
+      );
+    default:
+      // Cross-version state file: outcome value written by a newer build.
+      // Return the generic hint rather than falling off the end and returning
+      // undefined, which would corrupt the failure message.
+      return (
+        " — this looks like missing dependencies in the worktree rather than a defect" +
+        " in the diff. Provisioning discovers `node_modules` at `repoRoot` and in" +
+        " depth-1 package dirs with a manifest/lockfile; if the tree is elsewhere or" +
+        " empty, add or fix `.pi/worktree-setup`"
       );
   }
 }

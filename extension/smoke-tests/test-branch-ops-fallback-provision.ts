@@ -99,8 +99,7 @@ function opsFallbackRecorder(opsReply: string) {
 
 function branchCtx(execFn: ExecFn, dispatchFn?: () => Promise<DispatchResult>): DriverContext {
   return {
-    // biome-ignore lint/suspicious/noExplicitAny: fixture — only verifyExecFn + repoRoot are touched
-    pi: {} as any,
+    pi: {},
     issue: 536,
     issues: [536],
     restart: false,
