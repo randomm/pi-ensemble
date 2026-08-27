@@ -370,6 +370,22 @@ export interface PipelineState {
    */
   baseSha?: string;
   /**
+   * #453 — per-workstream commit SHAs: maps workstream id → SHA the
+   * developer committed in their detached worktree during the develop step.
+   * Populated by verifyDevelopOutcome once commits are confirmed to exist.
+   * Used by cherry-pick integration to know exactly what to pick.
+   * Absent on pre-#453 state files; readers treat absent as {}.
+   */
+  commitShas?: Record<string, string>;
+  /**
+   * #453 — per-workstream applied SHAs for crash-safe resume. Maps
+   * workstream id → SHA that has been cherry-picked onto the integration
+   * branch. Updated as each SHA lands during cherry-pick integration.
+   * On crash-resume, workstreams whose id+sha match an entry here are
+   * skipped. Absent on pre-#453 state files; readers treat absent as {}.
+   */
+  appliedShas?: Record<string, string>;
+  /**
    * PR17 — evidence captured by the outcome-verification gate
    * (verifyStepOutcome) when a `verify-failed:<step>` cap fires. Each
    * failure string is one human-readable finding (e.g., "developer
