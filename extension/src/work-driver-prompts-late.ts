@@ -328,7 +328,7 @@ export function inlineCiPrompt(
   const scratchDirAbs = scratchDirMaybe ?? branchOrScratchDir ?? "";
   const branchInstruction = branchName
     ? `  1. Find the latest workflow run for the captured feature branch \`${branchName}\` — \`gh run list --branch ${branchName} --limit 1 --json status,conclusion,databaseId,url\`.`
-    : "  1. The feature branch was not captured — discover it via `git branch --show-current`, then find its latest workflow run with `gh run list --branch <discovered-branch> --limit 1 --json status,conclusion,databaseId,url`.";
+    : "  1. Note: branch not captured — discover via `git branch --show-current` to identify the feature branch, then find its latest workflow run with `gh run list --branch <discovered-branch> --limit 1 --json status,conclusion,databaseId,url`.";
   return [
     `/work issue #${issue} — Step 8 (CI monitoring).`,
     "",

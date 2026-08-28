@@ -186,7 +186,8 @@ const scratchDir = "/tmp/pi-ensemble-issue-284";
 
   const missing = inlineCiPrompt(284, undefined, scratchDir);
   assert(
-    missing.includes("branch was not captured") && missing.includes("git branch --show-current"),
+    missing.includes("branch not captured — discover via") &&
+      missing.includes("git branch --show-current"),
     "#284 C: missing branch gives an explicit discovery fallback",
   );
 }
