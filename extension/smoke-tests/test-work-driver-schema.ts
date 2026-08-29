@@ -125,8 +125,8 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
     const onDisk = JSON.parse(readFileSync(file, "utf8")) as {
       pipelineState: Record<string, unknown>;
     };
-    delete onDisk.pipelineState.commitShas;
-    delete onDisk.pipelineState.appliedShas;
+    onDisk.pipelineState.commitShas = undefined;
+    onDisk.pipelineState.appliedShas = undefined;
     writeFileSync(file, `${JSON.stringify(onDisk, null, 2)}\n`);
     const legacy = await readState(dir, issue);
     assert(legacy !== undefined, "#453: pre-#453 state file (fields absent) still loads");
@@ -384,11 +384,8 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
     assert(labels.length === 0, "the driver HALTS — no dispatch is paid for on an unknown kind");
     const halt = sent.find((m) => /halted on issue #533/.test(m));
     assert(halt !== undefined, "the halt message reaches the operator");
-    assert(
-      halt !== undefined && halt.includes("not-a-real-kind"),
-      "halt message names the unknown value",
-    );
-    assert(halt !== undefined && halt.includes("eventLog[0].kind"), "halt message names the field");
+    assert(halt?.includes("not-a-real-kind"), "halt message names the unknown value");
+    assert(halt?.includes("eventLog[0].kind"), "halt message names the field");
     assert(
       halt !== undefined && /rm to start fresh/.test(halt) && /git work is unaffected/.test(halt),
       "halt message carries the inspect-or-rm recovery (the #284-291 idiom)",

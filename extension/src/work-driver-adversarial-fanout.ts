@@ -75,22 +75,17 @@ export async function fanOutAdversarial(
   // errorTail. The span is captured by the caller on the ORIGINAL event
   // log — BEFORE this pass's events are appended.
   const passStart = priorBatchSpan ? priorBatchSpan[0] : state.eventLog.length;
-  // #453 — per-workstream baseSha: adversarial now reviews committed work
-  // via `git diff baseSha..HEAD`, falling back to `git diff HEAD` for
-  // the pre-commit / no-baseSha case. Captured once and closed over by
-  // runOne so every round (getDiff callback) re-reads the same range.
-  const baseSha = state.pipelineState.baseSha;
-
   const runOne = async (id: string): Promise<AdversarialOutcome> => {
     const cwd = state.pipelineState.worktrees?.[id] ?? ctx.repoRoot;
     const label = ids.length > 1 ? `adversarial[${id}]` : "adversarial_loop";
     const startedAt = Date.now();
     const orchestratorJobId = makeRunId();
-    // Per-workstream diff: `fetchDiff(cwd, baseSha)` tries baseSha..HEAD
-    // first (committed developer work) and falls back to `git diff HEAD`
-    // (uncommitted / no-baseSha). Without the baseSha path, once the
-    // developer commits `git diff HEAD` returns empty and adversarial
-    // would trivially approve everything (#453).
+    // Per-workstream diff: `git diff <baseSha>..HEAD` from this worktree
+    // — exactly what ONE developer committed. After a developer commit
+    // (post-#453) `git diff HEAD` is empty (HEAD IS the commit), so we
+    // diff against the detach point. Without baseSha we fall back to
+    // `git diff HEAD` (pre-commit semantics for uncommitted work).
+    const baseSha = state.pipelineState.baseSha;
     const diff = await fetchDiff(cwd, baseSha);
 
     // #286 — empty-diff short-circuit (a full reviewer spawn on an empty
@@ -137,8 +132,9 @@ export async function fanOutAdversarial(
               ? `/work issue #${ctx.issue}: gating diff for workstream "${id}" before commit (Step 5).`
               : `/work issue #${ctx.issue}: gating diff before commit (Step 5).`,
           workCwd: cwd,
-          // Re-read before each round, using the same baseSha..HEAD range so
-          // committed work is visible on every round (not just the first).
+          // Re-read before each round. Without this, rounds 2+ are prompted
+          // with the pre-fix diff and the reviewer has to notice for itself
+          // that its earlier objections were already addressed.
           getDiff: () => fetchDiff(cwd, baseSha),
           // #278 — the reviewer judges the diff against what was ASKED FOR,
           // not just against generic code quality. Absent on cycles resumed

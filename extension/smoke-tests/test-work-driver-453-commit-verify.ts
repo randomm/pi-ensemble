@@ -29,9 +29,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { runAdversarial } from "../src/work-driver-adversarial.ts";
+import type { DriverContext } from "../src/work-driver-context.ts";
 import { fetchDiff } from "../src/work-driver-diff.ts";
 import { verifyDevelopOutcome } from "../src/work-driver-verify-develop.ts";
-import type { DriverContext } from "../src/work-driver-context.ts";
 import { initialState } from "../src/workflow-state.ts";
 
 const execFileP = promisify(execFile);
@@ -102,15 +102,13 @@ async function mkCommittedWorktree(): Promise<{ root: string; wt: string; baseSh
 {
   const tmpDir = mkdtempSync(path.join(tmpdir(), "verify-commit-"));
   try {
-    const mkCtx = (
-      execFn: NonNullable<DriverContext["verifyExecFn"]>,
-    ): DriverContext =>
+    const mkCtx = (execFn: NonNullable<DriverContext["verifyExecFn"]>): DriverContext =>
       ({
         pi: makeFakePi(),
         issue: 453,
         repoRoot: tmpDir,
         verifyExecFn: execFn,
-      } as unknown as DriverContext);
+      }) as unknown as DriverContext;
 
     // Uncommitted-only worktree with a valid baseSha → must fail.
     {

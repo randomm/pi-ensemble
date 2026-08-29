@@ -104,6 +104,9 @@ export function inlineExplorePrompt(
     // swamped. Pure semantic at 0.0 is the only mode whose score means anything.
     "  2. `vipune search '<keywords-from-issue-title>' --no-hybrid --recency 0.0 --limit 5` for prior decisions,",
     "     and `vipune search '<same>' --memory-type guard --no-hybrid --recency 0.0 --limit 5` for traps,",
+    // #280 C — guard memories about type-invariant removals; the widening scan
+    // writes one per (file, symbol) so the explore agent should look for them.
+    "  2b. `vipune search 'invariant-removal <basename>' --memory-type guard --no-hybrid --recency 0.0 --limit 3` for guard memories about recent constraint removals (invariant-removal scan),",
     "  3. `codebase_memory_search_code({query: '<concept>'})` for existing relevant code.",
     "",
     "Return a STRUCTURED summary the work-driver can route on:",
@@ -336,26 +339,14 @@ export function inlineDevelopPrompt(
     issues.length === 1
       ? `\`gh issue view ${issues[0]}\` to re-fetch the issue body (acceptance criteria, DoD).`
       : `Re-fetch each active issue body — run \`gh issue view <N>\` for each of: ${issues.map((n) => `#${n}`).join(", ")}.`;
-
-  // #453 — developer commits their work in the worktree; the driver
-  // cherry-picks the commit in Step 6. Build a driver-known commit
-  // message template from the issue + workstream so messages are
-  // structured rather than LLM-styled.
-  const wsId = workstream?.id ?? "default";
-  const wsScope = workstream?.scope ?? "implement changes";
-  const issueRef = issues.length === 1 ? `#${issues[0]}` : issues.map((n) => `#${n}`).join(" ");
-  const commitTemplate = `feat(${issueRef}): ${wsId} — ${wsScope}`;
-
   lines.push(
     `  1. ${fetchInstr}`,
     "  2. Implement the change end-to-end in the current branch. Run local quality gates (typecheck, lint, tests as the project defines them).",
-    // #453 — developers now commit their work; the verify gate
-    // (verifyDevelopOutcome) requires at least one commit ahead of
-    // baseSha. An uncommitted-only worktree fails the gate.
-    "  3. Commit your final work in the worktree using the driver-required message format:",
-    `     \`git commit -m '${commitTemplate}'\``,
-    "     The verify gate will fail if the worktree has no commit ahead of baseSha. Do NOT push.",
-    "  3a. You may commit at natural seams during development (clean build, passing tests). Do NOT push.",
+    // #543 F5 — the driver's checkpoint commits the worktree at the natural
+    // seams the child made during its run, so a cap kill never leaves only
+    // a failure message. Committing at natural seams is what makes those
+    // seams exist; the driver only stages what is there.
+    "  3. Commit your work in the worktree at natural seams (a clean build, a passing test suite). Do NOT push — the driver owns the branch and ops owns the push in Step 6.",
     "  4. End your reply with a `## Touched files` section listing every file you changed and a one-line `## Summary`.",
     "",
     "Discourage drive-by edits; only touch files in scope.",
