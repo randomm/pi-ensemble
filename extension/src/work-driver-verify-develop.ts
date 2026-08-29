@@ -26,6 +26,36 @@ import type { WorktreeProvisionedEvent } from "./workflow-state-events-provision
 import type { WorkState } from "./workflow-state.ts";
 import { looksLikeMissingDeps } from "./worktree-provision.ts";
 
+/** #285 — escape hatch for the deterministic develop scope/fanout gate. */
+function scopeGateEnabled(): boolean {
+  const value = process.env.PI_ENSEMBLE_SCOPE_GATE;
+  return value !== "0" && value !== "false";
+}
+
+/** #285 — normalise a scope path like git would spell it. */
+function normaliseScopePath(raw: string): string {
+  return raw.trim().replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+/** #285 — check whether a file path matches a declared scope path. */
+function matchesScopePath(file: string, declared: string): boolean {
+  return file === declared || file.startsWith(`${declared}/`);
+}
+
+/** #285 — maximum changed files allowed per declared path, by default. */
+function scopeFanoutFactor(): number {
+  const value = Number(process.env.PI_ENSEMBLE_SCOPE_FANOUT_FACTOR);
+  if (!Number.isFinite(value) || value < 0) return 3;
+  return value;
+}
+
+/** #285 — minimum changed files that trigger a fanout failure. */
+function scopeFanoutMinimum(): number {
+  const value = Number(process.env.PI_ENSEMBLE_SCOPE_FANOUT_MIN);
+  if (!Number.isFinite(value) || value < 0) return 6;
+  return Math.floor(value);
+}
+
 /** PR17 — bounded wall-clock for the verify command (default 10 min). */
 function verifyTimeoutMs(): number {
   const env = Number(process.env.PI_ENSEMBLE_VERIFY_TIMEOUT_MS);
@@ -133,7 +163,9 @@ export async function verifyDevelopOutcome(
   const touchedPaths: string[] = [];
   // PR18 (R1): track per-worktree assessability so one erroring worktree
   // doesn't suppress the hollow-diff check for all others.
+  // #285 — per-worktree changed-paths map for scope/fanout gate.
   let assessedCount = 0;
+  const changedPathsByWorkstream = new Map<string, Set<string>>();
   // #453 — count worktrees with uncommitted-only changes (no commits ahead
   // of baseSha). When this is > 0 and changedWorktrees is empty, the
   // per-worktree failures already explain the issue — skip the generic
@@ -150,7 +182,10 @@ export async function verifyDevelopOutcome(
       });
       assessed = true;
       if (stdout.trim().length > 0) hasUncommitted = true;
-      touchedPaths.push(...porcelainPaths(stdout));
+      const statusPaths = porcelainPaths(stdout);
+      touchedPaths.push(...statusPaths);
+      for (const file of statusPaths)
+        changedPathsByWorkstream.get(id)?.add(normaliseScopePath(file));
     } catch (err) {
       notes.push(`git status failed in ${id} (${(err as Error).message?.slice(0, 100)})`);
     }
@@ -172,18 +207,24 @@ export async function verifyDevelopOutcome(
           cwd,
           maxBuffer: 4 * 1024 * 1024,
         });
-        touchedPaths.push(...stdout.split("\n").filter((l) => l.trim().length > 0));
+        const diffPaths = stdout.split("\n").filter((l) => l.trim().length > 0);
+        touchedPaths.push(...diffPaths);
+        for (const file of diffPaths)
+          changedPathsByWorkstream.get(id)?.add(normaliseScopePath(file));
       } catch {
         // Same as above — an absent baseSha in this worktree is not evidence.
       }
     }
     if (assessed) assessedCount++;
+    // Collect committed path names for the protected-path gate.
+    // Note: touchedPaths already has status paths; this adds committed paths.
     // #453 — when baseSha is valid, only committed work counts: the transfer
     // unit is now a commit (cherry-picked in Step 6), not a patch.
     // Without a valid baseSha (older state files / ops-dispatch fallback)
     // fall back to the previous behaviour: uncommitted work also counts.
     const changed = isValidSha(baseSha) ? hasCommits : hasCommits || hasUncommitted;
     if (changed) changedWorktrees.push(cwd);
+    changedPathsByWorkstream.set(id, new Set([...touchedPaths.map(normaliseScopePath)]));
     // Per-worktree diagnostic: uncommitted work exists but hasn't been committed.
     if (isValidSha(baseSha) && hasUncommitted && !hasCommits) {
       uncommittedOnlyCount++;
@@ -211,6 +252,51 @@ export async function verifyDevelopOutcome(
   } else {
     notes.push("PI_ENSEMBLE_PROTECTED_PATHS=0 — protected-path gate disabled");
   }
+
+  // --- Scope/fanout gate (#285) ---
+  //
+  // This is intentionally separate from the hollow-diff check: a changed
+  // worktree can prove that a developer wrote code while still showing that
+  // the workstream's decomposition was too broad. An empty paths list has no
+  // declared boundary to measure, so preserve legacy/default behaviour and
+  // report the skipped check instead of inventing one.
+  if (!scopeGateEnabled()) {
+    notes.push("PI_ENSEMBLE_SCOPE_GATE=0 — develop scope/fanout gate disabled");
+  } else {
+    for (const [id, changedPaths] of changedPathsByWorkstream) {
+      const workstream = state.pipelineState.workstreams?.[id];
+      const declaredPaths = (workstream?.paths ?? [])
+        .map(normaliseScopePath)
+        .filter((p) => p.length > 0);
+      const outOfScope = (workstream?.outOfScope ?? [])
+        .map(normaliseScopePath)
+        .filter((p) => p.length > 0);
+      const changedFiles = [...changedPaths].sort();
+      const outOfScopeHits = changedFiles.filter((file) =>
+        outOfScope.some((declared) => matchesScopePath(file, declared)),
+      );
+      for (const file of outOfScopeHits) {
+        failures.push(`developer touched out-of-scope path ${file} — declared fence violated`);
+      }
+      if (declaredPaths.length === 0) {
+        notes.push(`scope fanout check skipped for ${id} — workstream has no declared paths`);
+        continue;
+      }
+      const limit = Math.max(declaredPaths.length * scopeFanoutFactor(), scopeFanoutMinimum());
+      if (changedFiles.length > limit) {
+        const undeclaredFiles = changedFiles.filter(
+          (file) => !declaredPaths.some((declared) => matchesScopePath(file, declared)),
+        );
+        const listedFiles = (undeclaredFiles.length > 0 ? undeclaredFiles : changedFiles).join(
+          ", ",
+        );
+        failures.push(
+          `scope fanout: ${changedFiles.length} files changed vs ${declaredPaths.length} declared — likely mis-decomposition; split the work or update the plan. Files: ${listedFiles}`,
+        );
+      }
+    }
+  }
+
   if (changedWorktrees.length === 0) {
     if (assessedCount > 0 && uncommittedOnlyCount === 0) {
       // No uncommitted-only failures: every worktree is genuinely empty.
