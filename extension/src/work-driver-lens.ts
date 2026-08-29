@@ -322,14 +322,11 @@ export async function runLens(
   ) {
     const seam = detectRepeatSeam(summary.findings);
     if (seam) {
-      const theme = `${seam.lens}::${seam.normalisedTitle}`;
-      trace(
-        `work-driver: seam escalation on round 1 — theme="${theme}" across ${seam.fileCount} files`,
-      );
+      // theme includes lens + pattern so downstream tests can verify it
       next = appendEvent(next, {
         kind: "step-back-triggered",
         at: Date.now(),
-        theme,
+        theme: `${seam.lens}::${seam.normalisedTitle}`,
       });
       next = appendEvent(next, {
         kind: "cap-hit",
