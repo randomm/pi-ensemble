@@ -194,6 +194,11 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
             if (cwd.endsWith("-task-c")) return { stdout: "?? src/c.rs\n" };
             return { stdout: "" };
           }
+          // #585 — orchestrator: `git rev-list --count "base123"..HEAD`
+          // (JSON.stringify wraps only the SHA, not the range). Must precede
+          // the generic base123 handler because `..HEAD` extends past the
+          // closing quote — `startsWith("...base123")` matches but returns 0.
+          if (cmd.includes('"base123"..HEAD')) return { stdout: "1\n" };
           if (cmd.startsWith("git rev-list --count base123")) return { stdout: "0\n" };
           if (cmd.startsWith("git rev-list --count origin/")) return { stdout: "1\n" };
           if (cmd.startsWith("git add -- ")) return { stdout: "" };
@@ -323,6 +328,11 @@ process.env.PI_ENSEMBLE_VERIFY = "0";
             if (cwd.endsWith("-task-c")) return { stdout: "?? src/c.rs\n" };
             return { stdout: "" };
           }
+          // #585 — orchestrator: `git rev-list --count "base123"..HEAD`
+          // (JSON.stringify wraps only the SHA, not the range). Must precede
+          // the generic base123 handler because `..HEAD` extends past the
+          // closing quote — `startsWith("...base123")` matches but returns 0.
+          if (cmd.includes('"base123"..HEAD')) return { stdout: "1\n" };
           if (cmd.startsWith("git rev-list --count base123")) return { stdout: "0\n" };
           if (cmd.startsWith("git rev-list --count origin/")) return { stdout: "1\n" };
           if (cmd.startsWith("git add -- ")) return { stdout: "" };
