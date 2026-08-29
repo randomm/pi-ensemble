@@ -237,6 +237,7 @@ export function inlineBranchPrompt(
   issues: number[],
   workstreamIds: string[],
   scratchDirAbs: string,
+  foreignLeftoverNote?: string,
 ): string {
   const multi = workstreamIds.length > 1;
   const multiIssue = issues.length > 1;
@@ -257,6 +258,15 @@ export function inlineBranchPrompt(
     `  4. Create branch \`${branchHint}\` from the fresh mainline tip.`,
     "  5. End your reply with a single line `branch: <branch-name>` so the driver can capture it.",
   ];
+  // #572 — warn ops about foreign leftover worktrees so it never
+  // force-removes unguarded.
+  if (foreignLeftoverNote) {
+    lines.push(
+      "",
+      `⚠ FOREIGN LEFTOVER: ${foreignLeftoverNote}`,
+      "  DO NOT force-remove this worktree. It belongs to a different /work cycle.",
+    );
+  }
   if (multi) {
     lines.push(
       "",

@@ -111,22 +111,45 @@ export interface DirtyWorktreeFinding {
   retained?: boolean;
 }
 
+export interface UnreadableWorktreeFinding {
+  /** Absolute path to the worktree that could not be inspected. */
+  path: string;
+}
+
+/**
+ * Result of inspecting a worktree: dirty (has work), clean (nothing), or
+ * unreadable (git commands failed — e.g. directory is gone but git still
+ * knows about the worktree).
+ */
+export type WorktreeLossResult =
+  | DirtyWorktreeFinding // has work to preserve
+  | UnreadableWorktreeFinding // could not inspect — refuse, never silently destroy
+  | undefined; // clean or non-existent — safe to remove
+
 /**
  * Inspect an existing worktree for work a force-remove would destroy.
  *
- * Two signals: uncommitted files (`git status --porcelain` in the worktree)
- * and local commits ahead of `fromRef` (`rev-list --count` — a worktree that
- * committed past its base, e.g. cherry-pick integration, would lose those).
- * The check itself must never fail the create: an unreadable worktree is
- * removed as today, because refusing on a git error would reintroduce the
- * wedged-queue leftover class the pre-remove exists to prevent.
+ * Three-state return:
+ *   - DirtyWorktreeFinding: uncommitted files or local commits ahead of
+ *     `fromRef` — force-remove would destroy unrecoverable work.
+ *   - UnreadableWorktreeFinding: a git command in the inspection failed
+ *     (e.g. directory removed externally while git still tracks it).
+ *     Caller must refuse — silently removing an unreadable worktree risks
+ *     destroying data the operator has not seen.
+ *   - undefined: the worktree is either clean (no uncommitted files and no
+ *     commits ahead) or does not exist — safe to remove.
+ *
+ * Every pre-remove inspection call MUST handle each state explicitly.
+ * `.catch(() => undefined)` on inspection is forbidden — unreadable
+ * worktrees must be refused (the operator sees the problem) rather than
+ * silently destroyed.
  */
 export async function inspectWorktreeForLoss(
   execFn: ExecFn,
   repoRoot: string,
   worktreeAbs: string,
   fromRef: string,
-): Promise<DirtyWorktreeFinding | undefined> {
+): Promise<WorktreeLossResult> {
   let exists = false;
   try {
     await execFn(`git rev-parse --verify ${JSON.stringify("HEAD")}`, {
@@ -145,7 +168,9 @@ export async function inspectWorktreeForLoss(
       maxBuffer: 1024 * 1024,
     }));
   } catch {
-    porcelain = "";
+    // Inspection failed — the worktree directory may have been removed
+    // externally while git still tracks it. Refuse instead of destroying.
+    return { path: worktreeAbs };
   }
   let ahead = 0;
   try {
@@ -156,7 +181,17 @@ export async function inspectWorktreeForLoss(
     ahead = Number.parseInt(stdout.trim(), 10);
     if (!Number.isFinite(ahead) || ahead < 0) ahead = 0;
   } catch {
-    ahead = 0;
+    // rev-list failed — the worktree may be on a different branch or
+    // the ref may not exist in this worktree. Record it as a finding
+    // so the operator can inspect manually.
+    const files = porcelain
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (files.length > 0) {
+      return { path: worktreeAbs, uncommittedFiles: files, unpushedCommitCount: 0 };
+    }
+    return { path: worktreeAbs };
   }
   const files = porcelain
     .split("\n")
@@ -204,12 +239,18 @@ export async function worktreeCreate(
     // Check if the worktree exists and is dirty to provide a proper error.
     const leftover = await inspectWorktreeForLoss(execFn, opts.repoRoot, abs, opts.fromRef);
     if (leftover) {
-      // If it's dirty, throw the existing error.
-      throw new DirtyWorktreeError(leftover);
+      if ("uncommittedFiles" in leftover || "unpushedCommitCount" in leftover) {
+        // Dirty worktree — throw the standard error.
+        throw new DirtyWorktreeError(leftover as DirtyWorktreeFinding);
+      }
+      // Unreadable worktree — refuse with retained message.
+      throw new DirtyWorktreeError({
+        path: leftover.path,
+        uncommittedFiles: [],
+        unpushedCommitCount: 0,
+        retained: true,
+      });
     }
-    // If it's clean, we still refuse to remove, but we need to throw an error
-    // to signal that the worktree should not be removed. We'll create a
-    // DirtyWorktreeError with retained set to true.
     throw new DirtyWorktreeError({
       path: abs,
       uncommittedFiles: [],
@@ -225,19 +266,35 @@ export async function worktreeCreate(
   // error. A clean foreign leftover is still handled by `worktree add`'s
   // own path-exists error — unchanged.
   const issuePrefix = opts.name.split("-").slice(0, 2).join("-");
-  const siblingDirty = await findDirtySameIssueLeftover(
+  const siblingLeftover = await findDirtySameIssueLeftover(
     execFn,
     opts.repoRoot,
     opts.fromRef,
     issuePrefix,
     opts.name,
   );
-  if (siblingDirty) {
-    throw new DirtyWorktreeError(siblingDirty);
+  if (siblingLeftover) {
+    if ("uncommittedFiles" in siblingLeftover || "unpushedCommitCount" in siblingLeftover) {
+      throw new DirtyWorktreeError(siblingLeftover as DirtyWorktreeFinding);
+    }
+    throw new DirtyWorktreeError({
+      path: siblingLeftover.path,
+      uncommittedFiles: [],
+      unpushedCommitCount: 0,
+      retained: true,
+    });
   }
   const leftover = await inspectWorktreeForLoss(execFn, opts.repoRoot, abs, opts.fromRef);
   if (leftover) {
-    throw new DirtyWorktreeError(leftover);
+    if ("uncommittedFiles" in leftover || "unpushedCommitCount" in leftover) {
+      throw new DirtyWorktreeError(leftover as DirtyWorktreeFinding);
+    }
+    throw new DirtyWorktreeError({
+      path: leftover.path,
+      uncommittedFiles: [],
+      unpushedCommitCount: 0,
+      retained: true,
+    });
   }
   await worktreeRemove(execFn, opts.repoRoot, opts.name, true).catch(() => undefined);
   // Always detached at baseSha: a named branch in a worktree contradicts
@@ -306,7 +363,7 @@ export async function findDirtySameIssueLeftover(
   fromRef: string,
   issuePrefix: string,
   selfName: string,
-): Promise<DirtyWorktreeFinding | undefined> {
+): Promise<WorktreeLossResult> {
   let list: string;
   try {
     ({ stdout: list } = await execFn("git worktree list --porcelain", {
@@ -326,9 +383,7 @@ export async function findDirtySameIssueLeftover(
     // below (a clean leftover is removed, a dirty one is a #475 refusal).
     const wtName = path.basename(wtPath);
     if (wtName === selfName) continue;
-    const finding = await inspectWorktreeForLoss(execFn, repoRoot, wtPath, fromRef).catch(
-      () => undefined,
-    );
+    const finding = await inspectWorktreeForLoss(execFn, repoRoot, wtPath, fromRef);
     if (finding) return finding;
   }
   return undefined;

@@ -26,7 +26,14 @@ import {
 } from "./work-driver-prompts-early.ts";
 import { beginDispatch, clearDispatch } from "./work-driver-resume.ts";
 
-import { salvageKnownDirtyWorktrees } from "./work-driver-branch-salvage.ts";
+import {
+  handleDirtyWorktreeRefusal,
+  handleMechanizedFallback,
+} from "./work-driver-branch-salvage-step.ts";
+import {
+  salvageKnownDirtyWorktrees,
+  salvageUnreadableWorktree,
+} from "./work-driver-branch-salvage.ts";
 import { verifyStepOutcome } from "./work-driver-verify.ts";
 import { activeIssuesOf, scratchDir } from "./work-driver-workspace.ts";
 import { makeWorktreeProvisionedEvent } from "./workflow-state-events-provision.ts";
@@ -94,6 +101,8 @@ export async function runBranch(
   // this — both restored the pre-#287 shape that swept stale repoRoot residue
   // into a merged PR. The LLM ops dispatch below remains as the fallback for
   // env variance, which is recovery, not an opt-out.
+  // #572 — thread baseSha and foreignLeftoverNote through refusal paths.
+  let foreignLeftoverNote = "";
   {
     const execFnMech = ctx.verifyExecFn ?? execp;
     try {
@@ -154,70 +163,30 @@ export async function runBranch(
       // the step-failed:branch cap, with the finding in a plumb report the
       // handoff comment renders.
       if (err instanceof DirtyWorktreeError) {
-        trace(`work-driver: branch step refused — dirty worktree: ${err.message?.slice(0, 300)}`);
-        const started = appendEvent(
-          { ...state, pipelineState: { ...state.pipelineState, currentStep: "branch" } },
-          { kind: "step-started", step: "branch", at: now },
-        );
-        // #545 — salvage the dirty worktrees this cycle ALREADY knows about
-        // (state.pipelineState.worktrees, populated by a prior branch step —
-        // the `--restart` shape: the state file survives the wipe, the
-        // worktrees it created still do). The refusal below keeps each on
-        // disk; the operator gets the salvage location in the plumb report.
-        // The refused path itself is salvaged too when it belongs to this
-        // cycle (name prefix `issue-<N>`), even though a crashed branch
-        // step never recorded it in the state — `worktrees` is written only
-        // after `worktreeCreate` succeeds for every workstream.
-        const refusedPath = (err as { finding?: { path?: string } }).finding?.path;
-        const salvageTargets = {
-          ...(state.pipelineState.worktrees ?? {}),
-          ...(refusedPath?.startsWith(path.join(ctx.repoRoot, ".worktrees", `issue-${ctx.issue}`))
-            ? { refused: refusedPath }
-            : {}),
-        };
-        const salvageNote = await salvageKnownDirtyWorktrees(
+        return await handleDirtyWorktreeRefusal(
+          state,
+          err,
+          { repoRoot: ctx.repoRoot, issue: ctx.issue },
           execFnMech,
-          salvageTargets,
           salvageScratch,
-        ).catch((salvErr) => {
-          trace(
-            `work-driver: salvage failed (non-fatal): ${(salvErr as Error).message?.slice(0, 200)}`,
-          );
-          return "";
-        });
-        const withReport = {
-          ...started,
-          pipelineState: {
-            ...started.pipelineState,
-            plumbReports: [
-              ...(started.pipelineState.plumbReports ?? []),
-              {
-                step: "branch" as const,
-                role: "driver",
-                body: `${err.message}${salvageNote ? `\n${salvageNote}` : ""}`,
-                at: Date.now(),
-              },
-            ],
-          },
-        };
-        return appendEvent(withReport, {
-          kind: "cap-hit",
-          at: Date.now(),
-          cap: "step-failed:branch",
-          reviewRound: state.pipelineState.reviewRound,
-          nextStep: "handoff",
-        });
+        );
       }
-      trace(
-        `work-driver: mechanized branch setup fell back to ops dispatch: ${errDetail.slice(0, 200)}`,
+      // #572 — non-DirtyWorktreeError failure: detect and salvage foreign worktrees.
+      const { note: salvageNote, plumbBody } = await handleMechanizedFallback(
+        { repoRoot: ctx.repoRoot, issue: ctx.issue },
+        state,
+        err as Error,
+        execFnMech,
+        salvageScratch,
       );
+      foreignLeftoverNote = salvageNote;
       base = {
         ...appendEvent(base, {
           kind: "plumb-report",
           at: Date.now(),
           step: "branch",
           role: "driver",
-          body: `Mechanized branch setup failed (git error: ${errDetail.slice(0, 300)}), falling back to the ops dispatch: ${(err as Error).message?.slice(0, 300)}`,
+          body: plumbBody,
         }),
         pipelineState: {
           ...base.pipelineState,
@@ -234,7 +203,7 @@ export async function runBranch(
       };
     }
   }
-  return runBranchViaOpsDispatch(ctx, base, workstreamIds, now);
+  return runBranchViaOpsDispatch(ctx, base, workstreamIds, now, foreignLeftoverNote);
 }
 
 /**

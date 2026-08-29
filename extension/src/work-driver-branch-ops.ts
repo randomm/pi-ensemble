@@ -71,15 +71,23 @@ export function parseWorktreesBlock(text: string, repoRoot: string): Record<stri
  * throws something other than `DirtyWorktreeError`.
  *
  * #292 — branchName is resolved from git, NOT from the ops reply.
+ * #572 — `foreignLeftoverNote` tells ops about cross-cycle foreign
+ * worktrees so it never force-removes unguarded.
  */
 export async function runBranchViaOpsDispatch(
   ctx: DriverContext,
   base: WorkState,
   workstreamIds: string[],
   now: number,
+  foreignLeftoverNote?: string,
 ): Promise<WorkState> {
   let next = await runSingleDispatch(ctx, base, "branch", "ops", "ops", now, () =>
-    inlineBranchPrompt(activeIssuesOf(base), workstreamIds, scratchDir(ctx.repoRoot, ctx.issue)),
+    inlineBranchPrompt(
+      activeIssuesOf(base),
+      workstreamIds,
+      scratchDir(ctx.repoRoot, ctx.issue),
+      foreignLeftoverNote,
+    ),
   );
   const last = next.eventLog[next.eventLog.length - 1];
   if (last?.kind !== "dispatch-completed") return next;
