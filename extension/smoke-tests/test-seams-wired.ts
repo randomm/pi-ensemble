@@ -123,9 +123,9 @@ const SEAMS: Seam[] = [
     // so the seam is inert on every real cycle until then.
     file: "work-driver-resume.ts",
     pending: {
-      resolveReattach: "#543 F3a — the crash-resume path will call it",
+      // resolveReattach / reattachPrompt wired via work-driver-resume-reattach.ts
+      // (imported by work-driver.ts). reattachArgs still unwired.
       reattachArgs: "#543 F3a — the crash-resume path will call it",
-      reattachPrompt: "#543 F3a — the crash-resume path will call it",
     },
     testOnly: {
       // #543 F3a — the re-attach floor + fan-out guard + the write-ahead
