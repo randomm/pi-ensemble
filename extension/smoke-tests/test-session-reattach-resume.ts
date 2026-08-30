@@ -15,6 +15,8 @@
 
 import {
   attemptReattach,
+} from "../src/work-driver-resume-reattach.ts";
+import {
   beginDispatch,
   clearDispatch,
   resolveReattach,
