@@ -1,24 +1,11 @@
 /**
  * /work driver — the deterministic orchestrator for compiled /work cycles.
  *
- * Replaces PM-as-orchestrator with code-as-orchestrator. The driver:
- * 1. owns the step transition table (#393 deleted the prose flow),
- * 2. dispatches subagents via `dispatchCore()` (ownerKind:driver),
- * 3. persists transitions to `.pi/work-state/<issue>.json` via `writeState()`,
- * 4. surfaces progress to the user via `notifyAgent()`.
+ * Code-as-orchestrator: owns step transitions (#393), dispatches via
+ * `dispatchCore()` (ownerKind:driver), persists to `.pi/work-state/` via
+ * `writeState()`, surfaces progress via `notifyAgent()`.
  *
- * Design axioms:
- * - **TS owns transitions; prose owns judgement.** Routes on structured output;
- *   fuzzy doctrine decided by @explore step-back, not driver inference.
- * - **Driver-owned dispatch.** `dispatchCore` sets ownerKind:driver; PM
- *   never sees an async it didn't ask for.
- * - **Resume-on-restart.** v1 is observational: detects orphan dispatch-started
- *   events on restart and HALTS (replay is v2).
- * - **Cap-state in work-state file.** reviewRound/reviewCapStartedAt persisted
- *   to pipelineState; caps enforced directly, bypassing legacy check_review_cap.
- *
- * All 9 steps wired. Each step's implementation lives in its own
- * `work-driver-<step>.ts` (issue #171); `runStep` dispatches to them.
+ * All 9 steps wired; each implementation lives in `work-driver-<step>.ts`.
  */
 import { notifyAgent } from "./agent-message.ts";
 import { trace } from "./trace.ts";
@@ -128,39 +115,13 @@ export class DriverNotImplementedError extends Error {
 }
 
 /**
- * Run the driver loop for one /work cycle. Reads / creates the state file,
- * loops over steps via `nextStep()`, persists after every transition,
- * surfaces final outcome (handoff or merged) to the user via
- * `pi.sendUserMessage`.
+ * Run one /work cycle: read/create state, loop over steps via `nextStep()`,
+ * persist after every transition, surface outcome via `pi.sendUserMessage`.
  *
- * Fire-and-forget contract: callers in `commands.ts` start this via
- * `void runWorkDriver(...).catch(reportFatal)`. The handler returns
- * immediately; the loop runs in the background.
- *
- * Every step is wired. A step body that throws `DriverNotImplementedError`
- * aborts the cycle and hands off — #393 removed the prose flow that used to
- * absorb that case, and silently continuing past an unimplemented step would
- * be worse than stopping.
+ * Fire-and-forget: callers start via `void runWorkDriver().catch(reportFatal)`.
  */
 /**
- * Run one /work cycle, holding an in-process claim on every issue it covers.
- *
- * The claim closes a hole the on-disk owner check structurally cannot: that
- * check excludes `owner.pid === selfPid` so a driver can resume its own crashed
- * state, which means two cycles started from the SAME process never refuse each
- * other. Harmless while only a human typing `/work` could start one; not
- * harmless once a tool can, because an LLM can call a tool twice.
- */
-/**
- * What a `runWorkDriver` call actually did.
- *
- * It used to return `Promise<void>`, and five of its early exits resolve in
- * ~0 ms without running a cycle at all — a claim conflict, another live pid, a
- * terminal state, an attention label, or state-file inconsistencies. The queue
- * could not tell those apart from a cycle that ran and parked, so it read the
- * OTHER cycle's mid-flight state file and reported it as this group's outcome,
- * complete with a `--restart` recommendation that would have raced fresh jobs
- * against live ones.
+ * Outcome of a `runWorkDriver` call: `{started: true}` or `{started: false; reason}`.
  */
 export type DriverOutcome = { started: true } | { started: false; reason: string };
 
@@ -237,11 +198,8 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
     });
   }
 
-  // #382 — a `running` state file means one of three things, and the driver
-  // used to conflate all of them into "just keep going". Either another
-  // process owns this cycle (refuse — two drivers on one branch interleave
-  // commits), or the previous run died mid-dispatch (resume at that step), or
-  // it is a clean step boundary (continue as before).
+  // #382 — resume on `running` state file: refuse (live pid), resume
+  // (died mid-dispatch), or continue (clean boundary).
   if (resumeEnabled() && ctx.restart !== true) {
     const verdict = classifyRunningState(state);
     if (verdict.action === "refuse") {
@@ -256,10 +214,7 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
       };
     }
     if (verdict.action === "resume") {
-      // #573 — attempt to re-attach the surviving session before falling back
-      // to re-dispatch. Read the dispatch-started event for the crashed job
-      // to find the transcript path and role, then resolveReattach decides
-      // whether this step is reattachable (single-dispatch, flag on, file exists).
+      // #573 — reattach surviving session before falling back to re-dispatch.
       const inFlightEvents = state.eventLog.filter(
         (e) =>
           e.kind === "dispatch-started" &&
@@ -275,8 +230,7 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
         `pi-ensemble:driver-event v1 kind=resume issue=${ctx.issue} at=${at}\n${explainResume(ctx.issue, verdict.step, verdict.jobIds.length)}`,
       );
 
-      // #573 — reattach attempt. Extracted to a helper so `continue` does not
-      // cross an `await` boundary (TS strict mode forbids that).
+      // #573 — reattach attempt.
       const { shouldSkipStep, nextState } = await attemptReattachInResume(
         ctx,
         state,
@@ -293,12 +247,7 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
     }
   }
 
-  // #533 — refuse to reconstruct on an unrecognised discriminant. Applied on
-  // the RESUME path only: `readState` stays permissive so a terminal state
-  // file (merged/handoff/aborted) with an unknown event kind still renders in
-  // /work-status — a parked cycle's history must stay observable. A
-  // `running` file that fails this check is refused before any dispatch or
-  // resume, first line naming the field and the value.
+  // #533 — refuse on unrecognised discriminant in `running` state only.
   if (state.pipelineState.status === "running") {
     const unknowns = validateDiscriminants(state);
     if (unknowns.length > 0) {
@@ -312,8 +261,7 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
     }
   }
 
-  // Detect a half-written state (resume hazard). v1 policy: refuse to
-  // resume cleanly; surface to user and halt.
+  // Detect half-written state (resume hazard).
   const inconsistencies = detectInconsistencies(state);
   if (inconsistencies.length > 0) {
     const detail = inconsistencies.join("\n  - ");
@@ -329,11 +277,7 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
   // appear as soon as a cycle starts.
   await writeState(ctx.repoRoot, state);
 
-  // PR2 fold-in (post-#553 cleanup): set up the project-local scratch
-  // dir + ensure tmp/ is in .git/info/exclude so subagents have a known
-  // hygienic place to write diff snapshots, screenshots, capture
-  // scripts, analysis outputs. The inline prompts thread the absolute
-  // path into each subagent's instructions.
+  // PR2 fold-in: set up project-local scratch dir (#553).
   const tmpDir = await setupWorkspaceTmp(ctx.repoRoot, ctx.issue);
   trace(`work-driver: scratch dir for issue #${ctx.issue}: ${tmpDir}`);
 
@@ -341,10 +285,7 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
   while (state.pipelineState.status === "running") {
     safety++;
     if (safety > 64) {
-      // Defence against an unbounded transition loop — never expected to
-      // fire under normal use (each step settles or escalates to handoff).
-      // If it does fire, the state file captures the path so the user can
-      // inspect.
+      // Safety: unbounded transition loop guard.
       trace(`work-driver: safety break after 64 iterations for issue ${ctx.issue}`);
       state = {
         ...state,
@@ -360,21 +301,13 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
       return { started: true };
     }
     const step = state.pipelineState.currentStep;
-    // Step-level lifecycle event (PR2 O1): emits "▶ step N/9 X started"
-    // to scrollback BEFORE the step body runs. Adversarial and lens-
-    // review steps that bypass dispatchCore (and therefore don't fire
-    // per-dispatch lifecycle events) become visible here.
+    // Step-level lifecycle event (PR2 O1): "▶ step N/9 X started".
     const stepOrd = STEP_ORDINAL[step] ?? { num: 0, total: 9 };
     const stepStartedAt = Date.now();
-    // PR4 sub-round labels: steps that iterate (adversarial / lens-review /
-    // lens-fix / re-entered develop) get a `(round N)` suffix in scrollback
-    // so the user can distinguish first-pass from third-pass at a glance.
-    // First entry (round=1) shows no suffix — formatLine suppresses it.
+    // PR4: sub-round labels for iterative steps.
     const stepRound = countPriorStepStarts(state, step) + 1;
     emitStepStarted(step, stepOrd.num, stepOrd.total, stepRound, ctx.issue);
-    // PR2 O2: update the footer status cursor — distinct from the deck,
-    // which shows individual subagent children. The cursor shows the
-    // driver's step-level position with live-tick elapsed.
+    // PR2 O2: footer status cursor (step-level position with live-tick).
     updateFooter(state, stepStartedAt);
     try {
       state = await runStep(ctx, state, step);
@@ -428,11 +361,8 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
       // The cycle ran and then aborted — its state file is the real outcome.
       return { started: true };
     }
-    // Step completed — emit the scrollback lifecycle line, then apply
-    // the PR5 single-dispatch + PR7 multi-workstream halt-cascade
-    // routers. See work-driver-step-router.ts for the full routing
-    // logic; `retry: true` means the router already persisted state and
-    // this loop iteration should re-enter without reaching nextStep().
+    // Route step outcome (work-driver-step-router.ts); `retry: true` means
+    // the router already persisted state and we re-enter.
     const routed = await routeStepOutcome(ctx, state, step, stepOrd, stepRound, stepStartedAt);
     state = routed.state;
     // #543 F5 — driver-owned checkpoint after a dispatch-cap kill. Must stay
@@ -441,17 +371,11 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
     state = await checkpointCapedDispatch(ctx, state, step);
     if (routed.retry) continue;
 
-    // Capture which step just completed BEFORE the nextStep transition
-    // clobbers currentStep. This is the routing input the adversarial-
-    // approved branch needs to distinguish "from develop" vs "from
-    // lens-fix" (PR #239 routed on currentStep which was already wrong).
+    // Capture completedStep BEFORE nextStep() clobbers it.
     const completedStep = state.pipelineState.currentStep;
     const decision = nextStep(state);
     if (decision.kind === "done") break;
-    // #533 — a state whose `currentStep` is not a WorkStep is not something
-    // the driver can route. Halt naming the field and value, reusing the
-    // inspect-or-rm idiom of the inconsistency halt above; the 64-iteration
-    // safety counter below is no longer the failure surface.
+    // #533 — unknown currentStep value.
     if (decision.kind === "unknown-step") {
       trace(
         `work-driver: unknown step value ${JSON.stringify(decision.value)} for issue ${ctx.issue}`,
@@ -464,7 +388,7 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
       notifyAgent(
         ctx.pi,
         `pi-ensemble:driver-event v1 kind=crash issue=${ctx.issue} at=${new Date().toISOString()}\npi-ensemble /work driver halted on issue #${ctx.issue}: pipelineState.currentStep has unknown value ${JSON.stringify(decision.value)}. ` +
-          `Inspect ${workStateDir(ctx.repoRoot)}/${ctx.issue}.json or rm to start fresh (your git work is unaffected; only the workflow tracker state is removed).`,
+          `Inspect ${workStateDir(ctx.repoRoot)}/${ctx.issue}.json or rm to start fresh.`,
       );
       return { started: true };
     }
