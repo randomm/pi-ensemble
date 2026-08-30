@@ -187,7 +187,17 @@ export function createAgent(
     }
   }
 
-  if (!effectiveDryRun) fs.writeFile(file, bytes);
+  if (!effectiveDryRun) {
+    try {
+      fs.writeFile(file, bytes);
+    } catch (err) {
+      return {
+        verb: "create",
+        error: `write FAILED: ${(err as Error).message}`,
+        exitCode: 1,
+      };
+    }
+  }
   return {
     verb: "create",
     plan: {
@@ -312,7 +322,10 @@ export function runWrap(
   file: string,
   fs: AgentsMdFs,
   dryRun: boolean,
-  opts?: { scaffoldBodies?: { id: string; body: string }[] },
+  opts?: {
+    scaffoldBodies?: { id: string; body: string }[];
+    answers?: import("./scaffold.ts").OperatorAnswers;
+  },
 ): VerbResult {
   const current = fs.readFile(file);
   const facts = detectFacts(root);
@@ -362,8 +375,11 @@ export function runWrap(
   let scaffoldedIds: string[] = [];
   if (opts?.scaffoldBodies) {
     const wrapIds = parseMarkersSafe(bytes);
-    const scaffoldResult = computeScaffold(new Set(wrapIds), { scaffold: true });
-    const post = runWrapScaffold(bytes, scaffoldResult, wrapIds);
+    const scaffoldResult = computeScaffold(new Set(wrapIds), {
+      scaffold: true,
+      answers: opts.answers,
+    });
+    const post = runWrapScaffold(bytes, scaffoldResult);
     if (post.bytes !== bytes) {
       bytes = post.bytes;
       scaffoldedIds = post.scaffoldedIds;
@@ -372,7 +388,15 @@ export function runWrap(
 
   const wouldWrite = bytes !== current;
   if (wouldWrite && !dryRun) {
-    fs.writeFile(file, bytes);
+    try {
+      fs.writeFile(file, bytes);
+    } catch (err) {
+      return {
+        verb: "update",
+        error: `write FAILED: ${(err as Error).message}`,
+        exitCode: 1,
+      };
+    }
   }
   return {
     verb: "update",

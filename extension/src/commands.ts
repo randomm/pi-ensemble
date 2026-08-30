@@ -66,16 +66,37 @@ let _pmModeStripInfo: { total: number; removed: number; names: string[] } | null
  *
  * Only `edit` and `write` are stripped; all read-only builtins (read, bash,
  * grep, find, ls) and all extension tools remain active.
+ *
+ * Mechanism-layer enforcement (#13 — AGENTS.md §13 gotcha). If
+ * `pi.setActiveTools()` throws or silently fails, PM retains write tools
+ * — a complete bypass of this mechanism. The try/catch below traces the
+ * failure so the operator sees the mechanism is broken. The error is NOT
+ * suppressed: this IS the security boundary.
  */
 export function stripPmTools(pi: ExtensionAPI): void {
   const FORBIDDEN = new Set(["edit", "write"]);
-  const allTools = pi.getAllTools();
-  const total = allTools.length;
-  const names = allTools.map((t) => t.name);
-  const allowed = names.filter((n) => !FORBIDDEN.has(n));
-  const removed = names.filter((n) => FORBIDDEN.has(n));
 
-  pi.setActiveTools(allowed);
+  let total = 0;
+  let names: string[] = [];
+  let allowed: string[] = [];
+  let removed: string[] = [];
+
+  try {
+    const allTools = pi.getAllTools();
+    total = allTools.length;
+    names = allTools.map((t) => t.name);
+    allowed = names.filter((n) => !FORBIDDEN.has(n));
+    removed = names.filter((n) => FORBIDDEN.has(n));
+
+    pi.setActiveTools(allowed);
+  } catch (err) {
+    // CRITICAL: do NOT suppress — this is the mechanism-layer security
+    // boundary. If it fails, the operator must know.
+    const msg = `PM mode: setActiveTools FAILED — strip did NOT take (PM still has write tools): ${(err as Error).message}`;
+    trace(msg);
+    // Leave _pmModeStripInfo as null so debug output reflects the failure.
+    return;
+  }
 
   if (removed.length > 0) {
     _pmModeStripInfo = { total, removed: removed.length, names: removed };

@@ -111,14 +111,8 @@ function fakeDispatchResult(ok = true, ms = 50): DispatchResult {
   assert(inbox.length === 1, `exactly ONE steer on completion (got ${inbox.length})`);
   assert(inbox[0].deliverAs === "steer", `deliverAs === "steer"`);
   assert(inbox[0].content.includes(jobId), `report contains jobId`);
-  assert(
-    inbox[0].content.startsWith("[ensemble:async]"),
-    `report header is standard prefix`,
-  );
-  assert(
-    inbox[0].content.includes("work-driver"),
-    `report includes role name`,
-  );
+  assert(inbox[0].content.startsWith("[ensemble:async]"), `report header is standard prefix`);
+  assert(inbox[0].content.includes("work-driver"), `report includes role name`);
 
   // Registry must be empty after completion
   const snap2 = jobStatusSnapshot();
@@ -150,14 +144,8 @@ function fakeDispatchResult(ok = true, ms = 50): DispatchResult {
 
   assert(inbox.length === 1, `fail case delivers exactly ONE steer (got ${inbox.length})`);
   assert(inbox[0].content.includes("FAILED"), `fail report tagged FAILED`);
-  assert(
-    inbox[0].content.includes("simulated error"),
-    `fail report includes error message`,
-  );
-  assert(
-    inbox[0].content.length < 600,
-    `fail report is bounded (<600 bytes)`,
-  );
+  assert(inbox[0].content.includes("simulated error"), `fail report includes error message`);
+  assert(inbox[0].content.length < 600, `fail report is bounded (<600 bytes)`);
 
   dispatchDeck.reset();
 }
@@ -215,10 +203,7 @@ function fakeDispatchResult(ok = true, ms = 50): DispatchResult {
 
   assert(inbox.length === 1, `throw produces exactly ONE steer (got ${inbox.length})`);
   assert(inbox[0].content.includes("FAILED"), `throw produces FAILED tag`);
-  assert(
-    inbox[0].content.includes("SIGSEGV"),
-    `throw includes error tail`,
-  );
+  assert(inbox[0].content.includes("SIGSEGV"), `throw includes error tail`);
   assert(inbox[0].content.length < 500, `throw report bounded (<500 bytes)`);
 
   dispatchDeck.reset();

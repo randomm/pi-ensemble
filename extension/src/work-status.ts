@@ -436,7 +436,7 @@ export function registerWorkStatusCommand(pi: ExtensionAPI): void {
         if (isIssueNumberArg(issueArg)) {
           issue = Number.parseInt(issueArg, 10);
         } else {
-          const resolved = await resolveJobId(repoRoot, issueArg);
+          const resolved = resolveJobId(repoRoot, issueArg);
           if (resolved === undefined) {
             ctx.ui.notify("pi-ensemble /work-status: jobId not found. Pass issue #.", "info");
             return;

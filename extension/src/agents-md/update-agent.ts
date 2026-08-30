@@ -20,7 +20,13 @@ import {
 } from "./ledger.ts";
 import { MARKER_VERSION, parseMarkers, presentIds } from "./markers.ts";
 import { commandsBody, environmentBody, gatesBody } from "./renderer.ts";
-import { type ScaffoldOpts, computeScaffold, runScaffoldPostPass } from "./scaffold.ts";
+import {
+  SCAFFOLD_HEADING_MAP,
+  type ScaffoldOpts,
+  computeScaffold,
+  runScaffoldPostPass,
+} from "./scaffold.ts";
+import type { OperatorAnswers } from "./scaffold.ts";
 
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 
@@ -62,7 +68,7 @@ type RunWrapFn = (
   file: string,
   fs: AgentsMdFs,
   dryRunParam: boolean,
-  opts?: { scaffoldBodies?: { id: string; body: string }[] },
+  opts?: { scaffoldBodies?: { id: string; body: string }[]; answers?: OperatorAnswers },
 ) => import("./agents-md.ts").VerbResult;
 
 /** Type for the omissionRows helper passed as dependency. */
@@ -73,35 +79,32 @@ type OmissionRowsFn = (facts: DetectedFacts, today: string) => LedgerRow[];
 /**
  * Scan the current file for existing boilerplate section headings so the
  * scaffold post-pass can detect already-present sections (idempotency).
+ *
+ * Matches headings flexibly — tolerates different heading levels (# vs ##),
+ * optional whitespace after the hash, bolded hashes (**# Heading**), and
+ * trailing parentheticals or notes. This is important because brownfield
+ * files rarely conform to the exact "# Heading" format the scaffold emits.
+ *
+ * Uses SCAFFOLD_HEADING_MAP from scaffold.ts so the name↔id mapping lives
+ * in one place (#593 #1).
  */
 function detectExistingBoilerplate(fileContent: string): Set<string> {
-  const headings = new Set([
-    "# Minimalist Engineering",
-    "# Git Workflow",
-    "# Documentation Policy",
-    "# Issue-Driven Development",
-    "# Code Review Doctrine",
-  ]);
   const ids = new Set<string>();
   for (const line of fileContent.split("\n")) {
     const trimmed = line.trim();
-    if (headings.has(trimmed)) {
-      switch (trimmed) {
-        case "# Minimalist Engineering":
-          ids.add("minimalist-engineering");
-          break;
-        case "# Git Workflow":
-          ids.add("git-workflow");
-          break;
-        case "# Documentation Policy":
-          ids.add("documentation-policy");
-          break;
-        case "# Issue-Driven Development":
-          ids.add("issue-driven-development");
-          break;
-        case "# Code Review Doctrine":
-          ids.add("code-review-doctrine");
-          break;
+    // Remove bold markers (**, __) and trailing whitespace/punctuation.
+    const clean = trimmed.replace(/^\*+|_+/g, "").trim();
+    for (const [name, id] of SCAFFOLD_HEADING_MAP) {
+      // Match # or ## or ###... followed by optional space and the name.
+      // The name is matched case-sensitively as a word boundary so "# Git
+      // Workflow (notes)" matches but "# GitOps" does not.
+      const re = new RegExp(
+        `^(#{1,6})\\s+${name.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&")}\\b`,
+        "i",
+      );
+      if (re.test(clean)) {
+        ids.add(id);
+        break; // this line matches a section — move to the next line
       }
     }
   }
@@ -189,6 +192,7 @@ export function makeUpdateAgent(
       }
       return runWrapFn(root, file, fs, effectiveDryRun, {
         scaffoldBodies: scaffoldBodies.length ? scaffoldBodies : undefined,
+        answers: effectiveOpts.answers,
       }) as UpdateVerbResult;
     }
 
@@ -274,7 +278,15 @@ export function makeUpdateAgent(
     const wouldWrite = effectiveOpts.scaffold ? scaffoldAdded : bytes !== current;
 
     if (wouldWrite && !effectiveDryRun) {
-      fs.writeFile(file, bytes);
+      try {
+        fs.writeFile(file, bytes);
+      } catch (err) {
+        return {
+          verb: "update",
+          error: `write FAILED: ${(err as Error).message}`,
+          exitCode: 1,
+        };
+      }
     }
 
     return {

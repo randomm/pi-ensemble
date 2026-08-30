@@ -15,10 +15,11 @@ export function isIssueNumberArg(arg: string): boolean {
 
 /**
  * Resolve a jobId → primary issue number via the async-jobs registry.
+ * Synchronous: the registry is in-process, no I/O needed.
  * Returns undefined when the jobId is unknown (not yet registered or
  * start_work_driver still uses the old fire-and-forget path).
  */
-export async function resolveJobId(repoRoot: string, jobId: string): Promise<number | undefined> {
+export function resolveJobId(_repoRoot: string, jobId: string): number | undefined {
   const issues = getJobIssues(jobId);
   if (issues && issues.length > 0) {
     return issues[0];

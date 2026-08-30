@@ -39,7 +39,6 @@ import {
   operatorChoicesLedgerRows,
   runScaffoldPostPass,
   runWrapScaffold,
-  scaffoldWouldWrite,
 } from "../src/agents-md/scaffold.ts";
 import { commandsBody, environmentBody, gatesBody } from "../src/agents-md/renderer.ts";
 import { WrapError, wrapBytes, wrapLedgerRows } from "../src/agents-md/wrap.ts";
@@ -113,10 +112,7 @@ function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
     content.includes("# Minimalist Engineering"),
     "create --scaffold: minimalist-engineering section present",
   );
-  assert(
-    content.includes("# Git Workflow"),
-    "create --scaffold: git-workflow section present",
-  );
+  assert(content.includes("# Git Workflow"), "create --scaffold: git-workflow section present");
   assert(
     content.includes("# Documentation Policy"),
     "create --scaffold: documentation-policy section present",
@@ -156,7 +152,10 @@ function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
   const res = createAgent(tmp, AGENTS, fs, { scaffold: true, answers });
   const content = fs.readFile(AGENTS);
   assert(res.exitCode === 0, "create --scaffold with answers: exit 0");
-  assert(content.includes("## Operator choices"), "scaffold with answers: operator-choices section present");
+  assert(
+    content.includes("## Operator choices"),
+    "scaffold with answers: operator-choices section present",
+  );
   assert(content.includes("80%+"), "scaffold with answers: coverage threshold recorded");
   assert(content.includes("MEDIUM"), "scaffold with answers: review-blocking severity recorded");
   // Ledger has [asked:operator] rows.
@@ -180,7 +179,10 @@ function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
   assert(res.exitCode === 0, "create --scaffold dryRun: exit 0");
   assert(res.plan?.wouldWrite === true, "create --scaffold dryRun: wouldWrite is true");
   assert(wrote === false, "create --scaffold dryRun: writeFile NOT called");
-  assert(res.plan?.newBytes.includes("# Minimalist Engineering"), "scaffold dryRun: newBytes include boilerplate");
+  assert(
+    res.plan?.newBytes.includes("# Minimalist Engineering"),
+    "scaffold dryRun: newBytes include boilerplate",
+  );
   assert(res.plan?.scaffoldedIds?.length === 5, "scaffold dryRun: scaffoldedIds computed in plan");
 }
 
@@ -262,7 +264,12 @@ function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
   const ledger = wrapLedgerRows(FIXED_DATE, []);
 
   // Wrap without scaffold — works fine.
-  const wrapped = wrapBytes("# My Project\n\nThis is a simple project.\n", facts as any, bodies, ledger);
+  const wrapped = wrapBytes(
+    "# My Project\n\nThis is a simple project.\n",
+    facts as any,
+    bodies,
+    ledger,
+  );
   assert(wrapped.bytes.includes("My Project"), "wrap without scaffold: preamble preserved");
 
   // Wrap with scaffold — refusal condition lifted (machine=0, appended=0, but scaffoldBodies > 0).
@@ -282,8 +289,14 @@ function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
     scaffoldResult,
     [], // no append IDs (no derivable bodies)
   );
-  assert(wrappedWithScaffold.bytes.includes("# Minimalist Engineering"), "wrap with scaffold: boilerplate appended");
-  assert(wrappedWithScaffold.bytes.includes("This is a simple project"), "wrap with scaffold: original preamble preserved");
+  assert(
+    wrappedWithScaffold.bytes.includes("# Minimalist Engineering"),
+    "wrap with scaffold: boilerplate appended",
+  );
+  assert(
+    wrappedWithScaffold.bytes.includes("This is a simple project"),
+    "wrap with scaffold: original preamble preserved",
+  );
 
   // Wrap with no scaffold AND no machine AND no append → still refuses.
   try {
@@ -291,7 +304,10 @@ function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
     assert(false, "wrap without scaffold: should have thrown");
   } catch (e) {
     assert(e instanceof WrapError, "wrap without scaffold: throws WrapError");
-    assert(/refusing to wrap/.test((e as Error).message), "wrap without scaffold: refusal message present");
+    assert(
+      /refusing to wrap/.test((e as Error).message),
+      "wrap without scaffold: refusal message present",
+    );
   }
 }
 
@@ -318,13 +334,17 @@ function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
   const existing = new Set(["minimalist-engineering", "git-workflow"]);
   const result = computeScaffold(existing, { scaffold: true });
   assert(result.sections.length === 3, "computeScaffold: 3 sections (skipped 2 existing)");
-  assert(!result.sections.some((s) => s.id === "minimalist-engineering"), "computeScaffold: existing ids skipped");
+  assert(
+    !result.sections.some((s) => s.id === "minimalist-engineering"),
+    "computeScaffold: existing ids skipped",
+  );
 }
 
 // ===================================================== 10. runScaffoldPostPass: after param inserts after environment
 
 {
-  const text = "# T\n<!-- pi-ensemble:agents-md:begin quality-gates v1 -->\n- test\n<!-- pi-ensemble:agents-md:end quality-gates -->\n<!-- pi-ensemble:agents-md:begin environment v1 -->\n- env\n<!-- pi-ensemble:agents-md:end environment -->\n<!-- pi-ensemble:agents-md:begin decision-ledger v1 -->\n| key | value | provenance |\n| --- | --- | --- |\n| k | v | [auto:2026-01-01] |\n<!-- pi-ensemble:agents-md:end decision-ledger -->\n";
+  const text =
+    "# T\n<!-- pi-ensemble:agents-md:begin quality-gates v1 -->\n- test\n<!-- pi-ensemble:agents-md:end quality-gates -->\n<!-- pi-ensemble:agents-md:begin environment v1 -->\n- env\n<!-- pi-ensemble:agents-md:end environment -->\n<!-- pi-ensemble:agents-md:begin decision-ledger v1 -->\n| key | value | provenance |\n| --- | --- | --- |\n| k | v | [auto:2026-01-01] |\n<!-- pi-ensemble:agents-md:end decision-ledger -->\n";
   const scaffoldResult = {
     sections: [{ id: "minimalist-engineering", body: "# Minimalist Engineering\n\nSimple code." }],
     operatorChoicesBody: undefined,
@@ -337,7 +357,9 @@ function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
   const minimalIdx = post.bytes.indexOf("# Minimalist Engineering");
   assert(minimalIdx > envEndIdx, "post-pass: boilerplate after environment section");
   // Existing bytes after environment are preserved.
-  const decisionLedgerStart = post.bytes.indexOf("<!-- pi-ensemble:agents-md:begin decision-ledger v1 -->");
+  const decisionLedgerStart = post.bytes.indexOf(
+    "<!-- pi-ensemble:agents-md:begin decision-ledger v1 -->",
+  );
   assert(decisionLedgerStart > envEndIdx, "post-pass: decision-ledger still after environment");
   // wouldWrite: false when no new sections.
   const emptyResult = { sections: [], operatorChoicesBody: undefined, ledgerRows: [] };
@@ -386,7 +408,10 @@ function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
     ledger,
     undefined, // no scaffoldBodies
   );
-  assert(!wrapped.bytes.includes("# Minimalist Engineering"), "wrap without scaffold: no boilerplate");
+  assert(
+    !wrapped.bytes.includes("# Minimalist Engineering"),
+    "wrap without scaffold: no boilerplate",
+  );
 }
 
 rmSync(tmp, { recursive: true, force: true });

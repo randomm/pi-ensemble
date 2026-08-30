@@ -39,6 +39,17 @@ export interface ScaffoldOpts {
 
 // ---------------------------------------------------------------- boilerplate
 
+/** Heading name → section id for the five boilerplate sections.
+ * Used by update-agent.ts detectExistingBoilerplate to map file headings
+ * to managed section ids (avoids duplicating the mapping). */
+export const SCAFFOLD_HEADING_MAP: Map<string, string> = new Map([
+  ["Minimalist Engineering", "minimalist-engineering"],
+  ["Git Workflow", "git-workflow"],
+  ["Documentation Policy", "documentation-policy"],
+  ["Issue-Driven Development", "issue-driven-development"],
+  ["Code Review Doctrine", "code-review-doctrine"],
+]);
+
 /** The five static boilerplate sections, in document order. */
 const SCAFFOLD_BODIES: { id: string; body: string }[] = [
   {
@@ -291,8 +302,11 @@ export function runScaffoldPostPass(
     result = appendSection(result, "operator-choices", scaffoldResult.operatorChoicesBody);
   }
 
-  // Then: append each boilerplate section.
-  for (const { id, body } of scaffoldResult.sections) {
+  // Then: append each boilerplate section. Iterating in reverse so that
+  // insertSectionAfter (which always targets the same position right after
+  // `environment`) produces forward order — each new insertion lands before
+  // the ones already there, pushing earlier iterations further down.
+  for (const { id, body } of [...scaffoldResult.sections].reverse()) {
     result = afterId
       ? insertSectionAfter(result, id, body, afterId)
       : appendSection(result, id, body);
@@ -302,32 +316,15 @@ export function runScaffoldPostPass(
   return { bytes: result, scaffoldedIds };
 }
 
-// ------------------------------------------------------- wouldWrite check
-
-/**
- * Check whether the scaffold post-pass would write anything new.
- *
- * `existingIds` is the set of section ids already present in the file.
- * Returns `true` when new boilerplate sections would be appended.
- */
-export function scaffoldWouldWrite(existingIds: Set<string>): boolean {
-  for (const { id } of SCAFFOLD_BODIES) {
-    if (!existingIds.has(id)) return true;
-  }
-  return false;
-}
-
 // -------------------------------------------------- wrap-scaffold passthrough
 
 /**
  * For the wrap (no-markers) path with scaffold enabled: the scaffold post-pass
- * appends boilerplate after the wrapped output. `appendIds` are the managed
- * ids the wrap already appended (quality-gates, commands, environment, etc.).
+ * appends boilerplate after the wrapped output.
  */
 export function runWrapScaffold(
   wrappedBytes: string,
   scaffoldResult: ScaffoldResult,
-  appendIds: string[],
 ): { bytes: string; scaffoldedIds: string[] } {
   return runScaffoldPostPass(wrappedBytes, scaffoldResult, false);
 }

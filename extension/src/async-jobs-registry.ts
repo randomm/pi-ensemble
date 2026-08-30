@@ -203,3 +203,8 @@ export function setJobIssues(jobId: string, issues: number[]): void {
 export function getJobIssues(jobId: string): number[] | undefined {
   return jobIssues.get(jobId);
 }
+
+/** Remove a jobId from the issue mapping. Called in the job settle path. */
+export function clearJobIssues(jobId: string): void {
+  jobIssues.delete(jobId);
+}
