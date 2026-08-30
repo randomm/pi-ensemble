@@ -61,24 +61,32 @@ import { runCommitPr } from "./work-driver-commit.ts";
 import { type DriverContext, STEP_ORDINAL, nextStep } from "./work-driver-context.ts";
 import { countPriorStepStarts } from "./work-driver-diff.ts";
 import { runExplore } from "./work-driver-explore.ts";
-import { renderHandoffUserMessage } from "./work-driver-handoff-message.ts";
+
+import { finalizeCycle } from "./work-driver-finalize.ts";
 import { runHandoff } from "./work-driver-handoff.ts";
 import { runLens, runLensFix } from "./work-driver-lens.ts";
+import {
+  clearFooter,
+  emitStepFailed,
+  emitStepStarted,
+  updateFooter,
+} from "./work-driver-lifecycle.ts";
 import { runMerged } from "./work-driver-merged.ts";
 import { runPlan } from "./work-driver-plan.ts";
 import { claimCycle } from "./work-driver-registry.ts";
 import {
+  attemptReattachInResume,
   classifyRunningState,
   clearForResume,
   explainRefusal,
   explainResume,
   resumeEnabled,
-} from "./work-driver-resume.ts";
+} from "./work-driver-resume-reattach.ts";
 import { routeStepOutcome } from "./work-driver-step-router.ts";
 import { runCi, runStepBack } from "./work-driver-stepback-ci.ts";
-import { scratchDir, setupWorkspaceTmp, teardownWorkspaceTmp } from "./work-driver-workspace.ts";
+import { setupWorkspaceTmp } from "./work-driver-workspace.ts";
 import { runWorktreeSweep } from "./work-driver-worktree-sweep.ts";
-import * as workWidget from "./work-widget.ts";
+
 import { validateDiscriminants } from "./workflow-state-validate.ts";
 import {
   type WorkState,
@@ -359,7 +367,7 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
     // PR2 O2: update the footer status cursor — distinct from the deck,
     // which shows individual subagent children. The cursor shows the
     // driver's step-level position with live-tick elapsed.
-    workWidget.update(state, stepStartedAt);
+    updateFooter(state, stepStartedAt);
     try {
       state = await runStep(ctx, state, step);
     } catch (err) {
@@ -466,33 +474,8 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
     }
   }
 
-  // Clear the footer status cursor (PR2 O2). Stale cursors after a
-  // cycle ends are worse than no cursor — the user might think a /work
-  // is still running when it isn't.
-  workWidget.clear(ctx.issue);
-
-  // Cleanup scratch dir on success only — handoff/aborted KEEP the dir
-  // so the user can inspect what the agents produced when something
-  // went wrong. Failure modes (no dir, perm error) log via trace and
-  // continue silently — final user message is the priority.
-  const final = state.pipelineState.status;
-  if (final === "merged") {
-    await teardownWorkspaceTmp(ctx.repoRoot, ctx.issue);
-  }
-
-  // PR5: rich operator handoff message. Replaces the PR4-and-earlier
-  // ~150-char pointer-to-JSON. The aborted status (set by the halt-
-  // cascade router in the post-step block) routes through the SAME
-  // renderer as handoff — the cap-hit event already encodes whether
-  // this was a mid-flight failure or a cap-hit, and renderHandoffUserMessage
-  // distinguishes them.
-  if (final === "merged") {
-    notifyAgent(ctx.pi, `pi-ensemble /work for issue #${ctx.issue} — MERGED ✓`);
-  } else if (final === "handoff" || final === "aborted") {
-    notifyAgent(
-      ctx.pi,
-      renderHandoffUserMessage(state, ctx.repoRoot, scratchDir(ctx.repoRoot, ctx.issue)),
-    );
-  }
+  // Clear footer and finalize cycle (scratch cleanup + handoff notification).
+  clearFooter(ctx.issue);
+  await finalizeCycle(ctx, state);
   return { started: true };
 }
