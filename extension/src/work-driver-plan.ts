@@ -196,6 +196,7 @@ export function planQualityReason(
   if (ids.length > 0 && ids.some((id) => (workstreams[id]?.paths.length ?? 0) === 0))
     return "empty-paths";
   if (findPathCollisions(workstreams).length > 0) return "overlapping-paths";
+  if (findTestSubjectSplits(workstreams).length > 0) return "test-subject-split";
   return undefined;
 }
 
