@@ -20,6 +20,7 @@ import {
 import {
   intentResolutionEnabled,
   parseNormalisedSpec,
+  parseNormalisedSpecArtifact,
   reconcileVerdict,
 } from "./work-driver-intent.ts";
 import { buildCompletionEvent } from "./work-driver-merged.ts";
@@ -31,7 +32,12 @@ import {
 import { inlineExplorePrompt } from "./work-driver-prompts-early.ts";
 import { beginDispatch, clearDispatch } from "./work-driver-resume.ts";
 import { scratchDir } from "./work-driver-workspace.ts";
-import { type WorkState, appendEvent, writeDispatchArtifact } from "./workflow-state.ts";
+import {
+  type WorkState,
+  appendEvent,
+  readDispatchArtifact,
+  writeDispatchArtifact,
+} from "./workflow-state.ts";
 
 const execp = promisify(exec);
 
@@ -339,8 +345,24 @@ export async function runExplore(
   // agent degrades to the previous behaviour instead of parking everything.
   if (useIntent) {
     const parsed = parseNormalisedSpec(responseText);
-    if (parsed) {
-      const spec = reconcileVerdict(parsed);
+    // The JSON artifact is the structured resolver output. Prefer it when the
+    // reply parser produced no verdict (or only its fail-closed default park),
+    // so prose marker drift cannot turn a solid spec into a false handoff.
+    let structured = parsed;
+    try {
+      const artifact = await readDispatchArtifact(ctx.repoRoot, ctx.issue, "spec");
+      const fromArtifact = artifact ? parseNormalisedSpecArtifact(artifact) : undefined;
+      if (
+        fromArtifact &&
+        (!parsed || (parsed.verdict === "park" && parsed.verdictSource === "default"))
+      ) {
+        structured = fromArtifact;
+      }
+    } catch (err) {
+      trace(`work-driver: could not read spec artifact: ${(err as Error).message}`);
+    }
+    if (structured) {
+      const spec = reconcileVerdict(structured);
       next = {
         ...next,
         pipelineState: { ...next.pipelineState, normalisedSpec: spec },

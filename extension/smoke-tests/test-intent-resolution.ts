@@ -20,6 +20,7 @@ import {
   parseNormalisedSpec,
   reconcileVerdict,
   renderAssumptions,
+  parseNormalisedSpecArtifact,
 } from "../src/work-driver-intent.ts";
 import { inlineCommitPrPrompt } from "../src/work-driver-prompts-late.ts";
 
@@ -36,6 +37,25 @@ const resolve = (t: string) => {
   const p = parseNormalisedSpec(t);
   return p ? reconcileVerdict(p) : undefined;
 };
+
+// The persisted artifact is the structured routing result. It must survive
+// marker drift in the resolver's prose, while an explicit park remains safe.
+{
+  const source = resolve(`
+INTENT-VERDICT: proceed-with-assumptions
+
+## Spec
+
+### Intent
+Continue to plan.
+
+### Deliverables
+- d1: use the persisted verdict
+`);
+  const artifact = parseNormalisedSpecArtifact(JSON.stringify(source));
+  assert(artifact?.verdict === "proceed-with-assumptions", "spec artifact preserves a proceed verdict");
+  assert(parseNormalisedSpecArtifact("not json") === undefined, "malformed spec artifact is rejected");
+}
 
 // ------------------------------------------------ a well-formed spec
 const WELL_FORMED = `

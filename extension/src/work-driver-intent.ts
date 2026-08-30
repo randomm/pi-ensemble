@@ -220,6 +220,39 @@ export function parseNormalisedSpec(text: string): NormalisedSpec | undefined {
 }
 
 /**
+ * Read the JSON form persisted by the explore step.
+ *
+ * The artifact is the structured result of intent resolution and is therefore
+ * a safer routing input than trying to rediscover a marker in prose. Keep the
+ * boundary strict so a stale or malformed artifact cannot grant permission to
+ * proceed.
+ */
+export function parseNormalisedSpecArtifact(text: string): NormalisedSpec | undefined {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  if (
+    typeof value.intent !== "string" ||
+    !Array.isArray(value.deliverables) ||
+    !Array.isArray(value.acceptanceCriteria) ||
+    !Array.isArray(value.outOfScope) ||
+    !Array.isArray(value.assumptions) ||
+    !Array.isArray(value.openQuestions) ||
+    !Array.isArray(value.evidence) ||
+    !["proceed", "proceed-with-assumptions", "park"].includes(String(value.verdict)) ||
+    typeof value.rationale !== "string"
+  ) {
+    return undefined;
+  }
+  return value as unknown as NormalisedSpec;
+}
+
+/**
  * `- <id>: <description> [paths: a.ts, b/c.ts]`
  *
  * Paths are optional — a terse hand-written issue will not name files, and

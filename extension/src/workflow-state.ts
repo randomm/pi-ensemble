@@ -187,3 +187,17 @@ export async function writeDispatchArtifact(
   await fs.writeFile(file, body, "utf8");
   return file;
 }
+
+/** Read a persisted dispatch artifact, if the current cycle left one. */
+export async function readDispatchArtifact(
+  repoRoot: string,
+  issue: number,
+  dispatchId: string,
+): Promise<string | undefined> {
+  try {
+    return await fs.readFile(dispatchArtifactPath(repoRoot, issue, dispatchId), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
+  }
+}
