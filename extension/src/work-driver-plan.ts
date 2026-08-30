@@ -13,6 +13,7 @@ import { extractListField, sliceMarkdownSection } from "./work-driver-plan-parse
 
 // Re-exported: several modules read plan/spec markdown through this module.
 export { sliceMarkdownSection, splitOutsideParens } from "./work-driver-plan-parse.ts";
+import { transcriptPathFor } from "./spawn-support.ts";
 import type { DispatchResult } from "./types.ts";
 import type { DriverContext } from "./work-driver-context.ts";
 import { buildCompletionEvent } from "./work-driver-merged.ts";
@@ -66,10 +67,22 @@ export async function runPlan(
   const dispatch = ctx.dispatchFn ?? dispatchCore;
   const startedAt = Date.now();
   const prompt = inlinePlanPrompt(activeIssuesOf(state), scratchDir(ctx.repoRoot, ctx.issue));
+  // #573 — derive transcript path BEFORE beginDispatch so crash-resume can
+  // locate the surviving session file. Single dispatch: seq=undefined.
+  const planRunId = `plan:explore:${process.pid}:${startedAt}`;
+  const planTranscript = transcriptPathFor("explore", planRunId);
   // #382 — write-ahead: persist the intent to dispatch BEFORE awaiting, so a
   // process death inside the dispatch window is visible on disk rather than
   // leaving the file at the previous step boundary still claiming `running`.
-  const begun = await beginDispatch(ctx.repoRoot, next, "plan", "explore", "plan", startedAt);
+  const begun = await beginDispatch(
+    ctx.repoRoot,
+    next,
+    "plan",
+    "explore",
+    "plan",
+    startedAt,
+    planTranscript,
+  );
   next = begun.state;
   let result: DispatchResult;
   try {

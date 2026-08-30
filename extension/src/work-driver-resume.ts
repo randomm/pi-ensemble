@@ -314,3 +314,213 @@ export function explainRefusal(issue: number, ownerPid: number): string {
 export function explainResume(issue: number, step: WorkStep, lost: number): string {
   return `pi-ensemble: /work for issue #${issue} is resuming at \`${step}\` — the previous run died with ${lost} dispatch(es) in flight. Completed steps are not re-run; only \`${step}\` is re-entered. Its prior child process and whatever it had done are gone, so the step starts over rather than continuing mid-flight.`;
 }
+
+// ---------------------------------------------------------------------------
+// #573 — attempt to re-attach the surviving session and continue from its
+// checkpoint. Called from the crash-resume path (classifyRunningState →
+// resume) when resolveReattach reports { mode: "reattach" }.
+//
+// The surviving child was already spawned with `--session <transcriptPath>`
+// and `--mode rpc`. We re-invoke the same binary with the SAME `--session`
+// path (Pi resumes the existing session file) and send the resume prompt
+// via stdin. If it succeeds, return the result; if it fails, return null
+// and the caller falls back to fresh re-dispatch.
+//
+// `spawnReattach` is injected by the smoke test so the offline suite
+// asserts reattach behaviour without launching a real Pi child.
+// ---------------------------------------------------------------------------
+
+export interface ReattachResult {
+  result: import("./types.ts").DispatchResult;
+  reattach: true;
+}
+
+export type ReattachFn = typeof attemptReattach;
+
+export async function attemptReattach(
+  transcriptPath: string,
+  step: WorkStep,
+  role: string,
+  grantMs: number,
+  spawnReattach: (
+    args: string[],
+    env: Record<string, string>,
+    prompt: Record<string, string>,
+  ) => Promise<{
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+  }> = defaultSpawnReattach,
+): Promise<ReattachResult | { reattach: false }> {
+  const resumePromptText = reattachPrompt(step, role);
+
+  // Re-invoke pi with the same session file (resume) instead of a fresh
+  // transcript. The child's prior transcript is loaded in context by Pi.
+  const childArgs = ["--mode", "rpc", "--no-extensions", "--session", transcriptPath];
+
+  // Resolve the same binary that spawned the child.
+  const currentScript = process.argv[1];
+  const looksLikePiCli =
+    currentScript &&
+    !currentScript.startsWith("/$bunfs/") &&
+    /pi-coding-agent.*\/(dist\/(?:cli\.)?c?js|mjs)$/i.test(currentScript);
+  const childEnv: Record<string, string> = {} as Record<string, string>;
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined) childEnv[k] = v;
+  }
+
+  if (spawnReattach !== defaultSpawnReattach) {
+    // Test injection: just pass the args through.
+    return spawnReattach(childArgs, childEnv, { type: "prompt", message: resumePromptText })
+      .then((out): ReattachResult | { reattach: false } =>
+        out.exitCode === 0
+          ? buildReattachResult(role, transcriptPath, grantMs, out.stdout)
+          : { reattach: false },
+      )
+      .catch((): ReattachResult | { reattach: false } => ({ reattach: false }));
+  }
+
+  // Production path: actually spawn Pi.
+  return realSpawnReattach(childArgs, childEnv, resumePromptText, grantMs);
+}
+
+/** The default reattach spawn: actually runs `pi --mode rpc --session <path>`. */
+async function realSpawnReattach(
+  childArgs: string[],
+  childEnv: Record<string, string>,
+  resumePromptText: string,
+  grantMs: number,
+): Promise<ReattachResult | { reattach: false }> {
+  const { spawn } = await import("node:child_process");
+
+  // Resolve the pi binary.
+  const currentScript = process.argv[1];
+  const looksLikePiCli =
+    currentScript &&
+    !currentScript.startsWith("/$bunfs/") &&
+    /pi-coding-agent.*\/(dist\/(?:cli\.)?c?js|mjs)$/i.test(currentScript);
+  let command: string;
+  let args: string[];
+  if (looksLikePiCli) {
+    command = process.execPath;
+    args = [currentScript, ...childArgs];
+  } else {
+    command = "pi";
+    args = childArgs;
+  }
+
+  const child = spawn(command, args, {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: childEnv,
+  });
+
+  const stdoutChunks: Buffer[] = [];
+  let stdoutSize = 0;
+  const MAX_STDOUT = 1024 * 1024;
+
+  child.stdout?.on("data", (d: Buffer) => {
+    stdoutChunks.push(d);
+    stdoutSize += d.length;
+    while (stdoutSize > MAX_STDOUT && stdoutChunks.length > 1) {
+      const evicted = stdoutChunks.shift();
+      if (evicted) stdoutSize -= evicted.length;
+    }
+  });
+  child.stderr?.on("data", () => {
+    /* stderr discarded — not needed for dispatch result */
+  });
+
+  // Send the resume prompt via stdin.
+  try {
+    child.stdin?.write(`${JSON.stringify({ type: "prompt", message: resumePromptText })}\n`);
+  } catch {
+    /* child already gone */
+  }
+
+  // Wait for the child, bounded by the grant window + a small margin.
+  const maxWait = grantMs + 30_000;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGTERM");
+  }, maxWait);
+
+  const [exitCode] = (await new Promise<[number | null]>((resolve) => {
+    child.on("exit", (code) => resolve([code]));
+  })) as [number | null];
+
+  clearTimeout(timeout);
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    /* best-effort */
+  }
+
+  if (timedOut || exitCode !== 0) {
+    return { reattach: false };
+  }
+
+  const rawStdout = Buffer.concat(stdoutChunks).toString("utf8");
+  return buildReattachResult("", "", maxWait, rawStdout);
+}
+
+/** Build a DispatchResult from the re-attached child's stdout. */
+function buildReattachResult(
+  role: string,
+  transcriptPath: string,
+  grantMs: number,
+  rawStdout: string,
+): ReattachResult | { reattach: false } {
+  const lines = rawStdout
+    .trim()
+    .split(/\r?\n/)
+    .filter((l) => l.trim());
+  if (lines.length === 0) return { reattach: false };
+
+  // Find the last assistant message_end event.
+  let lastText = "";
+  let toolCallCount = 0;
+  for (const line of lines) {
+    try {
+      const event = JSON.parse(line) as Record<string, unknown>;
+      if (event.type === "message_end") {
+        const msg = event.message as Record<string, unknown> | undefined;
+        if (msg?.role === "assistant" && Array.isArray(msg.content)) {
+          for (const block of msg.content as Array<Record<string, unknown>>) {
+            if (block.type === "text") {
+              lastText += `${block.text ?? ""}\n`;
+            } else if (block.type === "toolCall") {
+              toolCallCount++;
+            }
+          }
+        }
+      }
+    } catch {
+      /* Not JSON — ignore */
+    }
+  }
+
+  if (!lastText.trim()) return { reattach: false };
+
+  return {
+    result: {
+      role,
+      ok: true,
+      text: lastText.trim(),
+      toolUses: new Array(toolCallCount).fill(null),
+      ms: grantMs,
+      exitCode: 0,
+      transcriptPath,
+    } as import("./types.ts").DispatchResult,
+    reattach: true,
+  };
+}
+
+/** Injected default for tests: always succeeds with empty output. */
+async function defaultSpawnReattach(): Promise<{
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}> {
+  return { exitCode: 0, stdout: "", stderr: "" };
+}

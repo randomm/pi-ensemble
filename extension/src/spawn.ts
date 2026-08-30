@@ -124,6 +124,9 @@ async function spawnSpecialistInner(
 
   // Per-child transcript path. Pi will write its native session JSON here so
   // the user can inspect/replay the child's full event log post-hoc.
+  // #573 — accept a caller-supplied runId (derived by the driver BEFORE spawn
+  // so crash-resume can locate the surviving session file). spawn.ts mints a
+  // new runId when absent — default behaviour unchanged.
   const runId = opts.runId ?? makeRunId();
   const transcriptPath = transcriptPathFor(spec.role, runId, opts.seq, opts.tag);
   await fs.mkdir(path.dirname(transcriptPath), { recursive: true });

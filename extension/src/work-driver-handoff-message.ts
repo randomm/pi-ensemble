@@ -88,8 +88,13 @@ export function renderHandoffUserMessage(
   const fileCount = snap ? snap.unstagedCount + snap.stagedCount : 0;
   const prTag = ps.prNumber ? `PR #${ps.prNumber}` : "no PR created";
   const target = ps.prNumber ? `pr ${ps.prNumber}` : `issue ${issue}`;
+  const at = new Date().toISOString();
 
   const lines: string[] = [];
+
+  // #580 — machine-readable envelope line so the PM can distinguish real
+  // driver emissions from model-side imitation. First line, before body.
+  lines.push(`pi-ensemble:driver-event v1 kind=handoff issue=${issue} at=${at}`);
 
   // 1. Banner when GitHub posting failed.
   if (!commentUrl || !labelApplied) {

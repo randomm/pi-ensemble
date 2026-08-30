@@ -68,10 +68,12 @@ import { runMerged } from "./work-driver-merged.ts";
 import { runPlan } from "./work-driver-plan.ts";
 import { claimCycle } from "./work-driver-registry.ts";
 import {
+  attemptReattach,
   classifyRunningState,
   clearForResume,
   explainRefusal,
   explainResume,
+  resolveReattach,
   resumeEnabled,
 } from "./work-driver-resume.ts";
 import { routeStepOutcome } from "./work-driver-step-router.ts";
@@ -80,6 +82,7 @@ import { scratchDir, setupWorkspaceTmp, teardownWorkspaceTmp } from "./work-driv
 import { runWorktreeSweep } from "./work-driver-worktree-sweep.ts";
 import * as workWidget from "./work-widget.ts";
 import { validateDiscriminants } from "./workflow-state-validate.ts";
+import { type WorkEvent, appendEvent } from "./workflow-state.ts";
 import {
   type WorkState,
   type WorkStep,
@@ -221,9 +224,10 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
   // PR12 — surface a clear notify when state is already terminal and no --restart.
   if (state.pipelineState.status !== "running" && ctx.restart !== true) {
     const terminalStatus = state.pipelineState.status;
+    const at = new Date().toISOString();
     notifyAgent(
       ctx.pi,
-      `pi-ensemble: /work for issue #${ctx.issue} already terminated as ${terminalStatus}. To start a fresh cycle (e.g., after revising the issue via /plan), re-run with --restart:\n  /work ${ctx.issue} --restart\nOr rm ${workStateDir(ctx.repoRoot)}/${ctx.issue}.json manually. The prior cycle's event log is preserved in the state file until you restart or remove it.`,
+      `pi-ensemble:driver-event v1 kind=refused issue=${ctx.issue} at=${at}\npi-ensemble: /work for issue #${ctx.issue} already terminated as ${terminalStatus}. To start a fresh cycle (e.g., after revising the issue via /plan), re-run with --restart:\n  /work ${ctx.issue} --restart\nOr rm ${workStateDir(ctx.repoRoot)}/${ctx.issue}.json manually. The prior cycle's event log is preserved in the state file until you restart or remove it.`,
     );
     return { started: false, reason: `already terminated as ${terminalStatus}` };
   }
@@ -263,17 +267,51 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
   if (resumeEnabled() && ctx.restart !== true) {
     const verdict = classifyRunningState(state);
     if (verdict.action === "refuse") {
-      notifyAgent(ctx.pi, explainRefusal(ctx.issue, verdict.ownerPid));
+      const at = new Date().toISOString();
+      notifyAgent(
+        ctx.pi,
+        `pi-ensemble:driver-event v1 kind=refused issue=${ctx.issue} at=${at}\n${explainRefusal(ctx.issue, verdict.ownerPid)}`,
+      );
       return {
         started: false,
         reason: `another live process (pid ${verdict.ownerPid}) owns this cycle`,
       };
     }
     if (verdict.action === "resume") {
-      notifyAgent(ctx.pi, explainResume(ctx.issue, verdict.step, verdict.jobIds.length));
-      // The orphaned `dispatch-started` events stay in the log — they are the
-      // only record that a dispatch was paid for and lost.
-      state = clearForResume(state);
+      // #573 — attempt to re-attach the surviving session before falling back
+      // to re-dispatch. Read the dispatch-started event for the crashed job
+      // to find the transcript path and role, then resolveReattach decides
+      // whether this step is reattachable (single-dispatch, flag on, file exists).
+      const inFlightEvents = state.eventLog.filter(
+        (e) =>
+          e.kind === "dispatch-started" &&
+          verdict.jobIds.includes((e as { jobId?: string }).jobId ?? ""),
+      );
+      // Find the dispatch-started event matching one of the in-flight job IDs.
+      const startedEvt = inFlightEvents.find(
+        (e) => (e as { jobId?: string }).jobId === verdict.jobIds[0],
+      ) as (WorkEvent & { jobId?: string; transcriptPath?: string; role?: string }) | undefined;
+      const at = new Date().toISOString();
+      notifyAgent(
+        ctx.pi,
+        `pi-ensemble:driver-event v1 kind=resume issue=${ctx.issue} at=${at}\n${explainResume(ctx.issue, verdict.step, verdict.jobIds.length)}`,
+      );
+
+      // #573 — reattach attempt. Extracted to a helper so `continue` does not
+      // cross an `await` boundary (TS strict mode forbids that).
+      const { shouldSkipStep, nextState } = await attemptReattachInResume(
+        ctx,
+        state,
+        verdict,
+        inFlightEvents,
+      );
+      if (shouldSkipStep && nextState) {
+        state = nextState;
+      } else {
+        // The orphaned `dispatch-started` events stay in the log — they are the
+        // only record that a dispatch was paid for and lost.
+        state = clearForResume(state);
+      }
     }
   }
 
@@ -447,7 +485,7 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
       await writeState(ctx.repoRoot, state);
       notifyAgent(
         ctx.pi,
-        `pi-ensemble /work driver halted on issue #${ctx.issue}: pipelineState.currentStep has unknown value ${JSON.stringify(decision.value)}. ` +
+        `pi-ensemble:driver-event v1 kind=crash issue=${ctx.issue} at=${new Date().toISOString()}\npi-ensemble /work driver halted on issue #${ctx.issue}: pipelineState.currentStep has unknown value ${JSON.stringify(decision.value)}. ` +
           `Inspect ${workStateDir(ctx.repoRoot)}/${ctx.issue}.json or rm to start fresh (your git work is unaffected; only the workflow tracker state is removed).`,
       );
       return { started: true };
@@ -486,13 +524,145 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
   // renderer as handoff — the cap-hit event already encodes whether
   // this was a mid-flight failure or a cap-hit, and renderHandoffUserMessage
   // distinguishes them.
+  // #580: guard against re-send. Write handoffDeliveredAt write-ahead so a
+  // crash between message-send and write-ahead does NOT double-deliver on
+  // re-enter (resume machinery #382, or any future path that hits the same
+  // terminal state). The delivery site refuses to send if the field is
+  // already set. --restart creates fresh state so the field is naturally
+  // cleared (initialState has no such field).
+  const at = new Date().toISOString();
   if (final === "merged") {
-    notifyAgent(ctx.pi, `pi-ensemble /work for issue #${ctx.issue} — MERGED ✓`);
+    // Already delivered? No-op.
+    if (state.pipelineState.handoffDeliveredAt) {
+      trace(
+        `work-driver: merged notification already delivered at ${state.pipelineState.handoffDeliveredAt} — skipping`,
+      );
+    } else {
+      state = {
+        ...state,
+        pipelineState: {
+          ...state.pipelineState,
+          handoffDeliveredAt: at,
+        },
+      };
+      await writeState(ctx.repoRoot, state);
+      notifyAgent(
+        ctx.pi,
+        `pi-ensemble:driver-event v1 kind=merged issue=${ctx.issue} at=${at}\npi-ensemble /work for issue #${ctx.issue} — MERGED ✓`,
+      );
+    }
   } else if (final === "handoff" || final === "aborted") {
-    notifyAgent(
-      ctx.pi,
-      renderHandoffUserMessage(state, ctx.repoRoot, scratchDir(ctx.repoRoot, ctx.issue)),
-    );
+    if (state.pipelineState.handoffDeliveredAt) {
+      trace(
+        `work-driver: handoff notification already delivered at ${state.pipelineState.handoffDeliveredAt} — skipping`,
+      );
+    } else {
+      state = {
+        ...state,
+        pipelineState: {
+          ...state.pipelineState,
+          handoffDeliveredAt: at,
+        },
+      };
+      await writeState(ctx.repoRoot, state);
+      notifyAgent(
+        ctx.pi,
+        renderHandoffUserMessage(state, ctx.repoRoot, scratchDir(ctx.repoRoot, ctx.issue)),
+      );
+    }
   }
   return { started: true };
+}
+
+/**
+ * #573 — attempt reattach in the crash-resume path. Returns whether the
+ * resumed child produced a valid result (skip runStep) and the updated state.
+ *
+ * The resume path reads `transcriptPath` from the in-flight `dispatch-started`
+ * event, calls `resolveReattach` to check if reattach is possible, and
+ * `attemptReattach` to actually reconnect. On success, emits a
+ * `dispatch-completed` event and advances to the next step.
+ */
+async function attemptReattachInResume(
+  ctx: DriverContext,
+  state: WorkState,
+  verdict: { step: WorkStep; jobIds: string[] },
+  inFlightEvents: Array<Record<string, unknown>>,
+): Promise<{ shouldSkipStep: boolean; nextState: WorkState | undefined }> {
+  // Find the dispatch-started event matching one of the in-flight job IDs.
+  const startedEvt = inFlightEvents.find(
+    (e) => (e as { jobId?: string })?.jobId === verdict.jobIds[0],
+  ) as (WorkEvent & { jobId?: string; transcriptPath?: string; role?: string }) | undefined;
+  const reattachStep = verdict.step;
+  const reattachRole = startedEvt?.role ?? verdict.step;
+  const reattachNow = Date.now();
+  const originalTimeoutMs = (startedEvt as { dispatchTimeoutMs?: number })?.dispatchTimeoutMs;
+  const dispatchStartedAt = startedEvt?.at;
+  const reattach = resolveReattach(
+    reattachStep,
+    inFlightEvents.map((e) => ({
+      jobId: (e as { jobId?: string })?.jobId ?? "",
+      transcriptPath: (e as { transcriptPath?: string })?.transcriptPath,
+    })),
+    reattachNow,
+    originalTimeoutMs,
+    dispatchStartedAt,
+    {},
+  );
+  if (reattach.mode !== "reattach") {
+    return { shouldSkipStep: false, nextState: undefined };
+  }
+  trace(
+    `work-driver: crash-resume → reattach ${reattachStep} (transcriptPath=${reattach.transcriptPath}, grant=${reattach.grantMs}ms)`,
+  );
+  const reattachResult = await attemptReattach(
+    reattach.transcriptPath,
+    reattachStep,
+    reattachRole,
+    reattach.grantMs,
+  );
+  if ("result" in reattachResult && reattachResult.reattach) {
+    // Reattach succeeded — emit dispatch-completed and skip runStep.
+    trace(`work-driver: crash-resume reattach succeeded for ${reattachStep} — skipping step body`);
+    let next = appendEvent(state, {
+      kind: "dispatch-completed",
+      step: reattachStep,
+      role: reattachRole,
+      jobId: verdict.jobIds[0] ?? "",
+      label: reattachRole,
+      ok: true,
+      ms: reattach.grantMs,
+      at: reattachNow,
+      summary: "crash-resume reattach",
+    });
+    const decision = nextStep(next);
+    if (decision.kind === "done") {
+      return { shouldSkipStep: true, nextState: next };
+    }
+    // decision.kind is "step" here (not "done" or "unknown-step").
+    if (decision.kind !== "step") {
+      // Defensive: an unknown step during reattach is a bug, skip resume.
+      return { shouldSkipStep: false, nextState: undefined };
+    }
+    next = {
+      ...next,
+      pipelineState: {
+        ...next.pipelineState,
+        currentStep: decision.step,
+      },
+    };
+    await writeState(ctx.repoRoot, next);
+    const stepOrd = STEP_ORDINAL[reattachStep];
+    lifecycle.emitStepCompleted(
+      reattachStep,
+      stepOrd?.num ?? 0,
+      stepOrd?.total ?? 9,
+      reattach.grantMs,
+    );
+    return { shouldSkipStep: true, nextState: next };
+  }
+  trace(
+    `work-driver: crash-resume reattach failed for ${reattachStep} — falling through to re-dispatch`,
+  );
+  return { shouldSkipStep: false, nextState: undefined };
 }
