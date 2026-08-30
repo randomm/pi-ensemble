@@ -31,6 +31,7 @@ import { type DriverContext, STEP_ORDINAL, nextStep } from "./work-driver-contex
 import { countPriorStepStarts } from "./work-driver-diff.ts";
 import { runExplore } from "./work-driver-explore.ts";
 import { finalizeCycle } from "./work-driver-finalize.ts";
+import { renderHandoffUserMessage } from "./work-driver-handoff-message.ts";
 import { runHandoff } from "./work-driver-handoff.ts";
 import { runLens, runLensFix } from "./work-driver-lens.ts";
 import {
@@ -55,9 +56,9 @@ import {
 } from "./work-driver-resume-reattach.ts";
 import { routeStepOutcome } from "./work-driver-step-router.ts";
 import { runCi, runStepBack } from "./work-driver-stepback-ci.ts";
-import { setupWorkspaceTmp, teardownWorkspaceTmp, workWidget } from "./work-driver-workspace.ts";
+import { scratchDir, setupWorkspaceTmp, teardownWorkspaceTmp } from "./work-driver-workspace.ts";
 import { runWorktreeSweep } from "./work-driver-worktree-sweep.ts";
-import { renderHandoffUserMessage } from "./work-driver-handoff-message.ts";
+import * as workWidget from "./work-widget.ts";
 import { validateDiscriminants } from "./workflow-state-validate.ts";
 import { type WorkEvent, appendEvent } from "./workflow-state.ts";
 import {
