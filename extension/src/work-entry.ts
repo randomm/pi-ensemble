@@ -20,10 +20,12 @@
  */
 
 import { exec } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { notifyAgent } from "./agent-message.ts";
 import { trace } from "./trace.ts";
+import type { DispatchResult } from "./types.ts";
 import { groupIssues, resolvedParallelGroups } from "./work-driver-grouping.ts";
 import { runWorkDriver } from "./work-driver.ts";
 import { renderQueueSummary, runWorkQueue } from "./work-queue.ts";
@@ -193,6 +195,136 @@ export async function launchWork(
     }
   })();
   return { mode: "grouped", issues };
+}
+
+// ---------------------------------------------------------------------------
+// workDriver — in-process work function for startJob (tool path).
+//
+// Wraps the same driver logic that launchWork fire-and-forgets into a
+// return-typed function so startJob can await it, deliver a structured
+// steer on completion, and produce a DispatchResult for async-jobs.
+// ---------------------------------------------------------------------------
+
+/** Build a DispatchResult for a work-driver outcome. */
+function makeResult(ok: boolean, text: string, startMs: number, error?: string): DispatchResult {
+  return {
+    role: "work-driver",
+    ok,
+    text,
+    toolUses: [],
+    ms: Date.now() - startMs,
+    exitCode: ok ? 0 : 1,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+    transcriptPath: ok ? "/tmp/work-driver-state" : "ensemble-runs/",
+    errorStop: error ? { reason: "work-driver-threw", message: error } : undefined,
+  };
+}
+
+/**
+ * Run the work driver to completion and return a DispatchResult.
+ *
+ * This is the work function consumed by `startJob` in the tool path. It
+ * reuses the same logic as launchWork's background IIFE but awaits the
+ * driver instead of fire-and-forgetting, so startJob can deliver a
+ * structured steer report on completion.
+ */
+export async function runDriver(
+  pi: ExtensionAPI,
+  opts: {
+    repoRoot: string;
+    invocation: WorkInvocation;
+    sink: WorkLaunchSink;
+  },
+): Promise<DispatchResult> {
+  const { repoRoot, invocation, sink } = opts;
+  const { issues, restart, mergeGrant } = invocation;
+  const restartTag = restart ? " (restart — prior state wiped)" : "";
+  const startMs = Date.now();
+
+  // Single-issue path — no grouping needed.
+  if (issues.length === 1) {
+    const soleIssue = issues[0];
+    if (soleIssue === undefined) {
+      return makeResult(false, "No issues to process.", startMs);
+    }
+    sink.notify(
+      `pi-ensemble: /work driver running for issue #${soleIssue}${restartTag}. State in .pi/work-state/${soleIssue}.json — inspect it any time with /work-status.`,
+    );
+    try {
+      await runWorkDriver({ pi, repoRoot, issue: soleIssue, restart, mergeGrant });
+      return makeResult(
+        true,
+        `Completed issue #${soleIssue}${restartTag}. State in .pi/work-state/${soleIssue}.json`,
+        startMs,
+      );
+    } catch (err) {
+      trace(`work-driver: unexpected throw for #${soleIssue}: ${(err as Error).message}`);
+      return makeResult(
+        false,
+        `/work driver crashed on issue #${soleIssue}: ${(err as Error).message} — state intact in .pi/work-state/${soleIssue}.json`,
+        startMs,
+        (err as Error).message,
+      );
+    }
+  }
+
+  // Multi-issue path — analyze + group + iterate.
+  sink.notify(
+    `pi-ensemble: analyzing ${issues.length} issues (#${issues.join(", #")}) for grouping…`,
+  );
+  const bodiesByIssue = await fetchIssueBodies(repoRoot, issues);
+  const { groups, notes } = groupIssues(issues, bodiesByIssue);
+  const groupList = Object.values(groups);
+  const summary = groupList.map((g) => `${g.id}: #${g.issues.join(", #")}`).join(" | ");
+  const notesLine = notes.length > 0 ? `\n  rules fired: ${notes.join("; ")}` : "";
+  const concurrency = Math.min(resolvedParallelGroups(), groupList.length);
+  trace(
+    `/work (grouped) → ${groupList.length} groups (${summary})${notesLine} (repoRoot=${repoRoot})`,
+  );
+
+  try {
+    await notifyAgent(
+      pi,
+      `pi-ensemble: /work grouping decided K=${groupList.length} group(s) — ${summary}${notesLine}\n${
+        resolvedParallelGroups() > 1
+          ? `Running up to ${concurrency} cycle(s) concurrently`
+          : "Running cycles sequentially"
+      }${restartTag}; a failed group parks and the queue continues.`,
+    );
+  } catch {
+    /* nothing we can do */
+  }
+
+  // #368 — park-and-continue. A group that ends non-merged is recorded with
+  // its reason and the queue moves on; only a systemic failure stops
+  // everything, because only those make the next group's attempt pointless.
+  try {
+    const summaryResult = await runWorkQueue({
+      repoRoot,
+      groups: groupList,
+      restart,
+      concurrency,
+      runGroup: (primary, groupIssueNums) =>
+        runWorkDriver({
+          pi,
+          repoRoot,
+          issue: primary,
+          issues: groupIssueNums,
+          restart,
+          mergeGrant,
+          parallelCycles: concurrency,
+        }),
+    });
+    return makeResult(true, renderQueueSummary(summaryResult), startMs);
+  } catch (err) {
+    trace(`work-driver (grouped): unexpected throw: ${(err as Error).message}`);
+    return makeResult(
+      false,
+      `/work driver crashed (grouped): ${(err as Error).message}`,
+      startMs,
+      (err as Error).message,
+    );
+  }
 }
 
 /**
