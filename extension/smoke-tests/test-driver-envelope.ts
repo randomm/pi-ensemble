@@ -10,6 +10,7 @@
  * - restart → field cleared (initialState has no field)
  */
 
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { renderHandoffUserMessage } from "../src/work-driver-handoff-message.ts";
 import { appendEvent, initialState } from "../src/workflow-state.ts";
 

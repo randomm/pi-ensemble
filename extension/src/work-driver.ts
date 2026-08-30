@@ -55,8 +55,9 @@ import {
 } from "./work-driver-resume-reattach.ts";
 import { routeStepOutcome } from "./work-driver-step-router.ts";
 import { runCi, runStepBack } from "./work-driver-stepback-ci.ts";
-import { setupWorkspaceTmp } from "./work-driver-workspace.ts";
+import { setupWorkspaceTmp, teardownWorkspaceTmp, workWidget } from "./work-driver-workspace.ts";
 import { runWorktreeSweep } from "./work-driver-worktree-sweep.ts";
+import { renderHandoffUserMessage } from "./work-driver-handoff-message.ts";
 import { validateDiscriminants } from "./workflow-state-validate.ts";
 import { type WorkEvent, appendEvent } from "./workflow-state.ts";
 import {
@@ -480,12 +481,35 @@ async function runWorkDriverInner(ctx: DriverContext): Promise<DriverOutcome> {
     }
   }
 
-  // Clear the footer status cursor (PR2 O2). Stale cursors after a
-  // cycle ends are worse than no cursor — the user might think a /work
-  // is still running when it isn't.
-  clearFooter(ctx.issue);
+  // Clear footer cursor (PR2 O2).
+  workWidget.clear(ctx.issue);
 
-  // Finalize cycle (already has footer clear from runLoop).
+  // Cleanup scratch dir on success only — handoff/aborted keep the dir
+  // so the user can inspect artifacts from failures.
+  const final = state.pipelineState.status;
+  if (final === "merged") {
+    await teardownWorkspaceTmp(ctx.repoRoot, ctx.issue);
+  }
+
+  // #580 — write-ahead guard: write handoffDeliveredAt before notifyAgent so
+  // a crash between write and send does not cause re-delivery on restart.
+  if (final === "merged") {
+    notifyAgent(ctx.pi, `pi-ensemble /work for issue #${ctx.issue} — MERGED ✓`);
+  } else if (final === "handoff" || final === "aborted") {
+    if (!state.pipelineState.handoffDeliveredAt) {
+      const msg = renderHandoffUserMessage(
+        state,
+        ctx.repoRoot,
+        scratchDir(ctx.repoRoot, ctx.issue),
+      );
+      state = {
+        ...state,
+        pipelineState: { ...state.pipelineState, handoffDeliveredAt: new Date().toISOString() },
+      };
+      await writeState(ctx.repoRoot, state);
+      notifyAgent(ctx.pi, msg);
+    }
+  }
   return { started: true };
 }
 

@@ -94,7 +94,9 @@ export function renderHandoffUserMessage(
 
   // #580 — machine-readable envelope line so the PM can distinguish real
   // driver emissions from model-side imitation. First line, before body.
-  lines.push(`pi-ensemble:driver-event v1 kind=handoff issue=${issue} at=${at}`);
+  lines.push(
+    `pi-ensemble:driver-event v1 kind=handoff issue=${issue} at=${new Date().toISOString()}`,
+  );
 
   // 1. Banner when GitHub posting failed.
   if (!commentUrl || !labelApplied) {
