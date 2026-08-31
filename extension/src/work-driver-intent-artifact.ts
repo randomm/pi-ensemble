@@ -1,34 +1,47 @@
 /**
- * work-driver-intent-artifact — strict spec artifact validation and
- * precedence for the #594 restore path.
+ * work-driver-intent-artifact — restore the intent verdict from the
+ * persisted spec artifact when the prose reply does not say it.
  *
- * #594: the explore step writes the resolved spec to
- * `.pi/work-state/<issue>/spec.txt` as JSON. That write is best-effort
- * (`try/catch`), so it can silently fail — or the file can be stale from a
- * prior cycle. When the prose reply yields no parse (or only the parser's
- * default-park default), the driver should prefer the artifact over prose
- * because the artifact is the resolver's structured decision and is more
- * reliable than nothing at all.
+ * The explore prompt asks the resolver to PERSIST its normalised spec to
+ * `.pi/work-state/<issue>/spec.txt` (the same channel the issue-body
+ * artifacts use) in addition to emitting the `## Spec` block in its prose
+ * reply. When the prose does not parse — or parses only to the parser's
+ * synthetic default park — the artifact is the surviving record of a valid
+ * decision, and discarding it parks solid issues that the resolver fully
+ * resolved (#594).
  *
- * The validator here is STRICT — every array element is validated individually.
- * This is the deliberate fix for PR #597's validator, which only checked
- * top-level field types and then cast (`return value as unknown as
- * NormalisedSpec`), letting null elements and wrong-typed fields pass
- * through into the driver.
+ * Two invariants bound how far the artifact may go:
  *
- * This module is pure: no filesystem, no I/O. The caller (work-driver-explore.ts,
- * or a future seam) owns reading the file and passes the raw text here.
+ *   1. An EXPLICIT prose park always wins over an artifact `proceed`. The
+ *      resolver chose to stop; the file it also wrote cannot talk it back
+ *      into building. (The same shape as #404: a park nobody declared may
+ *      be refuted, a park that was declared may not.)
+ *   2. The artifact must validate EVERY element, not just the top-level
+ *      shape. A cast of the form `value as unknown as NormalisedSpec`
+ *      (PR #597's version) trusts the resolver's JSON structure, and a
+ *      half-written or truncated artifact with null elements would flow
+ *      into `specIsComplete` / `renderAssumptions` and crash the driver.
+ *      `parseNormalisedSpecArtifact` returns `undefined` on any malformed
+ *      element instead.
+ *
+ * The artifact-path helpers (`exploreSpecArtifactPath`, `readSpecArtifact`,
+ * `deleteSpecArtifact`, `persistSpecArtifact`) and the merge decision
+ * (`resolveIntentVerdict`) live here too, so `runExplore` stays a thin
+ * "delete stale → parse prose → reconcile → read artifact → merge" and
+ * the 500-line limit in `work-driver-explore.ts` holds without a refactor.
  */
 
+import { readFileSync, rmSync } from "node:fs";
+import path from "node:path";
 import { trace } from "./trace.ts";
 import type {
-  IntentVerdict,
   NormalisedSpec,
   ParkReason,
   SpecAssumption,
   SpecDeliverable,
   SpecEvidence,
 } from "./work-driver-intent.ts";
+import { dispatchArtifactPath, writeDispatchArtifact } from "./workflow-state.ts";
 
 const PARK_REASONS: readonly ParkReason[] = [
   "underspecified",
@@ -36,179 +49,238 @@ const PARK_REASONS: readonly ParkReason[] = [
   "already-implemented",
   "too-large",
   "premise-unsound",
-] as const;
-
-const EVIDENCE_VERDICTS = ["confirmed", "contradicted", "unverifiable"] as const;
-const VERDICTS: readonly IntentVerdict[] = ["proceed", "proceed-with-assumptions", "park"];
-const PROVENANCE = ["parsed", "default"] as const;
-
-// ---------- type guards (each guards one field shape) ----------
-
-function isString(v: unknown): v is string {
-  return typeof v === "string";
-}
-
-function isStringArray(v: unknown): v is string[] {
-  return Array.isArray(v) && v.every((x) => isString(x));
-}
-
-function isDeliverable(v: unknown): v is SpecDeliverable {
-  if (typeof v !== "object" || v === null) return false;
-  const d = v as Record<string, unknown>;
-  return (
-    isString(d.id) &&
-    isString(d.description) &&
-    Array.isArray(d.paths) &&
-    d.paths.every((p) => isString(p))
-  );
-}
-
-function isAssumption(v: unknown): v is SpecAssumption {
-  if (typeof v !== "object" || v === null) return false;
-  const a = v as Record<string, unknown>;
-  return isString(a.text) && isString(a.basis);
-}
-
-function isEvidence(v: unknown): v is SpecEvidence {
-  if (typeof v !== "object" || v === null) return false;
-  const e = v as Record<string, unknown>;
-  return (
-    isString(e.claim) &&
-    isString(e.source) &&
-    (EVIDENCE_VERDICTS as readonly string[]).includes(String(e.verdict))
-  );
-}
-
-// ---------- strict artifact parser ----------
+];
 
 /**
- * Parse and validate the spec artifact (JSON) that the explore step writes
- * to `.pi/work-state/<issue>/spec.txt`.
+ * Parse the spec artifact (the JSON the resolver persisted to spec.txt)
+ * back into a NormalisedSpec.
  *
- * Returns `undefined` when the text is not valid JSON, or when any top-level
- * field or array element has the wrong type or shape. The caller treats
- * `undefined` as "no valid artifact" and falls back to prose routing.
- *
- * This is deliberately strict — a malformed artifact is worse than no
- * artifact, because a partially-valid spec can drive the driver down a
- * path it never would have taken (e.g. a `proceed` verdict with a
- * `null` evidence array that `loadBearingContradictions` can't read).
+ * Strict on element shapes: every array element is checked, and the first
+ * malformed element (or a top-level shape miss) returns `undefined`. The
+ * reader never throws — a half-written file from a killed dispatch is
+ * expected, and the caller degrades to the prose-only path.
  */
 export function parseNormalisedSpecArtifact(text: string): NormalisedSpec | undefined {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
-    trace("intent-artifact: not valid JSON — rejecting");
     return undefined;
   }
-
-  if (typeof raw !== "object" || raw === null) {
-    trace("intent-artifact: top-level not an object — rejecting");
-    return undefined;
-  }
-
-  const obj = raw as Record<string, unknown>;
-
-  // Top-level required fields — strict type checks, not just presence.
-  if (!isString(obj.intent)) return undefined;
-  if (!Array.isArray(obj.deliverables) || !obj.deliverables.every(isDeliverable)) return undefined;
-  if (!isStringArray(obj.acceptanceCriteria)) return undefined;
-  if (!isStringArray(obj.outOfScope)) return undefined;
-  if (!Array.isArray(obj.assumptions) || !obj.assumptions.every(isAssumption)) return undefined;
-  if (!isStringArray(obj.openQuestions)) return undefined;
-  if (!Array.isArray(obj.evidence) || !obj.evidence.every(isEvidence)) return undefined;
-
-  // verdict — must be one of the three, not just a string.
-  if (!isString(obj.verdict) || !(VERDICTS as readonly string[]).includes(obj.verdict))
-    return undefined;
-
-  // rationale — required string.
-  if (!isString(obj.rationale)) return undefined;
-
-  // Optional fields — validate shape when present, reject on wrong shape.
-  if (
-    obj.parkReason !== undefined &&
-    (!isString(obj.parkReason) || !(PARK_REASONS as readonly string[]).includes(obj.parkReason))
-  )
-    return undefined;
-
-  if (
-    obj.parkReasonSource !== undefined &&
-    !PROVENANCE.includes(obj.parkReasonSource as (typeof PROVENANCE)[number])
-  )
-    return undefined;
-
-  if (
-    obj.verdictSource !== undefined &&
-    !PROVENANCE.includes(obj.verdictSource as (typeof PROVENANCE)[number])
-  )
-    return undefined;
-
-  const spec: NormalisedSpec = {
-    intent: obj.intent,
-    deliverables: obj.deliverables as SpecDeliverable[],
-    acceptanceCriteria: obj.acceptanceCriteria as string[],
-    outOfScope: obj.outOfScope as string[],
-    assumptions: obj.assumptions as SpecAssumption[],
-    openQuestions: obj.openQuestions as string[],
-    evidence: obj.evidence as SpecEvidence[],
-    verdict: obj.verdict as IntentVerdict,
-    rationale: obj.rationale,
-  };
-
-  // Optional provenance fields — set only when present.
-  if (obj.parkReason !== undefined) spec.parkReason = obj.parkReason as ParkReason;
-  if (obj.parkReasonSource !== undefined)
-    spec.parkReasonSource = obj.parkReasonSource as "parsed" | "default";
-  if (obj.verdictSource !== undefined)
-    spec.verdictSource = obj.verdictSource as "parsed" | "default";
-
-  return spec;
+  return validateSpec(raw);
 }
 
-// ---------- pure precedence function ----------
-
 /**
- * Does the spec artifact win over the prose-parsed spec for this cycle?
+ * The precedence rule for the intent verdict, as a pure function.
  *
- * The rule (from #594):
+ * The artifact wins ONLY when the prose yielded no parse at all, or when
+ * the prose parsed to the parser's synthetic default park
+ * (`verdictSource === "default"` — the resolver omitted its verdict token).
+ * An explicit prose park (the resolver actually wrote `park`, even with
+ * the default `underspecified` reason) is a decision and is never
+ * overridden by a file the same resolver also wrote.
  *
- * - **prose is `undefined`** (no `## Spec` block in the reply) AND the
- *   artifact is valid → artifact wins. The resolver's structured decision
- *   survives even when the prose was lost or drifted off-format.
- *
- * - **prose is a park with `verdictSource === "default"`** (the parser
- *   synthesised the park because no `INTENT-VERDICT` token parsed) AND the
- *   artifact is valid → artifact wins. A default-park is not a resolver
- *   decision — it is the parser's fallback, and #337/#397 already treat
- *   it as overridable.
- *
- * - **prose is a park with `verdictSource === "parsed"`** (the resolver
- *   explicitly stated `park`) → prose wins, regardless of the artifact.
- *   #404: an explicit park is a decision the resolver made.
- *
- * - **prose is `proceed` or `proceed-with-assumptions`** → prose wins.
- *   The driver already has a forward path; the artifact is redundant.
- *
- * - **artifact is `undefined`** → prose wins (nothing to prefer).
+ * A malformed or absent artifact degrades to the prose decision — the
+ * artifact is a RECOVERY channel, not an additional decision, and a file
+ * that fails strict validation cannot license anything.
  */
-export function specArtifactWins(
+export function resolveIntentVerdict(
   prose: NormalisedSpec | undefined,
   artifact: NormalisedSpec | undefined,
-): boolean {
-  if (artifact === undefined) return false;
+): { spec: NormalisedSpec | undefined; source: "prose" | "artifact" } {
+  // The prose wins UNLESS it is the parser's synthetic default park
+  // (verdictSource === "default"). A default park is not a decision the
+  // resolver made — it is what the parser synthesises when the verdict
+  // token does not parse, and the artifact (the resolver's own persisted
+  // record) is the surviving signal. An EXPLICIT prose park
+  // (verdictSource === "parsed") is a decision and is never overridden.
+  //
+  // A `proceed` or `proceed-with-assumptions` from the prose always wins —
+  // the resolver said go, and the file it also wrote cannot talk it back
+  // into building (or into parking, for that matter).
+  const proseIsDecision =
+    prose !== undefined && !(prose.verdict === "park" && prose.verdictSource === "default");
+  if (proseIsDecision) {
+    return { spec: prose, source: "prose" };
+  }
+  // prose is undefined (no parse) or a parser-default park. The artifact
+  // wins if it is present and valid.
+  if (artifact) {
+    trace("work-driver: intent — restoring verdict from the persisted spec artifact");
+    return { spec: artifact, source: "artifact" };
+  }
+  // No prose decision AND no valid artifact. The prose (undefined or the
+  // default park) stands; the no-signal cap-hit or the intent-park cap-hit
+  // fires downstream.
+  return { spec: prose, source: "prose" };
+}
 
-  if (prose === undefined) return true;
+/** The artifact path for the explore step's spec. Shared with tests. */
+export function exploreSpecArtifactPath(repoRoot: string, issue: number): string {
+  return dispatchArtifactPath(repoRoot, issue, "spec");
+}
 
-  // A stated park always wins — the resolver said park, and the driver
-  // must honour that. This is the #404 invariant.
-  if (prose.verdict === "park" && prose.verdictSource === "parsed") return false;
+/**
+ * Delete a stale spec artifact left by a prior cycle.
+ *
+ * Best-effort: the file is a cache of a decision, and a failed delete
+ * only costs the fresh-cycle hygiene — the write below overwrites it
+ * anyway. Never throws; a missing file (the normal case on a fresh
+ * cycle) is a success.
+ */
+export function deleteSpecArtifact(repoRoot: string, issue: number): void {
+  try {
+    rmSync(exploreSpecArtifactPath(repoRoot, issue), { force: true });
+  } catch (err) {
+    trace(`work-driver: could not delete stale spec artifact: ${(err as Error).message}`);
+  }
+}
 
-  // A parser-default park is not a resolver decision — the artifact may override.
-  if (prose.verdict === "park" && prose.verdictSource === "default") return true;
+/**
+ * Read the spec artifact back from disk, parsing + validating strictly.
+ *
+ * Returns undefined on a missing file (normal) or any malformed content
+ * (never throws into the driver). The path is resolved via
+ * `dispatchArtifactPath` so the read and the write can never disagree
+ * about where the file lives.
+ */
+export function readSpecArtifact(repoRoot: string, issue: number): NormalisedSpec | undefined {
+  let text: string;
+  try {
+    text = readFileSync(exploreSpecArtifactPath(repoRoot, issue), "utf8");
+  } catch {
+    return undefined;
+  }
+  return parseNormalisedSpecArtifact(text);
+}
 
-  // prose has a forward verdict (proceed / proceed-with-assumptions) —
-  // the artifact is redundant and prose wins.
-  return false;
+/** Persist the spec artifact (best-effort; trace on failure). */
+export async function persistSpecArtifact(
+  repoRoot: string,
+  issue: number,
+  spec: NormalisedSpec,
+): Promise<void> {
+  try {
+    await writeDispatchArtifact(repoRoot, issue, "spec", JSON.stringify(spec, null, 2));
+  } catch (err) {
+    trace(`work-driver: could not persist spec artifact: ${(err as Error).message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Element-level validation.
+// ---------------------------------------------------------------------------
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+
+function isDeliverableArray(v: unknown): v is SpecDeliverable[] {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (d) =>
+        d !== null &&
+        typeof d === "object" &&
+        typeof (d as SpecDeliverable).id === "string" &&
+        typeof (d as SpecDeliverable).description === "string" &&
+        isStringArray((d as SpecDeliverable).paths),
+    )
+  );
+}
+
+function isAssumptionArray(v: unknown): v is SpecAssumption[] {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (a) =>
+        a !== null &&
+        typeof a === "object" &&
+        typeof (a as SpecAssumption).text === "string" &&
+        typeof (a as SpecAssumption).basis === "string",
+    )
+  );
+}
+
+const EVIDENCE_VERDICTS: readonly SpecEvidence["verdict"][] = [
+  "confirmed",
+  "contradicted",
+  "unverifiable",
+];
+
+function isEvidenceArray(v: unknown): v is SpecEvidence[] {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (e) =>
+        e !== null &&
+        typeof e === "object" &&
+        typeof (e as SpecEvidence).claim === "string" &&
+        typeof (e as SpecEvidence).source === "string" &&
+        typeof (e as SpecEvidence).verdict === "string" &&
+        EVIDENCE_VERDICTS.includes((e as SpecEvidence).verdict),
+    )
+  );
+}
+
+/**
+ * Validate a parsed JSON value against the NormalisedSpec shape.
+ *
+ * Strict on every array element (see module header for why a cast is not
+ * enough). `undefined` on ANY malformed element or top-level miss. The
+ * verdict must be one of the three values; `parkReason`, when present,
+ * must be one of the five — a malformed reason returns undefined because
+ * a half-correct artifact should not half-validate.
+ */
+function validateSpec(raw: unknown): NormalisedSpec | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const v = raw as Record<string, unknown>;
+  if (typeof v.intent !== "string") return undefined;
+  if (!isDeliverableArray(v.deliverables)) return undefined;
+  if (!isStringArray(v.acceptanceCriteria)) return undefined;
+  if (!isStringArray(v.outOfScope)) return undefined;
+  if (!isAssumptionArray(v.assumptions)) return undefined;
+  if (!isStringArray(v.openQuestions)) return undefined;
+  if (!isEvidenceArray(v.evidence)) return undefined;
+  if (v.verdict !== "proceed" && v.verdict !== "proceed-with-assumptions" && v.verdict !== "park") {
+    return undefined;
+  }
+  const out: NormalisedSpec = {
+    intent: v.intent,
+    deliverables: v.deliverables as SpecDeliverable[],
+    acceptanceCriteria: v.acceptanceCriteria as string[],
+    outOfScope: v.outOfScope as string[],
+    assumptions: v.assumptions as SpecAssumption[],
+    openQuestions: v.openQuestions as string[],
+    evidence: v.evidence as SpecEvidence[],
+    verdict: v.verdict,
+    rationale: typeof v.rationale === "string" ? v.rationale : "",
+  };
+  if (v.parkReason !== undefined) {
+    const pr = v.parkReason;
+    if (typeof pr !== "string" || !PARK_REASONS.includes(pr as ParkReason)) return undefined;
+    out.parkReason = pr as ParkReason;
+  }
+  if (v.parkReasonSource !== undefined) {
+    const r = readProvenance(v.parkReasonSource);
+    if (r === undefined) return undefined;
+    out.parkReasonSource = r;
+  }
+  if (v.verdictSource !== undefined) {
+    const r = readProvenance(v.verdictSource);
+    if (r === undefined) return undefined;
+    out.verdictSource = r;
+  }
+  return out;
+}
+
+/** Read a `"parsed" | "default"` field, returning undefined on a bad value. */
+function readProvenance(val: unknown): "parsed" | "default" | undefined {
+  if (val !== "parsed" && val !== "default") return undefined;
+  return val;
+}
+
+/** The artifact path, for tests that need the raw path without the read. */
+export function specArtifactDir(repoRoot: string, issue: number): string {
+  return path.dirname(exploreSpecArtifactPath(repoRoot, issue));
 }

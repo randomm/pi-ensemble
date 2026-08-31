@@ -54,15 +54,6 @@ interface Seam {
    * make visible.
    */
   canary: { symbol: string; importer: string };
-  /**
-   * #594 — a new module that ships before its production caller (a separate
-   * workstream in the same PR wires it). When set, the `importers.length > 0`
-   * and canary checks are skipped; the per-export `pending`/`testOnly` and
-   * orphan checks still apply. This is the legitimate "module written first,
-   * wiring comes in a separate workstream" shape — distinct from the dead-code
-   * shape the test exists to catch (a module whose caller was silently removed).
-   */
-  wiringPending?: string;
 }
 
 const SEAMS: Seam[] = [
@@ -149,22 +140,18 @@ const SEAMS: Seam[] = [
     canary: { symbol: "beginDispatch", importer: "work-driver-explore.ts" },
   },
   {
-    // #594 — the spec artifact validator and precedence function are pure:
-    // no filesystem, no I/O. The explore step (or a future seam) reads the
-    // spec.txt artifact and passes the text here. Both exports are called
-    // from test-intent-artifact.ts directly, which is the legitimate test
-    // surface for the pure core. Production wiring arrives when task-b wires
-    // the runExplore delete/read-back path (extension/src/work-driver-explore.ts).
+    // #594 — spec artifact validation, precedence, and file operations.
+    // Wired into runExplore by work-driver-explore.ts. The pure validator
+    // and precedence function are exercised by test-work-driver-pr12.ts.
     file: "work-driver-intent-artifact.ts",
-    pending: {},
+    pending: {
+      specArtifactDir: "#594 — test helper for the raw artifact path; no caller yet",
+    },
     testOnly: {
       parseNormalisedSpecArtifact:
-        "#594 — strict JSON spec artifact validator; pure, called by test-intent-artifact.ts",
-      specArtifactWins:
-        "#594 — pure precedence function; called by test-intent-artifact.ts",
+        "#594 — strict JSON spec artifact validator; called by test-work-driver-pr12.ts",
     },
-    canary: { symbol: "parseNormalisedSpecArtifact", importer: "work-driver-intent.ts" },
-    wiringPending: "#594 task-b — wiring into work-driver-explore.ts arrives in the same PR",
+    canary: { symbol: "resolveIntentVerdict", importer: "work-driver-explore.ts" },
   },
 ];
 
@@ -203,14 +190,10 @@ for (const seam of SEAMS) {
   const importers = production.filter((f) =>
     new RegExp(`from "\\./${seam.file.replace(".ts", "\\.ts")}"`).test(f.text),
   );
-  if (seam.wiringPending) {
-    console.log(`  … wiring pending: ${seam.wiringPending}`);
-  } else {
-    assert(
-      importers.length > 0,
-      `has ${importers.length} production importer(s): ${importers.map((i) => i.name).join(", ") || "NONE"}`,
-    );
-  }
+  assert(
+    importers.length > 0,
+    `has ${importers.length} production importer(s): ${importers.map((i) => i.name).join(", ") || "NONE"}`,
+  );
 
   const testOnly = seam.testOnly ?? {};
   const unwired = exported.filter(
@@ -244,13 +227,11 @@ for (const seam of SEAMS) {
     `no stale pending entries${stale.length ? ` — now wired, remove: ${stale.join(", ")}` : ""}`,
   );
 
-  if (!seam.wiringPending) {
-    const importer = production.find((f) => f.name === seam.canary.importer);
-    assert(
-      importer !== undefined && new RegExp(`\\b${seam.canary.symbol}\\b`).test(importer.text),
-      `canary: ${seam.canary.importer} still calls ${seam.canary.symbol}`,
-    );
-  }
+  const importer = production.find((f) => f.name === seam.canary.importer);
+  assert(
+    importer !== undefined && new RegExp(`\\b${seam.canary.symbol}\\b`).test(importer.text),
+    `canary: ${seam.canary.importer} still calls ${seam.canary.symbol}`,
+  );
 
   const pendingCount = Object.keys(seam.pending).filter((n) => exported.includes(n)).length;
   if (pendingCount) console.log(`  … ${pendingCount} export(s) still awaiting a caller`);
