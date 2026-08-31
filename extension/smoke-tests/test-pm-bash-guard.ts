@@ -74,6 +74,12 @@ for (const cmd of [
   // Quoted operators are NOT injection (issue #108): stripQuotedSegments
   // removes the segment before the injection check.
   'echo "gh pr create && git push"',
+  // `echo` / `find` only print / list — they do NOT execute or reach into the
+  // tokens that follow, so a forbidden verb appearing in their ARGUMENTS is
+  // not a bypass (`echo FOO=bar gh pr create` just prints that text, and
+  // `find . -delete` is PM's own file-search allowlist, kept for low risk).
+  "echo FOO=bar gh pr create --title x",
+  "find . -delete",
 ]) {
   assert(pmVerdict(cmd) === "allow", `allowed — ${cmd}`);
 }
@@ -100,6 +106,14 @@ for (const cmd of [
   "nohup git push",
   "timeout 30 git push",
   "FOO=bar git push origin x",
+  // Wrapper-prefixed inner commands that must NOT piggy-back on a loose
+  // allowlist row. `export FOO=x <mutation>` is a REAL bash bypass: bash sets
+  // FOO then runs the inner command, so a `export …*` row would grant a
+  // forbidden inner command. The `export PROJECT_ID=*` row is gone from
+  // agents.json (PM sets env via dispatch prompts, not bash); these vectors
+  // pin that removal.
+  "export PROJECT_ID=123 git push origin main",
+  "export X=y gh pr create --title test",
   // Injection chains hard-deny: matchBashSubcommand returns null for
   // unquoted injection chars, and null is not "allow".
   "git status; git push",
@@ -234,6 +248,13 @@ else process.env.PI_ENSEMBLE_SANDBOX_MODE = prevSandbox;
   assert(bash["*"] === "ask", "parity: PM bash catch-all is ask (the guard turns it into a block)");
   assert(bash["gh api*"] === "allow", "parity: gh api allowed broadly (spec)");
   assert(bash["gh issue create*"] === "deny", "parity: gh issue create denied");
+  // The `export PROJECT_ID=*` row used to let `export X=y git push` piggy-back
+  // on a forbidden inner command. PM has no business exporting env in bash,
+  // so the row is gone — the guard now blocks the wrapper-prefixed mutation.
+  assert(
+    bash["export PROJECT_ID=*"] === undefined,
+    "parity: the dangerous `export PROJECT_ID=*` allowlist row is removed",
+  );
   // Every allowlisted pattern must actually resolve to allow for a
   // representative command through the guard's own matcher.
   const samples: Array<[string, string]> = [
