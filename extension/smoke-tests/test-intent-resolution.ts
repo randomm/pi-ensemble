@@ -12,6 +12,9 @@
  * one-line human bug report, an issue contradicted by the code, an issue
  * already implemented, and a reply that drifted off-format entirely.
  */
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   type NormalisedSpec,
   explainPark,
@@ -22,6 +25,10 @@ import {
   renderAssumptions,
 } from "../src/work-driver-intent.ts";
 import { inlineCommitPrPrompt } from "../src/work-driver-prompts-late.ts";
+import {
+  readDispatchArtifact,
+  writeDispatchArtifact,
+} from "../src/workflow-state.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
@@ -265,9 +272,6 @@ Add a retry.
   );
 }
 
-console.log(`\nexit ${exit}`);
-process.exit(exit);
-
 // ------------------------------- #397: evidence verdicts as LLMs write them
 
 {
@@ -434,6 +438,59 @@ const COMPLETE = (parkReason: string) =>
     else process.env.PI_ENSEMBLE_INTENT = prev;
   }
   assert(intentResolutionEnabled(), "and it is ON by default");
+}
+
+// ---------- #594 / #602: readDispatchArtifact — the spec.txt read-back
+//
+// Missing file → undefined (normal). Binary (non-UTF-8) → string (no throw,
+// caller's JSON.parse rejects). Empty file → empty string (caller rejects).
+{
+  const dir = mkdtempSync(path.join(tmpdir(), "intent-artifact-smoke-"));
+  try {
+    // Missing file is a normal state, not an error.
+    assert(
+      (await readDispatchArtifact(dir, 602, "spec")) === undefined,
+      "readDispatchArtifact: a missing file resolves to undefined",
+    );
+    assert(
+      (await readDispatchArtifact(dir, 602, "does-not-exist")) === undefined,
+      "readDispatchArtifact: a missing dispatchId resolves to undefined (no ENOENT throw)",
+    );
+
+    // Round-trip: write then read back.
+    const spec = JSON.stringify({ verdict: "proceed", intent: "fix the gate" }, null, 2);
+    await writeDispatchArtifact(dir, 602, "spec", spec);
+    assert(
+      (await readDispatchArtifact(dir, 602, "spec")) === spec,
+      "readDispatchArtifact: a written artifact reads back intact",
+    );
+
+    // Binary (non-UTF-8) file: no throw, caller degrades via its own JSON.parse.
+    const binary = path.join(dir, ".pi", "work-state", "602", "spec.txt");
+    mkdirSync(path.dirname(binary), { recursive: true });
+    writeFileSync(binary, Buffer.from([0xff, 0xfe, 0x00, 0x01, 0x02, 0x03]));
+    let threw = false;
+    let r: string | undefined;
+    try {
+      r = await readDispatchArtifact(dir, 602, "spec");
+    } catch {
+      threw = true;
+    }
+    assert(!threw, "readDispatchArtifact: a binary artifact does NOT throw");
+    assert(
+      r !== undefined && typeof r === "string",
+      "readDispatchArtifact: a binary artifact resolves to a string (caller rejects upstream)",
+    );
+
+    // Empty file: valid UTF-8, resolves to empty string (caller's JSON.parse rejects).
+    writeFileSync(binary, "");
+    assert(
+      (await readDispatchArtifact(dir, 602, "spec")) === "",
+      "readDispatchArtifact: an empty file resolves to the empty string (caller rejects upstream)",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 console.log(`\nexit ${exit}`);
