@@ -150,6 +150,8 @@ const SEAMS: Seam[] = [
     testOnly: {
       parseNormalisedSpecArtifact:
         "#594 — strict JSON spec artifact validator; called by test-work-driver-pr12.ts",
+      exploreSpecArtifactPath:
+        "#594 — artifact path helper; called by test-work-driver-pr12.ts and internally by readSpecArtifact/deleteSpecArtifact",
     },
     canary: { symbol: "resolveIntentVerdict", importer: "work-driver-explore.ts" },
   },
