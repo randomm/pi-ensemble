@@ -8,6 +8,13 @@ After v0.1.0, version bumps are driven automatically by
 [release-please](https://github.com/googleapis/release-please) from
 [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [0.12.56](https://github.com/randomm/pi-ensemble/compare/v0.12.55...v0.12.56) (2026-09-01)
+
+
+### Bug Fixes
+
+* **work:** restore intent verdict from spec artifact with strict validation ([#603](https://github.com/randomm/pi-ensemble/issues/603)) ([bdaf15e](https://github.com/randomm/pi-ensemble/commit/bdaf15e58fbbc7570cc3098935af273b34a0eb1f))
+
 ## [0.12.55](https://github.com/randomm/pi-ensemble/compare/v0.12.54...v0.12.55) (2026-08-31)
 
 
