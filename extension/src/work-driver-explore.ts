@@ -301,7 +301,7 @@ export async function runExplore(
   // trace on failure). Gated on useIntent: the artifact is only used on the
   // intent path, so on the legacy path (PI_ENSEMBLE_INTENT=0 or N>1) leave it.
   if (useIntent) {
-    deleteSpecArtifact(ctx.repoRoot, ctx.issue);
+    await deleteSpecArtifact(ctx.repoRoot, ctx.issue);
   }
   const dispatchSettled = await Promise.allSettled([
     dispatch(ctx.pi, { role: "explore", prompt }, { label: "explore" }),
@@ -352,10 +352,10 @@ export async function runExplore(
   // See work-driver-intent-artifact.ts for the full precedence rule.
   if (useIntent) {
     const parsed = parseNormalisedSpec(responseText);
-    const artifact =
-      parsed && parsed.verdict === "park" && parsed.verdictSource !== "default"
-        ? undefined
-        : readSpecArtifact(ctx.repoRoot, ctx.issue);
+    // Always read the artifact and let `resolveIntentVerdict` apply the
+    // precedence rule — the "explicit prose park wins" invariant lives in
+    // one place (work-driver-intent-artifact.ts), not in an inline guard.
+    const artifact = await readSpecArtifact(ctx.repoRoot, ctx.issue);
     const { spec, source } = resolveIntentVerdict(parsed, artifact);
     // Reconcile the chosen spec: a `proceed` with contradictions is
     // parked, a `proceed` with assumptions is promoted, an `underspecified`
@@ -387,7 +387,6 @@ export async function runExplore(
     // the legacy router below (fires the no-signal cap-hit on the intent path).
     trace("work-driver: no `## Spec` block and no valid artifact — legacy verdict router");
   }
-  trace("work-driver: no `## Spec` block in the explore reply — using the legacy verdict router");
 
   if (issues.length === 1) {
     const verdict = parseExploreVerdict(responseText);

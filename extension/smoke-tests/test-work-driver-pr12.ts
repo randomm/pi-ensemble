@@ -471,12 +471,12 @@ async function runExploreWithArtifact(
 {
   const dir = await freshDir("6");
   try {
-    const missing = readSpecArtifact(dir, 999);
+    const missing = await readSpecArtifact(dir, 999);
     assert(missing === undefined, "readSpecArtifact: missing file → undefined (no throw)");
     const fs = await import("node:fs/promises");
     await fs.mkdir(path.dirname(exploreSpecArtifactPath(dir, 998)), { recursive: true });
     await fs.writeFile(exploreSpecArtifactPath(dir, 998), "{ not json", "utf8");
-    const malformed = readSpecArtifact(dir, 998);
+    const malformed = await readSpecArtifact(dir, 998);
     assert(malformed === undefined, "readSpecArtifact: malformed JSON → undefined (no throw)");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -487,8 +487,8 @@ async function runExploreWithArtifact(
 {
   const dir = await freshDir("7");
   try {
-    deleteSpecArtifact(dir, 1);
-    deleteSpecArtifact(dir, 1);
+    await deleteSpecArtifact(dir, 1);
+    await deleteSpecArtifact(dir, 1);
     assert(true, "deleteSpecArtifact: double-delete of a missing file does not throw");
   } finally {
     rmSync(dir, { recursive: true, force: true });

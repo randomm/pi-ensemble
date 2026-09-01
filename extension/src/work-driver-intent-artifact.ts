@@ -2,13 +2,14 @@
  * work-driver-intent-artifact — restore the intent verdict from the
  * persisted spec artifact when the prose reply does not say it.
  *
- * The explore prompt asks the resolver to PERSIST its normalised spec to
- * `.pi/work-state/<issue>/spec.txt` (the same channel the issue-body
- * artifacts use) in addition to emitting the `## Spec` block in its prose
- * reply. When the prose does not parse — or parses only to the parser's
- * synthetic default park — the artifact is the surviving record of a valid
- * decision, and discarding it parks solid issues that the resolver fully
- * resolved (#594).
+ * The DRIVER persists the resolved spec to `.pi/work-state/<issue>/spec.txt`
+ * (the same channel the issue-body artifacts use) after reconciliation in
+ * `runExplore` — the resolver's prose reply is the primary record, and the
+ * file is the durable shadow of the decision. On a SUBSEQUENT cycle, when
+ * the prose does not parse — or parses only to the parser's synthetic
+ * default park — the artifact is the surviving record of a valid decision,
+ * and discarding it parks solid issues that the resolver fully resolved
+ * (#594). It is a recovery channel, not a new decision.
  *
  * Two invariants bound how far the artifact may go:
  *
@@ -31,7 +32,7 @@
  * the 500-line limit in `work-driver-explore.ts` holds without a refactor.
  */
 
-import { readFileSync, rmSync } from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { trace } from "./trace.ts";
 import type {
@@ -128,9 +129,9 @@ export function exploreSpecArtifactPath(repoRoot: string, issue: number): string
  * anyway. Never throws; a missing file (the normal case on a fresh
  * cycle) is a success.
  */
-export function deleteSpecArtifact(repoRoot: string, issue: number): void {
+export async function deleteSpecArtifact(repoRoot: string, issue: number): Promise<void> {
   try {
-    rmSync(exploreSpecArtifactPath(repoRoot, issue), { force: true });
+    await fs.rm(exploreSpecArtifactPath(repoRoot, issue), { force: true });
   } catch (err) {
     trace(`work-driver: could not delete stale spec artifact: ${(err as Error).message}`);
   }
@@ -144,11 +145,20 @@ export function deleteSpecArtifact(repoRoot: string, issue: number): void {
  * `dispatchArtifactPath` so the read and the write can never disagree
  * about where the file lives.
  */
-export function readSpecArtifact(repoRoot: string, issue: number): NormalisedSpec | undefined {
+export async function readSpecArtifact(
+  repoRoot: string,
+  issue: number,
+): Promise<NormalisedSpec | undefined> {
   let text: string;
   try {
-    text = readFileSync(exploreSpecArtifactPath(repoRoot, issue), "utf8");
-  } catch {
+    text = await fs.readFile(exploreSpecArtifactPath(repoRoot, issue), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      const file = exploreSpecArtifactPath(repoRoot, issue);
+      trace(
+        `work-driver: spec artifact ${file} is unreadable (${(err as Error).message}); treating as absent`,
+      );
+    }
     return undefined;
   }
   return parseNormalisedSpecArtifact(text);

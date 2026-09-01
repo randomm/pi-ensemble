@@ -71,7 +71,6 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { trace } from "./trace.ts";
 import { WORK_STATE_SCHEMA_VERSION, type WorkState } from "./workflow-state-schema.ts";
 import { appendEvent, detectInconsistencies, initialState } from "./workflow-state-update.ts";
 
@@ -169,39 +168,6 @@ export async function writeState(repoRoot: string, state: WorkState): Promise<vo
   const tmp = `${file}.tmp`;
   await fs.writeFile(tmp, `${JSON.stringify(next, null, 2)}\n`, "utf8");
   await fs.rename(tmp, file);
-}
-
-/**
- * Read a dispatch artifact back from disk (the inverse of
- * `writeDispatchArtifact`).
- *
- * A missing file is a normal state (the dispatch never wrote one, or the
- * state dir was cleaned), so it resolves to `undefined` rather than throwing
- * — the same degradation `readState` uses for an absent state file.
- *
- * A PRESENT but unreadable file (not valid UTF-8, truncated mid-write, or
- * corrupted) is malformed on-disk state. The caller must treat that as "no
- * artifact" and degrade to the path it has without it; re-throwing here would
- * crash the driver mid-step over a file it can do nothing with — the same
- * reasoning as `readState`, which throws on schema mismatch but never on a
- * half-written payload, and as the best-effort artifact write that never
- * throws into the cycle.
- */
-export async function readDispatchArtifact(
-  repoRoot: string,
-  issue: number,
-  dispatchId: string,
-): Promise<string | undefined> {
-  const file = dispatchArtifactPath(repoRoot, issue, dispatchId);
-  try {
-    return await fs.readFile(file, "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    trace(
-      `workflow-state: artifact ${file} is unreadable (${(err as Error).message}); treating as absent`,
-    );
-    return undefined;
-  }
 }
 
 /**
