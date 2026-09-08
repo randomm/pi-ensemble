@@ -49,20 +49,29 @@ export interface PlanResult {
    * D1: the ACTUAL reason the gap gate stopped, so the operator-visible
    * text names the cause instead of claiming "unresolved CRITICAL/HIGH gaps
    * remain" when a MEDIUM-only NEEDS_ITERATION verdict burned the rounds.
-   * `residual-medium-low` (D2: routed to filing with disclosure) vs
-   * `unresolved-blocking` (not filed, surfaced) vs `verdict-absent` (D3: the
-   * reviewer never wrote a verdict line; MEDIUM/LOW-only, so READY was
+   * `residual-medium-low` (D2: routed to filing with disclosure, nothing
+   * above LOW survived) vs `residual-high` (routed to filing with the
+   * residual HIGH findings disclosed — #664 transposed: HIGH no longer
+   * blocks, it travels) vs `unresolved-blocking` (a CRITICAL gap remains;
+   * CRITICAL-only blocks, HIGH findings travel) vs `verdict-absent` (D3: the
+   * reviewer never wrote a verdict line; HIGH/MEDIUM/LOW-only, so READY was
    * acceptable but the absence is recorded) vs `gate-unavailable` (the
    * gap-gate dispatch itself failed, so no reviewer ever saw the spec —
    * not filed, surfaced, matching the all-angles-failed halt).
    */
-  capReason?: "residual-medium-low" | "unresolved-blocking" | "verdict-absent" | "gate-unavailable";
+  capReason?:
+    | "residual-medium-low"
+    | "residual-high"
+    | "unresolved-blocking"
+    | "verdict-absent"
+    | "gate-unavailable";
   /**
    * D7: a DISCRIMINATED filing failure (or deliberate skip) carried on the
    * result so the operator-visible text can say WHY the issue did not file
    * — forge-unresolved / create-error (detail carries the forge stderr) /
-   * empty-url / cap-surface (the gap-gate cap routed to surface, so the
-   * spec was not filed BY POLICY — nothing failed) / gate-unavailable
+   * empty-url / cap-surface (the gap-gate cap routed to surface because a
+   * CRITICAL gap remains — CRITICAL-only blocks, #664 transposed; the spec
+   * was not filed BY POLICY — nothing failed) / gate-unavailable
    * (the gap-gate dispatch itself failed, so no reviewer ever saw the spec)
    * — instead of the generic "filing failed or was blocked".
    *

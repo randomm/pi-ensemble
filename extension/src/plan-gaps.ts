@@ -7,16 +7,23 @@
  *
  *   - `parseGaps`: the reviewer-reply parser (GAP: markers only, verdict
  *     line, and — since this split — a `verdictParsed` flag that keeps an
- *     ABSENT verdict from silently passing as READY when CRITICAL/HIGH gaps
+ *     ABSENT verdict from silently passing as READY when CRITICAL gaps
  *     are present (D3)),
  *   - the iteration cap: `evaluateGapGate` decides READY / one corrective
- *     round / cap-hit, and `capRouted` applies the routing policy — at the
- *     cap, zero CRITICAL/HIGH gaps FILE the spec with the residual
- *     MEDIUM/LOW gaps disclosed in a "## Residual gap-gate findings" section
- *     (D2); CRITICAL/HIGH remain → do not file, surface to the operator.
- *     Direct precedent: /work's lens round cap routes to CI instead of
- *     parking when the residuals were posted (AGENTS.md §7 "The round cap
- *     routes, it does not only stop").
+ *     round / cap-hit, and `capRouted` applies the routing policy — the
+ *     TERMINAL RULE is CRITICAL-only (direct precedent: /work's adversarial
+ *     gate #664, where the measured 83.7% of rejections sat on a verdict
+ *     the doctrine called non-blocking, and the fix was a policy terminal
+ *     rule, not a findings filter): at the cap, zero CRITICAL gaps FILE
+ *     the spec with the residual HIGH/MEDIUM/LOW gaps disclosed in a
+ *     "## Residual gap-gate findings" section (D2); CRITICAL remains → do
+ *     not file, surface to the operator. With CRITICAL-only blocking, a
+ *     ratcheting stream of fresh HIGH findings is structurally incapable of
+ *     preventing filing — the findings travel, they are not deduped. The
+ *     corrective round likewise fires only on CRITICAL: HIGH no longer
+ *     triggers re-drafting, because the gate is non-deterministic on
+ *     identical input and "fix the gaps and re-run" is not a convergent
+ *     strategy.
  */
 import type { PlanGap } from "./plan-types.ts";
 
@@ -69,10 +76,13 @@ export function parseGaps(reply: string): GapGateParse {
     });
   }
   // D3: track whether a verdict line was actually present. The legacy
-  // "silence = READY" default survives ONLY for the MEDIUM/LOW-only case;
-  // with CRITICAL/HIGH gaps present, an absent verdict routes to
+  // "silence = READY" default survives ONLY for the HIGH/MEDIUM/LOW-only
+  // case; with a CRITICAL gap present, an absent verdict routes to
   // NEEDS_ITERATION in `evaluateGapGate` instead of filing a spec its own
-  // reviewer rated HIGH-gap (transcripts mtsn8vox / mtsngexs).
+  // reviewer rated CRITICAL-gap (transcripts mtsn8vox / mtsngexs).
+  // (Pre-#664-transposition the same rule keyed on CRITICAL/HIGH; HIGH no
+  // longer blocks — a reviewer silence is no longer worth re-dispatching
+  // for a finding the gate may not repeat next round.)
   const verdictLine = [...lines].reverse().find((l) => /verdict\s*[:—-]/i.test(l));
   const verdictParsed = typeof verdictLine === "string";
   const verdict: GapGateVerdict =
@@ -89,23 +99,32 @@ export function parseGaps(reply: string): GapGateParse {
   return { gaps, verdict, verdictParsed };
 }
 
-/** The gaps that block filing: CRITICAL or HIGH severity. */
+/**
+ * The gaps that block filing: CRITICAL only. #664 transposed — the
+ * terminal rule is a policy decision, not a findings filter: HIGH is the
+ * severity the gap gate is non-deterministic on (same descriptor, zero
+ * HIGH on one run, six the next), so letting HIGH block makes
+ * "fix the gaps and re-run" a non-convergent strategy. HIGH findings
+ * travel in the residual disclosure instead of blocking filing.
+ */
 export function blockingGaps(gaps: PlanGap[]): PlanGap[] {
-  return gaps.filter((g) => g.severity === "CRITICAL" || g.severity === "HIGH");
+  return gaps.filter((g) => g.severity === "CRITICAL");
 }
 
 /**
  * Decide what to do with one parsed gate round.
  *
- * READY — the reviewer said READY (or stayed silent with no CRITICAL/HIGH
- * gaps) AND nothing CRITICAL/HIGH remains.
+ * READY — the reviewer said READY (or stayed silent with no CRITICAL gap)
+ * AND nothing CRITICAL remains (the CRITICAL-only terminal rule, #664
+ * transposed — see `blockingGaps`).
  * NEEDS_ITERATION — otherwise; if there are still corrective rounds left,
- * the driver re-drafts with the blocking gaps carried as resolved open
- * questions and re-reviews.
+ * the driver re-drafts with the blocking (CRITICAL) gaps carried as
+ * resolved open questions and re-reviews. A corrective round fires ONLY on
+ * CRITICAL: HIGH no longer triggers re-drafting.
  */
 export function evaluateGapGate(parsed: GapGateParse, iterations: number, maxIterations: number) {
   const blocking = blockingGaps(parsed.gaps);
-  // D3: an ABSENT verdict with CRITICAL/HIGH gaps present must not pass.
+  // D3: an ABSENT verdict with a CRITICAL gap present must not pass.
   // The reviewer either stopped mid-reply (mtsn8vox: full review, 4 HIGH
   // gaps, no verdict line) or chose to leave the call open (mtsn8exs — 99 output tokens, stopped mid-reply).
   // Treat the silence as "another round" — the corrective round either
@@ -123,11 +142,11 @@ export function evaluateGapGate(parsed: GapGateParse, iterations: number, maxIte
  * round cap routes to CI when the residuals were posted; a silent swallow is
  * worse than a park). At the iteration cap:
  *
- *   - zero CRITICAL/HIGH gaps remaining → FILE the spec, disclosing the
- *     residual MEDIUM/LOW gaps in a "## Residual gap-gate findings" section
- *     of the issue body (each with its severity and the reviewer's proposed
- *     resolution). The disclosure is the precondition for filing.
- *   - any CRITICAL or HIGH remaining → do NOT file; surface to the operator.
+ *   - zero CRITICAL gaps remaining → FILE the spec, disclosing the
+ *     residual HIGH/MEDIUM/LOW gaps in a "## Residual gap-gate findings"
+ *     section of the issue body (each with its severity and the reviewer's
+ *     proposed resolution). The disclosure is the precondition for filing.
+ *   - any CRITICAL remaining → do NOT file; surface to the operator.
  */
 export function capRouted(blocking: PlanGap[]): "file" | "surface" {
   return blocking.length === 0 ? "file" : "surface";

@@ -141,17 +141,24 @@ function renderPlanResult(r: PlanResult, dryRun: boolean): string {
   // D1: the cap message names the ACTUAL cause (discriminated capReason),
   // instead of the old "unresolved CRITICAL/HIGH gaps remain" which was
   // false when a MEDIUM-only NEEDS_ITERATION verdict burned the rounds.
+  // #664 transposed: the terminal rule is CRITICAL-only — residual-high
+  // (HIGH findings travel in the disclosure) and residual-medium-low both
+  // mean the spec FILED; only unresolved-blocking (CRITICAL remains) does
+  // not.
   let cap = "";
   if (r.capHit && r.gaps.length > 0) {
     if (r.capReason === "unresolved-blocking") {
       cap =
-        "\n\nGAP GATE CAP HIT: after the iteration cap, unresolved CRITICAL/HIGH gaps remain. They are listed below and must be resolved with the operator before /work.";
+        "\n\nGAP GATE CAP HIT: after the iteration cap, unresolved CRITICAL gaps remain. They are listed below and must be resolved with the operator before /work. (HIGH findings no longer block filing — they travel in the residual disclosure instead; only CRITICAL stops the gate.)";
+    } else if (r.capReason === "residual-high") {
+      const residual = r.gaps.map((g) => `[${g.severity}] ${g.description}`).join(", ");
+      cap = `\n\nGAP GATE CAP HIT: the reviewer returned fresh findings each round (${residual}); the iteration cap was reached with no CRITICAL gaps remaining, so the spec is FILED with the residual findings disclosed in the issue body (see '## Residual gap-gate findings'). HIGH findings travel in that disclosure — the terminal rule is CRITICAL-only.`;
     } else if (r.capReason === "residual-medium-low") {
       const residual = r.gaps.map((g) => `[${g.severity}] ${g.description}`).join(", ");
-      cap = `\n\nGAP GATE CAP HIT: the reviewer asked for another iteration over MEDIUM/LOW items (${residual}); the iteration cap was reached with no CRITICAL/HIGH gaps remaining, so the spec is FILED with the residual findings disclosed in the issue body (see '## Residual gap-gate findings').`;
+      cap = `\n\nGAP GATE CAP HIT: the reviewer asked for another iteration over MEDIUM/LOW items (${residual}); the iteration cap was reached with no CRITICAL gaps remaining, so the spec is FILED with the residual findings disclosed in the issue body (see '## Residual gap-gate findings').`;
     } else if (r.capReason === "verdict-absent") {
       cap =
-        "\n\nGAP GATE NOTE: the reviewer never wrote a verdict line; no CRITICAL/HIGH gaps were found, so the spec proceeded — but the absence is recorded here (the gate did not explicitly say READY).";
+        "\n\nGAP GATE NOTE: the reviewer never wrote a verdict line; no CRITICAL gap was found, so the spec proceeded — but the absence is recorded here (the gate did not explicitly say READY).";
     } else if (r.capReason === "gate-unavailable") {
       cap =
         "\n\nGAP GATE UNAVAILABLE: the gap-gate dispatch itself failed, so no reviewer ever saw the spec. It was NOT filed — the spec above is still valid to review, but re-run start_plan_driver after the gate failure is addressed (see the FILING STATUS below).";
@@ -166,8 +173,9 @@ function renderPlanResult(r: PlanResult, dryRun: boolean): string {
     const f = r.filingFailure;
     if (f.reason === "cap-surface" || f.reason === "gate-unavailable") {
       // Deliberate skip (not a failure): either the cap routed to surface
-      // (CRITICAL/HIGH gaps — the operator resolves them first, they are
-      // listed in the cap message above) or the gap gate never ran (no
+      // (a CRITICAL gap remains — CRITICAL-only blocks, #664 transposed;
+      // HIGH findings travel in the residual disclosure instead, so they
+      // are listed in the residual section) or the gap gate never ran (no
       // reviewer saw the spec — re-run after the gate failure is addressed).
       // The spec is not filed by policy; no forging happened to diagnose.
       filingStatus = `\n\n=== FILING STATUS ===\nNot filed (by policy): ${f.detail}`;
