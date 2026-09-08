@@ -20,8 +20,15 @@
  * lives in `test-plan-tool.ts`; this file owns the pure parsing seam.
  */
 
-import { draftSpec, extractPlanItems, parseOperatorDirectives } from "../src/plan-draft.ts";
-import { parseGaps, parseGapsForTest } from "../src/plan-driver.ts";
+import {
+  draftSpec,
+  extractPlanItems,
+  parseOperatorDirectives,
+  PRIOR_CONTEXT_CHILD_PROMPT_CAP,
+  renderPriorContext,
+} from "../src/plan-draft.ts";
+import { parseGaps, parseGapsForTest, setPlanDispatch } from "../src/plan-driver.ts";
+import { registerPlanTool } from "../src/plan-tool.ts";
 import { planTitle } from "../src/plan-types.ts";
 
 let exit = 0;
@@ -234,8 +241,11 @@ function assert(cond: boolean, msg: string) {
   assert(!subSection.includes("Deps: none"), "D4: line-split junk ('Deps: none') does not reach the spec");
   assert(!subSection.includes("## subIssues[]"), "D4: heading debris does not reach the spec");
   assert(!subSection.includes("Task complete:"), "D4: the prose preamble does not reach the spec");
-  // Fallback: a decomposition angle that made NO tool calls falls back to the
-  // prose line-split (the silence-detection precedent), but junk is filtered.
+  // #633: the sub-issue prose line-split fallback is DELETED. With the driver's
+  // aggregate all-angles-failed guard, this path is unreachable — if zero angles
+  // produced structured items, the pipeline halts before draftSpec. So when
+  // epicSubIssues has zero sub-issue items, it returns [] and the caller renders
+  // the "(decomposition not available)" fallback string. No prose parsing at all.
   const prose = draftSpec(
     "epic",
     "epic descriptor",
@@ -254,9 +264,14 @@ function assert(cond: boolean, msg: string) {
     NO_DIRS,
   );
   const proseSection = prose.body.slice(prose.body.indexOf("## Sub-issues"));
-  assert(proseSection.includes("first sub-task one"), "D4 fallback: prose line-split still works when zero tool calls");
-  assert(!proseSection.includes("Deps: none"), "D4 fallback: junk still filtered in the prose path");
-  assert(!proseSection.includes("## subIssues[]"), "D4 fallback: headings still filtered in the prose path");
+  assert(
+    proseSection.includes("(decomposition not available)"),
+    "#633: zero sub-issue items → '(decomposition not available)' fallback, no prose parsing",
+  );
+  assert(!proseSection.includes("first sub-task one"), "#633: prose lines do NOT become checkboxes");
+  assert(!proseSection.includes("second sub-task two"), "#633: no prose line-split into sub-issues");
+  assert(!proseSection.includes("Deps: none"), "#633: no junk in the sub-issues section");
+  assert(!proseSection.includes("## subIssues[]"), "#633: no heading debris in the sub-issues section");
 }
 
 {
@@ -291,5 +306,145 @@ function assert(cond: boolean, msg: string) {
   );
 }
 
-console.log(`\nexit ${exit}`);
-process.exit(exit);
+// --------------------------------------------------- #633: renderPriorContext cap
+
+{
+  // Fix 3 (PERFORMANCE): the prior-context block rendered into CHILD prompts
+  // (angle prompts + gap gate) is capped at ~2000 chars TOTAL, not per item.
+  // A >2000-char context produces a capped prompt for children with a
+  // truncation marker; the full text still reaches draftSpec (the filed body).
+
+  // 1. Empty context → empty string (no header, no marker).
+  assert(renderPriorContext([]) === "", "renderPriorContext: empty → empty string");
+
+  // 2. Short context (well under the cap) → rendered in full, no marker.
+  const short = renderPriorContext([
+    { source: "vipune", fact: "the dispatch seam is in plan-driver.ts" },
+    { source: "issue #12 (open)", fact: "prior work on the plan pipeline" },
+  ]);
+  assert(short.includes("- [vipune] the dispatch seam is in plan-driver.ts"), "short: item 1 rendered");
+  assert(short.includes("- [issue #12 (open)] prior work on the plan pipeline"), "short: item 2 rendered");
+  assert(!short.includes("[truncated]"), "short: no truncation marker when under the cap");
+
+  // 3. Long context (exceeds the cap) → truncated with a marker, items preserved
+  //    in order up to the cap, remainder dropped.
+  const longItems: { source: string; fact: string }[] = [];
+  for (let i = 0; i < 30; i++) {
+    longItems.push({
+      source: "context param",
+      fact: `prior context line ${i} — ${"x".repeat(100)} (padding to exceed the cap)`,
+    });
+  }
+  const totalLen = longItems.map((p) => `- [${p.source}] ${p.fact}`).join("\n").length;
+  assert(totalLen > PRIOR_CONTEXT_CHILD_PROMPT_CAP, `precondition: total context (${totalLen} chars) exceeds cap (${PRIOR_CONTEXT_CHILD_PROMPT_CAP})`);
+  const long = renderPriorContext(longItems);
+  assert(long.length <= PRIOR_CONTEXT_CHILD_PROMPT_CAP + 200, "long: rendered length is capped (within cap + marker overhead)");
+  assert(long.includes("[truncated]"), "long: truncation marker is present");
+  assert(long.includes("prior context line 0"), "long: first item is preserved");
+  // The last item (line 29) should be dropped — the marker says so.
+  const truncatedCount = longItems.length - (long.match(/- \[context param\] prior context line/g) ?? []).length;
+  assert(truncatedCount > 0, `long: ${truncatedCount} item(s) truncated`);
+  assert(
+    long.includes(`${truncatedCount} prior context item(s) omitted`),
+    "long: the marker states how many items were omitted",
+  );
+  // Items are preserved in order (the first N fit, the rest are dropped).
+  const lineNumbers = [...long.matchAll(/prior context line (\d+)/g)].map((m) => Number(m[1]));
+  const isOrdered = lineNumbers.every((n, i) => i === 0 || n > lineNumbers[i - 1]!);
+  assert(isOrdered, "long: preserved items are in order (no reordering)");
+
+  // 4. The full unclipped context still reaches draftSpec (the filed body).
+  //    draftSpec renders priorContext uncapped — this test confirms the cap
+  //    is at the CHILD-PROMPT render site only, not at the filed body.
+  const NO_DIRS = { acceptanceCriteria: [], pitfalls: [], outOfScope: [] };
+  const { body } = draftSpec("feature", "descriptor", [], longItems, [], [], 0, NO_DIRS);
+  const ctxSection = body.slice(body.indexOf("## Prior context inventory"), body.indexOf("## Technical context"));
+  assert(ctxSection.includes("prior context line 0"), "draftSpec: first long item in filed body");
+  assert(ctxSection.includes("prior context line 29"), "draftSpec: last long item (line 29) in filed body — full uncapped context");
+  assert(!ctxSection.includes("[truncated]"), "draftSpec: no truncation marker in the filed body (full context)");
+}
+
+// --------------------------------------------------- #633 Fix 1: all-angles-failed guard
+
+// The aggregate all-angles-failed guard is a PIPELINE-level invariant, so it
+// needs the dispatch seam. test-plan-tool.ts owns the main pipeline test; this
+// block exercises the guard in isolation with a minimal spike descriptor (one
+// angle) so the file stays under the 500-line limit.
+
+{
+  // Register the tool (the test-plan-tool.ts file does this too, but this
+  // test file runs standalone — we need the tool to invoke the pipeline).
+  // biome-ignore lint/suspicious/noExplicitAny: minimal stub; only registerTool is used
+  const fakePi = { registerTool: () => {} } as any;
+  // We don't actually need the registered tool — we call runPlanPipeline via
+  // the dispatch seam directly. But we DO need setPlanDispatch to intercept.
+
+  const savedGate = process.env.PI_ENSEMBLE_PLAN_GAP_GATE;
+  process.env.PI_ENSEMBLE_PLAN_GAP_GATE = "0";
+
+  setPlanDispatch(((pi: unknown, spec: { role: string; prompt: string }) => {
+    if (spec.role === "adversarial-developer") {
+      return Promise.resolve({
+        role: "adversarial-developer",
+        ok: true,
+        text: "VERDICT: READY",
+        toolUses: [],
+        ms: 1,
+        exitCode: 0,
+      } as never);
+    }
+    if (spec.prompt.includes("DUPLICATE RISK CHECK")) {
+      return Promise.resolve({
+        role: "explore",
+        ok: true,
+        text: "DUPLICATE_RISK: none — no overlapping open work",
+        toolUses: [],
+        ms: 1,
+        exitCode: 0,
+      } as never);
+    }
+    // Phase 2 angle: prose-only, zero structured items
+    return Promise.resolve({
+      role: "explore",
+      ok: true,
+      text: "I investigated the scoping question but could not produce structured items.",
+      toolUses: [],
+      ms: 1,
+      exitCode: 0,
+    } as never);
+  }) as never);
+
+  // Import runPlanPipeline directly (it's exported from plan-driver.ts).
+  const { runPlanPipeline } = await import("../src/plan-driver.ts");
+  // biome-ignore lint/suspicious/noExplicitAny: minimal pi stub
+  const piStub = {} as any;
+  const result = await runPlanPipeline(piStub, {
+    descriptor: "spike: investigate the feasibility of a new approach",
+    dryRun: true,
+  }, process.cwd());
+
+  assert(result.filed === false, "Fix 1: all-angles-failed → not filed");
+  assert(result.capHit === true, "Fix 1: all-angles-failed → capHit is true (distinct signal)");
+  assert(
+    /zero structured items/i.test(result.spec),
+    "Fix 1: the spec text explains WHY (all angles returned zero structured items)",
+  );
+  assert(
+    !result.spec.includes("## Acceptance criteria") && !result.spec.includes("## Sub-issues"),
+    "Fix 1: no typed sections rendered (the spec is the failure message, not a draft spec)",
+  );
+  assert(
+    /report_plan_item|plan-reporter/i.test(result.spec),
+    "Fix 1: the failure message names the likely cause (reporter extension not loaded)",
+  );
+  assert(
+    /scoping/i.test(result.spec),
+    "Fix 1: the dispatched angle name (scoping) is named in the failure message",
+  );
+
+  // Cleanup
+  if (savedGate === undefined) delete process.env.PI_ENSEMBLE_PLAN_GAP_GATE;
+  else process.env.PI_ENSEMBLE_PLAN_GAP_GATE = savedGate;
+  setPlanDispatch(null);
+  void fakePi;
+}

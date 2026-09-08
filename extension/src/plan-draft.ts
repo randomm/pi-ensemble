@@ -197,22 +197,44 @@ function itemsByKind(findings: AngleFindings[], kind: PlanItemKindName): PlanIte
   return findings.flatMap((f) => f.toolUses).filter((i) => i.kind === kind);
 }
 
+/**
+ * The prior-context block rendered into CHILD prompts (Phase-2 angles, gap
+ * gate). Capped at ~2000 chars TOTAL (not per item): with the 200-char clip
+ * removed for the FILED BODY (D2), the full operator context now reaches
+ * every child prompt, 3-8 angle children and up to 2 gap-gate rounds.
+ * draftSpec (the filed body) renders priorContext uncapped — this cap exists
+ * only at the child-prompt render site. A truncation marker makes the clip
+ * visible rather than silently dropping facts.
+ */
+export const PRIOR_CONTEXT_CHILD_PROMPT_CAP = 2000;
+
+export function renderPriorContext(priorContext: { source: string; fact: string }[]): string {
+  if (priorContext.length === 0) return "";
+  const lines = priorContext.map((p) => `- [${p.source}] ${p.fact}`);
+  const rendered = lines.join("\n");
+  if (rendered.length <= PRIOR_CONTEXT_CHILD_PROMPT_CAP) return rendered;
+  const kept: string[] = [];
+  let soFar = 0;
+  for (const line of lines) {
+    const cost = soFar === 0 ? line.length : line.length + 1;
+    if (soFar + cost > PRIOR_CONTEXT_CHILD_PROMPT_CAP) break;
+    kept.push(line);
+    soFar += cost;
+  }
+  return `${kept.join("\n")}\n- [truncated] ${lines.length - kept.length} prior context item(s) omitted for child-prompt size (full inventory is in the filed body)`;
+}
+
 function epicSubIssues(findings: AngleFindings[]): string[] {
   const subs = itemsByKind(findings, "sub-issue");
-  if (subs.length > 0)
-    return subs.map((s, i) => `- [ ] #N — ${s.text} (sub-issue ${i + 1}, from ${s.angle})`);
-  // Fallback (prose line-split) ONLY when the decomposition angle made zero
-  // structured calls — mirroring the prose-summary silence detection.
-  const decompose = findings.find((f) => f.name === "decomposition-surface" && f.ok);
-  if (!decompose) return [];
-  const lines = decompose.text
-    .split("\n")
-    .map((l) => l.replace(/^[-*\d.)\s]+/, "").trim())
-    .filter(
-      (l) =>
-        l.length >= 6 && !/^(output|return|use|note:|deps:|order:)/i.test(l) && !l.startsWith("#"),
-    );
-  return lines.map((l, i) => `- [ ] #N — ${l} (sub-issue ${i + 1})`);
+  // #633: the prose line-split fallback is DELETED, not kept. It re-introduced
+  // the exact defect class this PR removes — any prose line >= 6 chars that
+  // survived the blocklist became a GitHub checkbox ("Deps: none", "## subIssues[]",
+  // "Task complete:" preambles). The driver's aggregate guard (plan-driver.ts)
+  // halts the pipeline before draftSpec when zero angles produced structured
+  // items, so this fallback is unreachable. Zero items → [] and the caller
+  // renders the existing "(decomposition not available)" fallback string.
+  if (subs.length === 0) return [];
+  return subs.map((s, i) => `- [ ] #N — ${s.text} (sub-issue ${i + 1}, from ${s.angle})`);
 }
 
 const DEPTH_LIMIT_NOTE =
@@ -221,7 +243,12 @@ const DEPTH_LIMIT_NOTE =
 /** Max items rendered per typed section — generous enough for a real spec (D2). */
 const SECTION_MAX_ITEMS = 20;
 
-/** File-path regex for the references fallback (structured items take precedence). */
+// #633 SIMPLICITY-lens note: the references fallback (REF_RE prose file-path scan)
+// SURVIVES where the sub-issue prose fallback does not. A file-path regex over prose
+// is a narrow, high-precision pattern — it matches only tokens that look like code
+// paths, not free lines. The sub-issue fallback line-split ANY prose line >= 6 chars
+// into checkboxes; this one cannot. Structured reference items take precedence; the
+// scan is only a fallback when an angle made zero `report_plan_item` reference calls.
 const REF_RE = /\b[\w./-]+\.(?:ts|tsx|js|rs|go|py|md)\b/g;
 
 export function draftSpec(
