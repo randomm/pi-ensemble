@@ -126,7 +126,7 @@ function renderPlanResult(r: PlanResult, dryRun: boolean): string {
     ? "PLAN DRY-RUN (nothing filed). Show this spec to the operator; on their confirmation re-call start_plan_driver with dryRun omitted to file."
     : r.filed
       ? `PLAN FILED — ${r.issueUrl}`
-      : "PLAN COMPLETED — filing failed or was blocked; see details. The spec below is still valid to review.";
+      : "PLAN COMPLETED — filing failed or was blocked; see the FILING STATUS section below. The spec is still valid to review.";
   const gaps =
     r.gaps.length > 0
       ? r.gaps.map((g) => `- [${g.severity}] ${g.description} → ${g.resolution}`).join("\n")
@@ -138,10 +138,31 @@ function renderPlanResult(r: PlanResult, dryRun: boolean): string {
           .map((p) => `- [${p.source}] ${p.fact}`)
           .join("\n")
       : "- (none — cold start)";
-  const cap =
-    r.capHit && r.gaps.length > 0
-      ? "\n\nGAP GATE CAP HIT: after the iteration cap, unresolved CRITICAL/HIGH gaps remain. They are listed below and must be resolved with the operator before /work."
-      : "";
+  // D1: the cap message names the ACTUAL cause (discriminated capReason),
+  // instead of the old "unresolved CRITICAL/HIGH gaps remain" which was
+  // false when a MEDIUM-only NEEDS_ITERATION verdict burned the rounds.
+  let cap = "";
+  if (r.capHit && r.gaps.length > 0) {
+    if (r.capReason === "unresolved-blocking") {
+      cap =
+        "\n\nGAP GATE CAP HIT: after the iteration cap, unresolved CRITICAL/HIGH gaps remain. They are listed below and must be resolved with the operator before /work.";
+    } else if (r.capReason === "residual-medium-low") {
+      const residual = r.gaps.map((g) => `[${g.severity}] ${g.description}`).join(", ");
+      cap = `\n\nGAP GATE CAP HIT: the reviewer asked for another iteration over MEDIUM/LOW items (${residual}); the iteration cap was reached with no CRITICAL/HIGH gaps remaining, so the spec is FILED with the residual findings disclosed in the issue body (see '## Residual gap-gate findings').`;
+    } else if (r.capReason === "verdict-absent") {
+      cap =
+        "\n\nGAP GATE NOTE: the reviewer never wrote a verdict line; no CRITICAL/HIGH gaps were found, so the spec proceeded — but the absence is recorded here (the gate did not explicitly say READY).";
+    } else {
+      cap = "\n\nGAP GATE CAP HIT: the iteration cap was reached. See the gap dispositions below.";
+    }
+  }
+  // D7: the filing failure reason is DISCRIMINATED and surfaced — the
+  // forge stderr (when there is one) reaches the operator without PI_ENSEMBLE_DEBUG.
+  let filingStatus = "";
+  if (!dryRun && !r.filed && r.filingFailure) {
+    const f = r.filingFailure;
+    filingStatus = `\n\n=== FILING STATUS ===\nFiling did not complete. Reason: ${f.reason}${f.detail ? ` — ${f.detail}` : ""}. The spec above is still valid to review and can be re-run after the cause is addressed.`;
+  }
   return `${head}
 
 Title: ${r.title}
@@ -154,7 +175,7 @@ ${r.spec}
 ${gaps}
 
 === PRIOR CONTEXT ATTRIBUTION ===
-${prior}${cap}`;
+${prior}${cap}${filingStatus}`;
 }
 
 function resultDetails(r: PlanResult, dryRun: boolean): Record<string, unknown> {
@@ -168,5 +189,7 @@ function resultDetails(r: PlanResult, dryRun: boolean): Record<string, unknown> 
     capHit: r.capHit ?? false,
   };
   if (r.issueUrl) d.issueUrl = r.issueUrl;
+  if (r.capReason) d.capReason = r.capReason;
+  if (r.filingFailure) d.filingFailure = r.filingFailure;
   return d;
 }
