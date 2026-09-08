@@ -54,7 +54,9 @@ import {
   anglePromptsFor,
   codeIdentifiersIn,
   draftSpec,
+  extractPlanItems,
   mechanicalInventory,
+  parseOperatorDirectives,
 } from "./plan-draft.ts";
 import {
   type PlanDriverInput,
@@ -69,6 +71,19 @@ import { trace } from "./trace.ts";
 const execp = promisify(exec);
 const GAP_GATE_MAX_ITERATIONS = 2;
 
+/**
+ * Companion-extension path for the plan Phase-2 children (report_plan_item).
+ * Follows LENS_REPORTER_PATH / POLICY_REPORTER_PATH exactly.
+ */
+const PLAN_REPORTER_PATH = path.join(__dirname, "plan-reporter.ts");
+
+/**
+ * The extra args the Phase-2 investigation children run with: no skills
+ * (the exploration tools are in the role prompt; skills would just add cost)
+ * + the plan-reporter extension that registers report_plan_item.
+ */
+const PLAN_EXTRA_ARGS: string[] = ["--no-skills", "--extension", PLAN_REPORTER_PATH];
+
 // ---------------------------------------------------------------------------
 // Phase 4 — adversarial gap gate
 // ---------------------------------------------------------------------------
@@ -78,7 +93,12 @@ function gapGatePrompt(
   findings: AngleFindings[],
   priorContext: { source: string; fact: string }[],
 ): string {
-  const summary = findings.map((x) => `- ${x.name}: ${x.ok ? "ran" : "skipped/failed"}`).join("\n");
+  const summary = findings
+    .map((x) => {
+      const n = x.toolUses.filter((i) => typeof i === "object").length;
+      return `- ${x.name}: ${x.ok ? (n > 0 ? `ran (${n} structured item${n === 1 ? "" : "s"})` : "ran (no structured items)") : "skipped/failed"}`;
+    })
+    .join("\n");
   const head =
     "GAP DETECTION: review this draft spec and find what is missing, under-specified, ambiguous or unverifiable.\n\n";
   const spec = `DRAFT SPEC:\n${body}\n\n`;
@@ -227,10 +247,16 @@ export async function runPlanPipeline(
       .slice(0, 5)
       .map((r) => ({ source: `issue #${r.number} (${r.state})`, fact: r.title })),
   ];
+  // D7: operator-supplied typed fields (ACCEPTANCE CRITERIA / PITFALLS /
+  // OUT OF SCOPE blocks in the context param) take precedence over
+  // specialist output for those fields — parsed once, threaded to draftSpec.
+  const directives = parseOperatorDirectives(context);
   if (context && context.trim().length > 0) {
     for (const line of context.trim().split("\n")) {
       if (line.trim())
-        priorContext.push({ source: "context param", fact: line.trim().slice(0, 200) });
+        // D2: no 200-char clipping of operator context — the operator is the
+        // authority and the inventory renders it verbatim.
+        priorContext.push({ source: "context param", fact: line.trim() });
     }
   }
 
@@ -272,7 +298,11 @@ export async function runPlanPipeline(
     );
   }
 
-  // Phase 2
+  // Phase 2 — the children run with the plan-reporter extension (the
+  // report_plan_item tool) so the driver reads structured items from
+  // result.toolUses instead of line-splitting prose. The duplicate-risk
+  // child and the gap-gate child do NOT get the reporter — they return a
+  // single marker-line reply, not a list of items.
   const codeIds = codeIdentifiersIn(descriptor);
   const angles = anglePromptsFor(type, descriptor, priorContext, codeIds);
   const findings: AngleFindings[] = await Promise.all(
@@ -280,8 +310,22 @@ export async function runPlanPipeline(
       dispatch(
         pi,
         { role: "explore", prompt: a.prompt },
-        { label: `plan-${a.name}`.slice(0, 24) },
-      ).then((r) => ({ name: a.name, ok: r.ok && !r.errorStop, text: r.text })),
+        { label: `plan-${a.name}`.slice(0, 24), extraArgs: PLAN_EXTRA_ARGS },
+      ).then((r) => {
+        const toolUses = r.toolUses ?? [];
+        // Structured-first (D8, fail-closed): an angle is "ok" only when the
+        // dispatch succeeded AND it produced at least one structured item. An
+        // angle that returned prose-only contributed nothing to the typed
+        // sections — its summary may still show in Technical context as a
+        // fallback, but it does not count as a completed angle.
+        const ok = r.ok && !r.errorStop && toolUses.length > 0;
+        return {
+          name: a.name,
+          ok,
+          text: r.text,
+          toolUses: extractPlanItems(toolUses, a.name),
+        };
+      }),
     ),
   );
 
@@ -296,6 +340,7 @@ export async function runPlanPipeline(
     openQuestions,
     outOfScope,
     depth,
+    directives,
   );
 
   // Phase 4 — gap gate (mandatory except chore/spike + escape hatch)
@@ -344,6 +389,7 @@ export async function runPlanPipeline(
           openQuestions,
           outOfScope,
           depth,
+          directives,
         ));
       } else if (!ready) {
         capHit = true;
