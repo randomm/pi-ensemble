@@ -13,12 +13,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { ciRun as ciRunImpl, ciWatch as ciWatchImpl } from "./forge-ci.ts";
 import * as cmds from "./forge-commands.ts";
 import type { ForgeDetection, ForgeType } from "./forge-detect.ts";
 import {
   ForgeFieldError,
   asArray,
   asRecord,
+  makeMinimalIssue,
   makeMinimalPr,
   mapGhChecks,
   mapGhIssue,
@@ -27,11 +29,9 @@ import {
   mapGhPr,
   mapGhPrWithNumber,
   mapGhRepo,
-  mapGhRun,
   mapGlIssue,
   mapGlIssueLabel,
   mapGlMr,
-  mapGlPipeline,
   mapGlPipelineJobs,
   mapGlRepo,
   parsePlainTextIssue,
@@ -158,9 +158,6 @@ export type CiWatchResult =
   | { ok: true; run: NormalizedCIRun; terminal: boolean; timedOut: false }
   | { ok: true; run: NormalizedCIRun | undefined; terminal: false; timedOut: true };
 
-const DEFAULT_POLL_MS = 30_000;
-const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
-
 // ── The Forge object ─────────────────────────────────────────────────────
 
 export interface CreateForgeOpts {
@@ -241,7 +238,22 @@ export function createForge(det: ForgeDetection, opts: CreateForgeOpts = {}): Fo
     issueCreate: (title, body) =>
       withBodyFile(`create-${title.slice(0, 16)}`, body, (file) =>
         run(cmds.issueCreateCmd(forge, title, file), (stdout) => {
-          if (forge === "github") return mapGhIssue(asRecord(stdout));
+          if (forge === "github") {
+            // `gh issue create` has no `--json` — it prints the created issue's URL
+            // as plain text. `parsePrNumberFromResponse` handles both the plain
+            // URL and a JSON payload (forward-compat with a future `gh` that adds
+            // `--json` to create). A non-URL, non-JSON stdout must reject, NOT map
+            // silently to number 0.
+            const parsed = parsePrNumberFromResponse(stdout);
+            if (!parsed) {
+              throw new Error(
+                `forge issue create: could not parse issue number from response: ${stdout
+                  .trim()
+                  .slice(0, 120)}`,
+              );
+            }
+            return makeMinimalIssue(parsed);
+          }
           return mapGlIssue(asRecord(stdout));
         }),
       ),
@@ -380,35 +392,9 @@ export function createForge(det: ForgeDetection, opts: CreateForgeOpts = {}): Fo
 
     // ── CI ────────────────────────────────────────────────────────────────
 
-    ciWatch: async (runId, watchOpts) => {
-      const pollMs = watchOpts?.pollMs ?? DEFAULT_POLL_MS;
-      const timeoutMs = watchOpts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-      const now = watchOpts?.now ?? Date.now;
-      const sleep =
-        watchOpts?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-      const start = now();
-      const terminal = terminalCiFor(forge);
+    ciWatch: (runId, watchOpts) => ciWatchImpl(execFn, forge, cwd, owner, repo, runId, watchOpts),
 
-      let run: NormalizedCIRun | undefined;
-      for (;;) {
-        const stdout = await cmds.ciRunOnce(execFn, forge, cwd, owner, repo, runId);
-        const o = JSON.parse(stdout) as Record<string, unknown>;
-        run = forge === "github" ? mapGhRun(o) : mapGlPipeline(o);
-        if (terminal.has(run.status)) {
-          return { ok: true, run, terminal: true, timedOut: false };
-        }
-        if (now() - start >= timeoutMs) {
-          return { ok: true, run, terminal: false, timedOut: true };
-        }
-        await sleep(pollMs);
-      }
-    },
-
-    ciRun: (id) =>
-      cmds.ciRunOnce(execFn, forge, cwd, owner, repo, id).then((stdout) => {
-        const o = JSON.parse(stdout) as Record<string, unknown>;
-        return forge === "github" ? mapGhRun(o) : mapGlPipeline(o);
-      }),
+    ciRun: (id) => ciRunImpl(execFn, forge, cwd, owner, repo, id),
 
     // ── Merge readiness (SAFETY-CRITICAL) ─────────────────────────────────
 
