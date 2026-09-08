@@ -24,7 +24,7 @@ function assert(cond: boolean, msg: string) {
 }
 
 const stats = (o: Partial<MemoryStats>): MemoryStats => ({
-  project: "randomm/pi-ensemble",
+  project: "trail-openers/pi-rukas",
   rows: 100,
   byStatus: { active: 100 },
   byType: { decision: 60, fix: 40 },
@@ -102,7 +102,7 @@ const stats = (o: Partial<MemoryStats>): MemoryStats => ({
   process.env.VIPUNE_PROJECT = "";
   const fromGit = await resolveProject(process.cwd());
   assert(
-    fromGit === "randomm/pi-ensemble",
+    fromGit === "trail-openers/pi-rukas",
     `falls back to the git remote, reduced to owner/repo (got ${fromGit})`,
   );
   assert(
