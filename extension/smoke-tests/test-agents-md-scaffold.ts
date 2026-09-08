@@ -33,6 +33,7 @@ import {
 import { EXIT_CLEAN, EXIT_FINDINGS } from "../src/agents-md/check.ts";
 import { parseMarkers, presentIds } from "../src/agents-md/markers.ts";
 import { parseLedger, renderLedger } from "../src/agents-md/ledger.ts";
+import { sectionContentWithEnd } from "../src/agents-md/markers.ts";
 import {
   type OperatorAnswers,
   computeScaffold,
@@ -159,11 +160,9 @@ function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
   );
   assert(content.includes("80%+"), "scaffold with answers: coverage threshold recorded");
   assert(content.includes("MEDIUM"), "scaffold with answers: review-blocking severity recorded");
-  // Ledger has [asked:operator] rows.
-  const ledgerBody = content.slice(
-    content.indexOf("<!-- pi-ensemble:agents-md:begin decision-ledger"),
-    content.indexOf("<!-- pi-ensemble:agents-md:end decision-ledger"),
-  );
+  // Ledger has [asked:operator] rows. (Slice via the parser, not a
+  // hardcoded marker prefix — #627 dual-prefix rename.)
+  const ledgerBody = sectionContentWithEnd(content, "decision-ledger") ?? "";
   assert(
     parseLedger(ledgerBody).some((r) => r.provenance === "asked"),
     "scaffold with answers: [asked:operator] ledger rows present",
