@@ -309,3 +309,16 @@ export function sectionContentWithEnd(text: string, id: string): string | undefi
   if (!span) return undefined;
   return text.slice(span.contentStart, span.endMarkerEnd);
 }
+
+/**
+ * The managed content of `id` INCLUDING the end marker line (from the last
+ * content byte to one past the end marker). Useful for tests that need the
+ * full section (content + closing marker) in one slice without hardcoding
+ * marker prefixes. Returns undefined if the section is absent. Throws
+ * MarkerError on corruption.
+ */
+export function sectionContentWithEnd(text: string, id: string): string | undefined {
+  const span = parseMarkers(text).spans.find((s) => s.id === id);
+  if (!span) return undefined;
+  return text.slice(span.contentStart, span.endMarkerEnd);
+}
