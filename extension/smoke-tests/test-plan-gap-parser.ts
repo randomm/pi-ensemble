@@ -28,7 +28,6 @@ import {
   renderPriorContext,
 } from "../src/plan-draft.ts";
 import { parseGaps, parseGapsForTest, setPlanDispatch } from "../src/plan-driver.ts";
-import { registerPlanTool } from "../src/plan-tool.ts";
 import { planTitle } from "../src/plan-types.ts";
 
 let exit = 0;
@@ -372,13 +371,8 @@ function assert(cond: boolean, msg: string) {
 // angle) so the file stays under the 500-line limit.
 
 {
-  // Register the tool (the test-plan-tool.ts file does this too, but this
-  // test file runs standalone — we need the tool to invoke the pipeline).
-  // biome-ignore lint/suspicious/noExplicitAny: minimal stub; only registerTool is used
-  const fakePi = { registerTool: () => {} } as any;
-  // We don't actually need the registered tool — we call runPlanPipeline via
-  // the dispatch seam directly. But we DO need setPlanDispatch to intercept.
-
+  // The all-angles-failed guard is exercised via the dispatch seam directly
+  // (runPlanPipeline + setPlanDispatch); no tool registration is needed.
   const savedGate = process.env.PI_ENSEMBLE_PLAN_GAP_GATE;
   process.env.PI_ENSEMBLE_PLAN_GAP_GATE = "0";
 
@@ -446,5 +440,4 @@ function assert(cond: boolean, msg: string) {
   if (savedGate === undefined) delete process.env.PI_ENSEMBLE_PLAN_GAP_GATE;
   else process.env.PI_ENSEMBLE_PLAN_GAP_GATE = savedGate;
   setPlanDispatch(null);
-  void fakePi;
 }

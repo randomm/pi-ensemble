@@ -226,13 +226,7 @@ export function renderPriorContext(priorContext: { source: string; fact: string 
 
 function epicSubIssues(findings: AngleFindings[]): string[] {
   const subs = itemsByKind(findings, "sub-issue");
-  // #633: the prose line-split fallback is DELETED, not kept. It re-introduced
-  // the exact defect class this PR removes — any prose line >= 6 chars that
-  // survived the blocklist became a GitHub checkbox ("Deps: none", "## subIssues[]",
-  // "Task complete:" preambles). The driver's aggregate guard (plan-driver.ts)
-  // halts the pipeline before draftSpec when zero angles produced structured
-  // items, so this fallback is unreachable. Zero items → [] and the caller
-  // renders the existing "(decomposition not available)" fallback string.
+  // no prose fallback — the driver halts on all-angles-failed before reaching here
   if (subs.length === 0) return [];
   return subs.map((s, i) => `- [ ] #N — ${s.text} (sub-issue ${i + 1}, from ${s.angle})`);
 }
