@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { GH_TERMINAL_CI, GL_TERMINAL_CI, terminalCiFor } from "./forge-ci-terminal.ts";
 import { ciRun as ciRunImpl, ciWatch as ciWatchImpl } from "./forge-ci.ts";
 import * as cmds from "./forge-commands.ts";
 import type { ForgeDetection, ForgeType } from "./forge-detect.ts";
@@ -104,43 +105,6 @@ export interface Forge {
 
   // Repo settings
   repoSettings(): Promise<NormalizedRepo>;
-}
-
-// ── Terminal CI statuses ──────────────────────────────────────────────────
-
-/**
- * Terminal statuses for CI-watch, normalized to uppercase.
- *
- * - GitHub Actions run conclusions (uppercase after mapping): SUCCESS,
- *   FAILURE, CANCELED, NEUTRAL, SKIPPED, TIMED_OUT, STOPPED.
- * - GitLab pipeline terminal statuses (per the epic spec): SUCCESS, FAILED,
- *   CANCELED, SKIPPED, MANUAL. (GitLab's `manual` is terminal because the
- *   pipeline is waiting for a human trigger, not a bot.)
- *
- * The watch loop polls until the run/pipeline status lands in this set, or
- * the 30-minute cap fires.
- */
-export const GH_TERMINAL_CI: ReadonlySet<string> = new Set([
-  "COMPLETED",
-  "FAILURE",
-  "CANCELED",
-  "CANCELLED",
-  "NEUTRAL",
-  "SKIPPED",
-  "TIMED_OUT",
-  "STOPPED",
-]);
-
-export const GL_TERMINAL_CI: ReadonlySet<string> = new Set([
-  "SUCCESS",
-  "FAILED",
-  "CANCELED",
-  "SKIPPED",
-  "MANUAL",
-]);
-
-export function terminalCiFor(forge: ForgeType): ReadonlySet<string> {
-  return forge === "gitlab" ? GL_TERMINAL_CI : GH_TERMINAL_CI;
 }
 
 export interface CiWatchOpts {
@@ -490,3 +454,4 @@ export type {
 } from "./forge-types.ts";
 export * as forgeCommands from "./forge-commands.ts";
 export type { ForgeType, ForgeDetection } from "./forge-detect.ts";
+export { GL_TERMINAL_CI, GH_TERMINAL_CI, terminalCiFor } from "./forge-ci-terminal.ts";

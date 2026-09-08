@@ -152,6 +152,9 @@ function renderPlanResult(r: PlanResult, dryRun: boolean): string {
     } else if (r.capReason === "verdict-absent") {
       cap =
         "\n\nGAP GATE NOTE: the reviewer never wrote a verdict line; no CRITICAL/HIGH gaps were found, so the spec proceeded — but the absence is recorded here (the gate did not explicitly say READY).";
+    } else if (r.capReason === "gate-unavailable") {
+      cap =
+        "\n\nGAP GATE UNAVAILABLE: the gap-gate dispatch itself failed, so no reviewer ever saw the spec. It was NOT filed — the spec above is still valid to review, but re-run start_plan_driver after the gate failure is addressed (see the FILING STATUS below).";
     } else {
       cap = "\n\nGAP GATE CAP HIT: the iteration cap was reached. See the gap dispositions below.";
     }
@@ -161,10 +164,12 @@ function renderPlanResult(r: PlanResult, dryRun: boolean): string {
   let filingStatus = "";
   if (!dryRun && !r.filed && r.filingFailure) {
     const f = r.filingFailure;
-    if (f.reason === "cap-surface") {
-      // Deliberate skip (not a failure): the cap routed to surface, so no
-      // re-run message — the operator must resolve the CRITICAL/HIGH gaps
-      // first (they are listed in the cap message above).
+    if (f.reason === "cap-surface" || f.reason === "gate-unavailable") {
+      // Deliberate skip (not a failure): either the cap routed to surface
+      // (CRITICAL/HIGH gaps — the operator resolves them first, they are
+      // listed in the cap message above) or the gap gate never ran (no
+      // reviewer saw the spec — re-run after the gate failure is addressed).
+      // The spec is not filed by policy; no forging happened to diagnose.
       filingStatus = `\n\n=== FILING STATUS ===\nNot filed (by policy): ${f.detail}`;
     } else {
       filingStatus = `\n\n=== FILING STATUS ===\nFiling did not complete. Reason: ${f.reason}${f.detail ? ` — ${f.detail}` : ""}. The spec above is still valid to review and can be re-run after the cause is addressed.`;

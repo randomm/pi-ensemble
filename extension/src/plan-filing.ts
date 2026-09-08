@@ -9,6 +9,10 @@
  *   - `planForgeFor`: forge adapter resolution (detectForge + createForge),
  *   - `setPlanForge`: the injectable forge-resolution seam (tests),
  *   - the `FilingFailure` / `FilingResult` types (D7: discriminated reasons).
+ *
+ * The `FilingFailure.reason` union is declared ONCE here and re-exported;
+ * `PlanResult.filingFailure` (plan-types.ts) references this type, so a
+ * reason added on the filing side is forced onto the type side.
  */
 import { detectForge } from "./forge-detect.ts";
 import { type Forge, createForge } from "./forge.ts";
@@ -32,7 +36,8 @@ export interface FilingFailure {
     | "create-error"
     | "empty-url"
     | "skipped-all-angles-failed"
-    | "cap-surface";
+    | "cap-surface"
+    | "gate-unavailable";
   detail?: string;
 }
 
@@ -72,7 +77,10 @@ export async function fileIssue(
     }
     return { url };
   } catch (err) {
-    const msg = (err as Error).message;
+    // A non-Error throw (a plain string, as CLIs and JSON parsers throw)
+    // has no `.message` — casting to Error would leave the detail silently
+    // empty, degrading exactly the path D7 hardened. String() the fallback.
+    const msg = err instanceof Error ? err.message : String(err);
     trace(`plan-driver: forge issueCreate failed: ${msg}`);
     return { failure: { reason: "create-error", detail: msg } };
   }

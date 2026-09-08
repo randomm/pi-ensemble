@@ -339,9 +339,18 @@ export async function runPlanPipeline(
         { label: `plan-gap-gate-${iterations}` },
       );
       if (!gate.ok || gate.errorStop) {
+        // The gate never ran. We cannot assert a spec is clean when nothing
+        // reviewed it — this is the same failure class D3 closes for an
+        // absent verdict, two branches away ("gate never ran → pass" instead
+        // of "verdict absent → pass"). Do NOT file: set capHit + the
+        // discriminated capReason and surface to the operator with the gate's
+        // failure reason, matching the all-angles-failed halt (which bails
+        // before draftSpec for the same reason) and the cap-surface shape.
         trace(
-          `plan-driver: gap gate dispatch failed (iteration ${iterations}); proceeding with unresolved gate`,
+          `plan-driver: gap gate dispatch failed (iteration ${iterations}) — gate unavailable, not filing`,
         );
+        capHit = true;
+        capReason = "gate-unavailable";
         break;
       }
       lastParse = parseGaps(gate.text);
@@ -406,7 +415,7 @@ export async function runPlanPipeline(
   // the reason including the forge stderr, without requiring PI_ENSEMBLE_DEBUG.
   let issueUrl: string | undefined;
   let filingFailure: FilingFailure | undefined;
-  if (!dryRun && capReason !== "unresolved-blocking") {
+  if (!dryRun && capReason !== "unresolved-blocking" && capReason !== "gate-unavailable") {
     const fr = await fileIssue(title, finalBody, getPlanForge() ?? (() => planForgeFor(repoRoot)));
     issueUrl = fr.url;
     filingFailure = fr.failure;
@@ -418,6 +427,19 @@ export async function runPlanPipeline(
       reason: "cap-surface",
       detail:
         "the gap gate cap routed to surface (CRITICAL/HIGH gaps remain) — not filed by policy",
+    };
+  } else if (!dryRun && capReason === "gate-unavailable") {
+    // Deliberate skip, not a filing failure: the gap-gate dispatch itself
+    // failed, so NO REVIEWER EVER SAW THE SPEC. The spec is not filed because
+    // we cannot assert it is clean — the same posture as all-angles-failed
+    // (which bails before draftSpec for the same reason) and D3 (an absent
+    // verdict must not silently pass). Its own reason: the gap gate was
+    // unavailable; the operator re-runs start_plan_driver after the cause is
+    // addressed (the spec above is still valid to review).
+    filingFailure = {
+      reason: "gate-unavailable",
+      detail:
+        "the gap-gate dispatch failed — no reviewer ever saw the spec, so it was not filed (re-run start_plan_driver after the gate failure is addressed)",
     };
   }
 

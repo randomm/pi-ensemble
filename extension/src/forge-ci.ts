@@ -6,11 +6,11 @@
  * poll loop and the one-shot run fetch in a single cohesive module.
  */
 
+import { terminalCiFor } from "./forge-ci-terminal.ts";
 import * as cmds from "./forge-commands.ts";
 import type { ForgeType } from "./forge-detect.ts";
 import { mapGhRun, mapGlPipeline } from "./forge-mapping.ts";
 import type { CiWatchOpts, CiWatchResult, ForgeExecFn, NormalizedCIRun } from "./forge.ts";
-import { terminalCiFor } from "./forge.ts";
 
 const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;

@@ -4,7 +4,11 @@
  * 500-line hard limit (AGENTS.md §12). Phase 0 (classify + title) lives here
  * because it is pure, stateless, and consumed by both the driver and the
  * tests.
+ *
+ * The `FilingFailure` type is a type-only import from plan-filing.ts —
+ * erased at compile time, so no runtime edge between the two modules.
  */
+import type { FilingFailure } from "./plan-filing.ts";
 
 export const PLAN_TYPES = ["bug", "feature", "epic", "chore", "spike"] as const;
 export type PlanType = (typeof PLAN_TYPES)[number];
@@ -48,26 +52,25 @@ export interface PlanResult {
    * `residual-medium-low` (D2: routed to filing with disclosure) vs
    * `unresolved-blocking` (not filed, surfaced) vs `verdict-absent` (D3: the
    * reviewer never wrote a verdict line; MEDIUM/LOW-only, so READY was
-   * acceptable but the absence is recorded).
+   * acceptable but the absence is recorded) vs `gate-unavailable` (the
+   * gap-gate dispatch itself failed, so no reviewer ever saw the spec —
+   * not filed, surfaced, matching the all-angles-failed halt).
    */
-  capReason?: "residual-medium-low" | "unresolved-blocking" | "verdict-absent";
+  capReason?: "residual-medium-low" | "unresolved-blocking" | "verdict-absent" | "gate-unavailable";
   /**
    * D7: a DISCRIMINATED filing failure (or deliberate skip) carried on the
    * result so the operator-visible text can say WHY the issue did not file
    * — forge-unresolved / create-error (detail carries the forge stderr) /
    * empty-url / cap-surface (the gap-gate cap routed to surface, so the
-   * spec was not filed BY POLICY — nothing failed) — instead of the
-   * generic "filing failed or was blocked".
+   * spec was not filed BY POLICY — nothing failed) / gate-unavailable
+   * (the gap-gate dispatch itself failed, so no reviewer ever saw the spec)
+   * — instead of the generic "filing failed or was blocked".
+   *
+   * The reason union is declared once in plan-filing.ts (FilingFailure) and
+   * referenced here — a member added on the filing side is forced onto this
+   * type, and vice versa.
    */
-  filingFailure?: {
-    reason:
-      | "forge-unresolved"
-      | "create-error"
-      | "empty-url"
-      | "skipped-all-angles-failed"
-      | "cap-surface";
-    detail?: string;
-  };
+  filingFailure?: FilingFailure;
 }
 
 export interface PlanDriverInput {
