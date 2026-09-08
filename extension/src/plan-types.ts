@@ -55,10 +55,17 @@ export interface PlanResult {
    * D7: a DISCRIMINATED filing failure (or deliberate skip) carried on the
    * result so the operator-visible text can say WHY the issue did not file
    * — forge-unresolved / create-error (detail carries the forge stderr) /
-   * empty-url — instead of the generic "filing failed or was blocked".
+   * empty-url / cap-surface (the gap-gate cap routed to surface, so the
+   * spec was not filed BY POLICY — nothing failed) — instead of the
+   * generic "filing failed or was blocked".
    */
   filingFailure?: {
-    reason: "forge-unresolved" | "create-error" | "empty-url" | "skipped-all-angles-failed";
+    reason:
+      | "forge-unresolved"
+      | "create-error"
+      | "empty-url"
+      | "skipped-all-angles-failed"
+      | "cap-surface";
     detail?: string;
   };
 }

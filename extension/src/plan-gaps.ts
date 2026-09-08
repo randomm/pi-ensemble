@@ -129,7 +129,7 @@ export function evaluateGapGate(parsed: GapGateParse, iterations: number, maxIte
  *     resolution). The disclosure is the precondition for filing.
  *   - any CRITICAL or HIGH remaining → do NOT file; surface to the operator.
  */
-export function capRouted(blocking: PlanGap[], residual: PlanGap[]): "file" | "surface" {
+export function capRouted(blocking: PlanGap[]): "file" | "surface" {
   return blocking.length === 0 ? "file" : "surface";
 }
 

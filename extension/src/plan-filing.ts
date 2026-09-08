@@ -20,9 +20,19 @@ import { trace } from "./trace.ts";
  * blocked" covered at least four situations (forge unresolved, create threw,
  * empty url, all-angles-failed skip) and the forge stderr reached only a
  * trace() call behind PI_ENSEMBLE_DEBUG=1.
+ *
+ * `cap-surface` is the DELIBERATE-SKIP case: at the gap-gate iteration cap
+ * with CRITICAL/HIGH gaps remaining, the spec is NOT filed by policy (it is
+ * surfaced to the operator). Nothing failed to resolve, so it must NOT
+ * reuse `forge-unresolved`.
  */
 export interface FilingFailure {
-  reason: "forge-unresolved" | "create-error" | "empty-url" | "skipped-all-angles-failed";
+  reason:
+    | "forge-unresolved"
+    | "create-error"
+    | "empty-url"
+    | "skipped-all-angles-failed"
+    | "cap-surface";
   detail?: string;
 }
 

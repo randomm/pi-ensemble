@@ -377,16 +377,16 @@ export function parsePrNumberFromResponse(
   } catch {
     // Not JSON — try plain-text URL extraction.
   }
-  // Plain-text URL shapes: the whole line is the URL, so capture it in full
-  // (trimmed) so the caller can carry it on the Normalized* result. The
-  // number is the trailing numeric path segment.
-  const ghPull = stdout.match(/https?:\/\/[^\s]+\/pull\/(\d+)/);
+  // Plain-text URL shapes: the URL is the trimmed line, but the capture must
+  // stop at `#` (anchor fragments like `#discussion_r123`) or whitespace so
+  // the caller carries a CLEAN url, not the fragment-carrying prose.
+  const ghPull = stdout.match(/https?:\/\/[^\s#]+\/pull\/(\d+)/);
   if (ghPull?.[1]) return { number: Number.parseInt(ghPull[1], 10), url: ghPull[0] };
-  const ghIssue = stdout.match(/https?:\/\/[^\s]+\/issues\/(\d+)/);
+  const ghIssue = stdout.match(/https?:\/\/[^\s#]+\/issues\/(\d+)/);
   if (ghIssue?.[1]) return { number: Number.parseInt(ghIssue[1], 10), url: ghIssue[0] };
-  const glMr = stdout.match(/https?:\/\/[^\s]+-\/merge_requests\/(\d+)/);
+  const glMr = stdout.match(/https?:\/\/[^\s#]+-\/merge_requests\/(\d+)/);
   if (glMr?.[1]) return { number: Number.parseInt(glMr[1], 10), url: glMr[0] };
-  const glIssue = stdout.match(/https?:\/\/[^\s]+-\/issues\/(\d+)/);
+  const glIssue = stdout.match(/https?:\/\/[^\s#]+-\/issues\/(\d+)/);
   if (glIssue?.[1]) return { number: Number.parseInt(glIssue[1], 10), url: glIssue[0] };
   return undefined;
 }

@@ -373,7 +373,7 @@ export async function runPlanPipeline(
         // D2 + D1: at the cap, the routing policy (plan-gaps.ts: capRouted)
         // decides file-vs-surface, and the REASON is discriminated so the
         // operator-visible text names the ACTUAL cause.
-        const route = capRouted(evald.blocking, gaps);
+        const route = capRouted(evald.blocking);
         capReason = route === "file" ? "residual-medium-low" : "unresolved-blocking";
         if (route === "file") {
           residualForDisclosure = gaps;
@@ -411,8 +411,11 @@ export async function runPlanPipeline(
     issueUrl = fr.url;
     filingFailure = fr.failure;
   } else if (!dryRun && capReason === "unresolved-blocking") {
+    // Deliberate skip, not a failure: the gap-gate cap routed to surface
+    // (CRITICAL/HIGH gaps remain), so the spec is NOT filed by policy.
+    // Its own reason — nothing failed to resolve here.
     filingFailure = {
-      reason: "forge-unresolved",
+      reason: "cap-surface",
       detail:
         "the gap gate cap routed to surface (CRITICAL/HIGH gaps remain) — not filed by policy",
     };

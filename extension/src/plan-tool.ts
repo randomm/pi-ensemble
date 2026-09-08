@@ -161,7 +161,14 @@ function renderPlanResult(r: PlanResult, dryRun: boolean): string {
   let filingStatus = "";
   if (!dryRun && !r.filed && r.filingFailure) {
     const f = r.filingFailure;
-    filingStatus = `\n\n=== FILING STATUS ===\nFiling did not complete. Reason: ${f.reason}${f.detail ? ` — ${f.detail}` : ""}. The spec above is still valid to review and can be re-run after the cause is addressed.`;
+    if (f.reason === "cap-surface") {
+      // Deliberate skip (not a failure): the cap routed to surface, so no
+      // re-run message — the operator must resolve the CRITICAL/HIGH gaps
+      // first (they are listed in the cap message above).
+      filingStatus = `\n\n=== FILING STATUS ===\nNot filed (by policy): ${f.detail}`;
+    } else {
+      filingStatus = `\n\n=== FILING STATUS ===\nFiling did not complete. Reason: ${f.reason}${f.detail ? ` — ${f.detail}` : ""}. The spec above is still valid to review and can be re-run after the cause is addressed.`;
+    }
   }
   return `${head}
 

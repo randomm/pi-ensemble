@@ -220,6 +220,12 @@ installForgeStub();
     forgeStub.created.length === 0,
     `D2: no filing happened (forge calls: ${forgeStub.created.length})`,
   );
+  // Finding 1 (adversarial review): the deliberate cap-surface skip must NOT
+  // reuse the `forge-unresolved` reason — nothing failed to resolve here.
+  assert(
+    r2.filingFailure?.reason === "cap-surface",
+    `D2: filingFailure.reason is cap-surface, not forge-unresolved (got ${r2.filingFailure?.reason})`,
+  );
 
   // Canary: a silent swallow (filing without disclosure) would be caught.
   const silentSwallowBody = "spec without residual section";

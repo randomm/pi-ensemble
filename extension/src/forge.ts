@@ -254,7 +254,23 @@ export function createForge(det: ForgeDetection, opts: CreateForgeOpts = {}): Fo
             }
             return makeMinimalIssue(parsed);
           }
-          return mapGlIssue(asRecord(stdout));
+          // `glab issue create` (no --output json) prints the created issue's
+          // URL as plain text — the same shape the GitHub path handles above.
+          // Its own `prCreate` sibling on this forge already tolerates BOTH
+          // shapes (JSON or bare URL); this path must agree.
+          const parsedGl = parsePrNumberFromResponse(stdout);
+          if (!parsedGl) {
+            throw new Error(
+              `forge issue create: could not parse issue number from response: ${stdout
+                .trim()
+                .slice(0, 120)}`,
+            );
+          }
+          try {
+            return mapGlIssue(asRecord(stdout));
+          } catch {
+            return makeMinimalIssue(parsedGl);
+          }
         }),
       ),
 
