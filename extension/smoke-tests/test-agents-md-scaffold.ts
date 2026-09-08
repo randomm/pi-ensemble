@@ -22,6 +22,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { parseMarkers } from "../src/agents-md/markers.ts";
 import {
   type AgentsMdFs,
   checkAgent,
