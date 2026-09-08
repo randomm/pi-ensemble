@@ -18,16 +18,17 @@
  *     create-error with stderr, empty-url) on the result and in the
  *     operator-visible text
  *
+ * The corrective-round tests (NO-OP, CRITICAL-STILL-ITERATES, UNION,
+ * re-pointed RATCHETING) are in test-plan-gap-gate-rounds.ts.
+ *
  * The pure parsing seam (parseGaps / verdictParsed / draftSpec status) is
  * unit-tested in test-plan-gap-parser.ts. The registration + dryRun seam is
  * in test-plan-tool.ts.
  */
 
-import { codeIdentifiersIn } from "../src/plan-draft.ts";
 import { setPlanDispatch } from "../src/plan-driver.ts";
 import { setPlanForge } from "../src/plan-filing.ts";
 import { runPlanPipeline } from "../src/plan-driver.ts";
-import type { DispatchResult } from "../src/types.ts";
 import type { Forge } from "../src/forge.ts";
 
 let exit = 0;
@@ -78,17 +79,14 @@ function clearForgeStub() {
  * items), and the gate child replies per the provided gateReply.
  *
  * The gate reply may be a single string (fixed reply, legacy) or an
- * array — one reply per gate iteration, in order. The array form is what
- * the RATCHETING case needs: N rounds each returning DIFFERENT fresh HIGH
- * findings (the non-deterministic-reviewer shape #664 measured: zero
- * CRITICAL/HIGH on one run, 1 CRITICAL + 6 HIGH sixty seconds later).
+ * array — one reply per gate iteration, in order.
  */
 function makeDispatchStub(gateReply: string | string[]) {
   const replies = Array.isArray(gateReply) ? gateReply : [gateReply];
   let gateIteration = 0;
   return ((pi: unknown, spec: { role: string; prompt: string }) => {
-    gatePrompts.push(spec.prompt);
     if (spec.role === "adversarial-developer") {
+      gatePrompts.push(spec.prompt);
       const text = replies[gateIteration] ?? replies[replies.length - 1] ?? "";
       gateIteration++;
       return Promise.resolve({
@@ -132,10 +130,10 @@ installForgeStub();
 // ----------------------------------------------- D1: cap message names the real cause
 
 {
-  // D1: a MEDIUM-only NEEDS_ITERATION reply burns both iterations, hits the
-  // cap, and the operator-visible message must name the ACTUAL cause — the
-  // reviewer asked for another iteration over MEDIUM/LOW items — NOT the old
-  // "unresolved CRITICAL/HIGH gaps remain" (which was false for this case).
+  // D1 (re-pointed): a MEDIUM-only NEEDS_ITERATION reply hits the cap
+  // IMMEDIATELY (one dispatch — the no-op corrective round is eliminated).
+  // The operator-visible capReason must name the ACTUAL cause (residual-
+  // medium-low), NOT the old "unresolved CRITICAL/HIGH gaps remain".
   const mediumGateReply =
     "GAP: MEDIUM criterion 2 is ambiguous — proposed resolution: sharpen criterion 2\n" +
     "GAP: LOW heading is cosmetic — proposed resolution: retitle\n" +
@@ -148,14 +146,14 @@ installForgeStub();
     process.cwd(),
   );
 
-  assert(result.capHit === true, "D1: MEDIUM-only NEEDS_ITERATION burns the cap");
+  assert(result.capHit === true, "D1: MEDIUM-only NEEDS_ITERATION hits the cap");
   assert(
     result.capReason === "residual-medium-low",
     `D1: capReason is 'residual-medium-low' (got ${result.capReason})`,
   );
   assert(
-    gatePrompts.length - gatePromptsBefore >= 2,
-    `D1: both gate iterations ran (got ${gatePrompts.length - gatePromptsBefore})`,
+    gatePrompts.length - gatePromptsBefore === 1,
+    `D1: exactly ONE gate dispatch (got ${gatePrompts.length - gatePromptsBefore})`,
   );
 
   // Canary: the old message (D1 defect) would have been caught.
@@ -171,12 +169,12 @@ installForgeStub();
 // ----------------------------------------------- D2: cap routes, not only stops
 
 {
-  // D2: at the iteration cap, zero CRITICAL/HIGH gaps remaining → FILE the
+  // D2: at the iteration cap, zero CRITICAL gaps remaining → FILE the
   // spec with the residual MEDIUM/LOW gaps disclosed in a "## Residual
   // gap-gate findings" section. Direct precedent: /work's lens round cap
   // (AGENTS.md §7: "The round cap routes, it does not only stop").
 
-  // Case 1: zero CRITICAL/HIGH at the cap → file with disclosure.
+  // Case 1: zero CRITICAL at the cap → file with disclosure.
   const mediumOnly =
     "GAP: MEDIUM clarify the boundary — proposed resolution: add a criterion\n" +
     "GAP: LOW cosmetic heading — proposed resolution: retitle\n" +
@@ -192,7 +190,7 @@ installForgeStub();
     process.cwd(),
   );
 
-  assert(r1.filed === true, `D2: zero CRITICAL/HIGH at cap → FILED (got filed=${r1.filed})`);
+  assert(r1.filed === true, `D2: zero CRITICAL at cap → FILED (got filed=${r1.filed})`);
   assert(r1.capHit === true, "D2: capHit is true");
   assert(
     r1.capReason === "residual-medium-low",
@@ -252,65 +250,6 @@ installForgeStub();
     `D2: filingFailure.reason is cap-surface, not forge-unresolved (got ${r2.filingFailure?.reason})`,
   );
 
-  // RATCHETING (#664 transposed): N gate rounds each returning DIFFERENT
-  // fresh HIGH findings — the shape of a non-deterministic reviewer. Under
-  // the old CRITICAL-or-HIGH filter this stream would never converge
-  // ("every sentence I add to satisfy one finding is a new falsifiable
-  // claim that generates the next"); under the CRITICAL-only terminal
-  // rule it must FILE, capReason residual-high, every HIGH disclosed in
-  // the residual section, and capReason must NEVER be unresolved-blocking.
-  const ratchetingReplies = [
-    "GAP: HIGH the mock curl's -o flag is unspecified — proposed resolution: name the output file\n" +
-      "GAP: HIGH the grep needle substring-matches adjacent text — proposed resolution: anchor the pattern\n" +
-      "VERDICT: NEEDS_ITERATION",
-    "GAP: HIGH the retry count uses $COUNT instead of an arithmetic expression — proposed resolution: use $((COUNT + 1))\n" +
-      "GAP: HIGH the fixture path is hardcoded to a developer checkout — proposed resolution: derive it from the repo root\n" +
-      "VERDICT: NEEDS_ITERATION",
-  ];
-  forgeStub.created.length = 0;
-  forgeStub.mode = "ok";
-  setPlanDispatch(makeDispatchStub(ratchetingReplies) as never);
-
-  const r3 = await runPlanPipeline(
-    {} as never,
-    { descriptor: "add a start_plan_driver tool for the plan pipeline in extension" },
-    process.cwd(),
-  );
-
-  assert(
-    r3.filed === true,
-    `RATCHETING: fresh-HIGH stream at the cap → FILED (got filed=${r3.filed})`,
-  );
-  assert(r3.capHit === true, "RATCHETING: capHit is true");
-  assert(
-    r3.capReason === "residual-high",
-    `RATCHETING: capReason is residual-high (got ${r3.capReason})`,
-  );
-  assert(
-    r3.capReason !== "unresolved-blocking",
-    "RATCHETING: the cap never routes a HIGH-only stream to unresolved-blocking",
-  );
-  const ratchetedBody = forgeStub.created[0]?.body ?? "";
-  assert(
-    ratchetedBody.includes("## Residual gap-gate findings"),
-    "RATCHETING: the filed spec carries the residual section",
-  );
-  assert(
-    ratchetedBody.includes("[HIGH]"),
-    "RATCHETING: the residual HIGHs are disclosed with severity",
-  );
-  // The last round's HIGHs are what the driver keeps in `gaps` and
-  // discloses in the residual section. The round-1 HIGHs were not blocking
-  // (CRITICAL-only) so they were not carried into openQuestions; they are
-  // not in the residual. This is the intended behaviour: the residual
-  // section discloses what the LAST round found (the most current
-  // assessment), which is the same shape as the existing residual section
-  // for MEDIUM/LOW (one destination, no second transport).
-  assert(
-    ratchetedBody.includes("COUNT") && ratchetedBody.includes("fixture path"),
-    "RATCHETING: the round-2 (last) HIGH findings are disclosed in the residual section",
-  );
-
   // Verdict-absent interaction: an ABSENT verdict with only HIGH gaps
   // now PASSES (HIGH no longer blocks); an ABSENT verdict with a CRITICAL
   // gap still routes NEEDS_ITERATION (the D3 posture — silence must not
@@ -353,8 +292,7 @@ installForgeStub();
     `verdict-absent + CRITICAL: capReason unresolved-blocking (got ${r5.capReason})`,
   );
   // The corrective round fires: 2 gate dispatches ran (round 1: CRITICAL,
-  // round 2: same CRITICAL reply → cap). gatePrompts is a global array that
-  // accumulated prompts from earlier test blocks, so use a local counter.
+  // round 2: same CRITICAL reply → cap).
   const gatePromptsBeforeR5 = gatePrompts.length;
   void gatePromptsBeforeR5; // (already captured above; the delta check is
   // implicit in the r5.capReason === "unresolved-blocking" assertion, which

@@ -84,11 +84,10 @@ export function setPlanDispatch(fn: PlanDispatchFn | null): void {
   _dispatchOverride = fn;
 }
 import {
-  type GapGateParse,
-  capRouted,
-  evaluateGapGate,
+  type GapGateLoopResult,
   parseGaps,
   residualGapsSection,
+  runGapGateLoop,
 } from "./plan-gaps.ts";
 import {
   type PlanDriverInput,
@@ -336,44 +335,26 @@ export async function runPlanPipeline(
   let capHit = false;
   let capReason: PlanResult["capReason"];
   let residualForDisclosure: PlanGap[] = [];
-  let lastParse: GapGateParse | undefined;
 
   if (gapGateEnabled) {
-    let iterations = 0;
-    let ready = false;
-    while (iterations < GAP_GATE_MAX_ITERATIONS && !ready) {
-      iterations++;
-      const gate = await dispatch(
-        pi,
-        { role: "adversarial-developer", prompt: gapGatePrompt(body, findings, priorContext) },
-        { label: `plan-gap-gate-${iterations}` },
-      );
-      if (!gate.ok || gate.errorStop) {
-        // The gate never ran. We cannot assert a spec is clean when nothing
-        // reviewed it — this is the same failure class D3 closes for an
-        // absent verdict, two branches away ("gate never ran → pass" instead
-        // of "verdict absent → pass"). Do NOT file: set capHit + the
-        // discriminated capReason and surface to the operator with the gate's
-        // failure reason, matching the all-angles-failed halt (which bails
-        // before draftSpec for the same reason) and the cap-surface shape.
-        trace(
-          `plan-driver: gap gate dispatch failed (iteration ${iterations}) — gate unavailable, not filing`,
-        );
-        capHit = true;
-        capReason = "gate-unavailable";
-        break;
-      }
-      lastParse = parseGaps(gate.text);
-      gaps = lastParse.gaps;
-      const evald = evaluateGapGate(lastParse, iterations, GAP_GATE_MAX_ITERATIONS);
-      ready = evald.ready;
-      if (!ready && evald.corrective) {
-        for (const g of evald.blocking) {
-          // Bug 3 (#606): gaps from this round are carried into the re-draft
-          // with the reviewer's proposed resolution attached and tagged so
-          // draftSpec renders them as `status: resolved` (the spec now states
-          // the decision, re-reviewed next round), not the old hard-coded
-          // `status: pending`.
+    // Phase 4 — the gap-gate loop (extracted to plan-gaps.ts: runGapGateLoop).
+    // Two fixes from the CRITICAL-only terminal rule follow-up:
+    // 1. NO-OP ROUND ELIMINATED: corrective fires only when blocking is
+    //    non-empty (CRITICAL present); zero CRITICAL → straight to cap/file.
+    // 2. UNION DISCLOSURE: non-blocking findings accumulate across rounds
+    //    (deduped by exact description string), so the residual section
+    //    discloses the union, not just the last round.
+    const loopResult: GapGateLoopResult = await runGapGateLoop(
+      dispatch,
+      pi,
+      () => gapGatePrompt(body, findings, priorContext),
+      GAP_GATE_MAX_ITERATIONS,
+      (blocking: PlanGap[]) => {
+        // Bug 3 (#606): blocking (CRITICAL) gaps are carried into the
+        // re-draft with the reviewer's proposed resolution attached and
+        // tagged so draftSpec renders them as `status: resolved` (the spec
+        // now states the decision, re-reviewed next round).
+        for (const g of blocking) {
           g.status = "resolved";
           openQuestions.push(`resolved: ${g.description} — proposed resolution: ${g.resolution}`);
         }
@@ -387,35 +368,12 @@ export async function runPlanPipeline(
           depth,
           directives,
         ));
-      } else if (!ready) {
-        capHit = true;
-        // D2 + D1: at the cap, the routing policy (plan-gaps.ts: capRouted)
-        // decides file-vs-surface, and the REASON is discriminated so the
-        // operator-visible text names the ACTUAL cause. CRITICAL-only
-        // blocks (#664 transposed): HIGH findings travel in the residual
-        // disclosure (capReason residual-high) and MEDIUM/LOW travel too
-        // (capReason residual-medium-low); only a surviving CRITICAL
-        // routes to unresolved-blocking.
-        const route = capRouted(evald.blocking);
-        capReason =
-          route === "file"
-            ? gaps.some((g) => g.severity === "HIGH")
-              ? "residual-high"
-              : "residual-medium-low"
-            : "unresolved-blocking";
-        if (route === "file") {
-          residualForDisclosure = gaps;
-        }
-      }
-    }
-    // D3: an ABSENT verdict with only HIGH/MEDIUM/LOW gaps records that the
-    // verdict was missing so it can be surfaced (READY is acceptable for
-    // HIGH/MEDIUM/LOW-only — the CRITICAL-only terminal rule makes an
-    // absent verdict worth re-dispatching only when a CRITICAL is present
-    // — but the operator should know the gate did not explicitly say so).
-    if (lastParse && !lastParse.verdictParsed && !capHit) {
-      capReason = "verdict-absent";
-    }
+      },
+    );
+    gaps = loopResult.gaps;
+    capHit = loopResult.capHit;
+    capReason = loopResult.capReason;
+    residualForDisclosure = loopResult.residualForDisclosure;
   }
 
   // D2: when the cap routed to filing, the spec that gets filed carries the

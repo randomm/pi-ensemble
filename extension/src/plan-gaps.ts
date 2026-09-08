@@ -164,3 +164,137 @@ export function residualGapsSection(residual: PlanGap[]): string {
     .join("\n");
   return `## Residual gap-gate findings\n\n${items}\n`;
 }
+
+// ---------------------------------------------------------------------------
+// runGapGateLoop — the Phase-4 gate loop, extracted from plan-driver.ts
+// ---------------------------------------------------------------------------
+
+export type GapGateLoopCapReason =
+  | "residual-medium-low"
+  | "residual-high"
+  | "unresolved-blocking"
+  | "verdict-absent"
+  | "gate-unavailable";
+
+export interface GapGateLoopResult {
+  gaps: PlanGap[];
+  capHit: boolean;
+  capReason?: GapGateLoopCapReason;
+  residualForDisclosure: PlanGap[];
+}
+
+/**
+ * Run the gap-gate loop: dispatch the reviewer, parse the reply, decide
+ * READY / corrective / cap, and accumulate non-blocking findings across
+ * rounds (the residual disclosure is the UNION, not just the last round).
+ *
+ * Two fixes from the CRITICAL-only terminal rule follow-up:
+ *
+ * 1. NO-OP ROUND ELIMINATED: a corrective round fires only when blocking
+ *    is non-empty (CRITICAL present). With zero CRITICAL, the corrective
+ *    branch would iterate over an empty array, push nothing to openQuestions,
+ *    and call draftSpec again producing a byte-identical body — a provably
+ *    useless second round. The gate goes straight to the cap/file path.
+ *
+ * 2. UNION DISCLOSURE: non-blocking findings are accumulated across rounds
+ *    (deduped by exact description string only — no fuzzy matching), so the
+ *    residual section discloses what the reviewer found across ALL rounds,
+ *    not just the last.
+ */
+export async function runGapGateLoop<P>(
+  dispatch: (
+    pi: P,
+    spec: { role: string; prompt: string },
+    opts?: { label: string },
+  ) => Promise<{ ok: boolean; errorStop?: unknown; text: string; toolUses: unknown[] }>,
+  pi: P,
+  makeGatePrompt: () => string,
+  maxIterations: number,
+  onCorrective: (blocking: PlanGap[]) => void,
+): Promise<GapGateLoopResult> {
+  let iterations = 0;
+  let ready = false;
+  let capHit = false;
+  let capReason: GapGateLoopCapReason | undefined;
+  let lastGaps: PlanGap[] = [];
+  let lastParse: GapGateParse | undefined;
+  // Problem 2: accumulate non-blocking findings across rounds (union, deduped
+  // by exact description string only — no fuzzy matching).
+  const seenDescriptions = new Set<string>();
+  const allNonBlocking: PlanGap[] = [];
+
+  while (iterations < maxIterations && !ready) {
+    iterations++;
+    const gate = await dispatch(
+      pi,
+      { role: "adversarial-developer", prompt: makeGatePrompt() },
+      { label: `plan-gap-gate-${iterations}` },
+    );
+    if (!gate.ok || gate.errorStop) {
+      capHit = true;
+      capReason = "gate-unavailable";
+      break;
+    }
+    lastParse = parseGaps(gate.text);
+    lastGaps = lastParse.gaps;
+
+    // Problem 2: accumulate non-blocking findings (CRITICAL travels via the
+    // blocking path; HIGH/MEDIUM/LOW accumulate here for the residual union).
+    for (const g of lastGaps) {
+      if (g.severity !== "CRITICAL" && !seenDescriptions.has(g.description)) {
+        seenDescriptions.add(g.description);
+        allNonBlocking.push(g);
+      }
+    }
+
+    const evald = evaluateGapGate(lastParse, iterations, maxIterations);
+    ready = evald.ready;
+    if (!ready && evald.corrective && evald.blocking.length > 0) {
+      // Problem 1: corrective round fires ONLY when blocking is non-empty.
+      // With zero CRITICAL, the corrective branch would iterate over an
+      // empty array, push nothing to openQuestions, and call draftSpec again
+      // producing a byte-identical body — a provably useless second round.
+      // Go straight to the cap/file path instead.
+      for (const g of evald.blocking) {
+        g.status = "resolved";
+      }
+      onCorrective(evald.blocking);
+    } else if (!ready) {
+      // Two cases reach here:
+      // (a) at the cap (corrective is false) — the iteration budget is
+      //     exhausted; apply the routing policy.
+      // (b) zero CRITICAL (blocking is empty) — the corrective round would
+      //     be a no-op (empty array, byte-identical body); go straight to
+      //     the cap/file path.
+      capHit = true;
+      const route = capRouted(evald.blocking);
+      capReason =
+        route === "file"
+          ? lastGaps.some((g) => g.severity === "HIGH")
+            ? "residual-high"
+            : "residual-medium-low"
+          : "unresolved-blocking";
+      // The gate has produced its routing decision. Stop here — a second
+      // dispatch would be a provably useless no-op (case b) or a cap
+      // overrun (case a).
+      break;
+    }
+  }
+
+  // D3: an ABSENT verdict with only HIGH/MEDIUM/LOW gaps records that the
+  // verdict was missing.
+  if (lastParse && !lastParse.verdictParsed && !capHit) {
+    capReason = "verdict-absent";
+  }
+
+  // Problem 2: the residual disclosure is the UNION of all non-blocking
+  // findings across all rounds (deduped by exact description string).
+  const residualForDisclosure = capHit && allNonBlocking.length > 0 ? allNonBlocking : [];
+
+  return {
+    gaps: lastGaps,
+    capHit,
+    capReason,
+    residualForDisclosure,
+  };
+}
