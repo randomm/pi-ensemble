@@ -23,7 +23,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { codeIdentifiersIn, draftSpec } from "../src/plan-draft.ts";
-import { parseGaps, setPlanDispatch } from "../src/plan-driver.ts";
+import { parseGaps, parseGapsForTest, setPlanDispatch } from "../src/plan-driver.ts";
 import { registerPlanTool } from "../src/plan-tool.ts";
 import { type PlanType, classifyPlanType, planTitle } from "../src/plan-types.ts";
 import type { DispatchResult } from "../src/types.ts";
@@ -48,8 +48,18 @@ const calls: string[] = [];
 const gatePrompts: string[] = [];
 let gateReplyOverride: string | null = null;
 
-function __responses(spec: { role: string; prompt: string }): DispatchResult {
+function __responses(
+  spec: { role: string; prompt: string },
+): DispatchResult {
   if (spec.role === "adversarial-developer") {
+    // Bug 3 (#606) regression: the gate child is called twice in this
+    // fixture's flow. Round 1 returns two CRITICAL/HIGH gaps via the
+    // structured GAP: markers; round 2 re-raises both of them (the stub's
+    // old hard-coded NEEDS_ITERATION reply, now in the marker form the new
+    // parser requires) and the second-iteration cap is hit — the re-draft
+    // itself carries the round-1 gaps as `status: resolved` (Bug 3), which
+    // the assertions below pin. The stub also records the FULL gate prompts
+    // (gatePrompts[]) so the suite can assert what each round's prompt said.
     gatePrompts.push(spec.prompt);
     return {
       role: "adversarial-developer",
@@ -146,6 +156,7 @@ const FAKE_CTX = { cwd: process.cwd() } as never;
 async function invoke(params: Record<string, unknown>) {
   const t = tools.find((x) => x.name === "start_plan_driver")!;
   calls.length = 0;
+  gatePrompts.length = 0;
   const out = (await t.execute("id", params, undefined, undefined, FAKE_CTX)) as {
     content: Array<{ type: string; text: string }>;
     details: Record<string, unknown>;
@@ -180,9 +191,28 @@ async function invoke(params: Record<string, unknown>) {
   );
   assert(
     details.capHit === true,
-    "Phase 4: the second iteration cap hit is surfaced (no infinite loop)",
+    "Phase 4: the second iteration cap hit is surfaced (stub re-raises the same gaps)",
   );
   assert((details.gapCount ?? 0) >= 2, `gaps returned with severity: ${details.gapCount}`);
+  // Bug 3 (#606): the round-2 gate child receives the re-draft, and the
+  // round-1 blocking gaps it carries render as `status: resolved` (they
+  // now state a decision) — never the old hard-coded `status: pending`.
+  assert(
+    gatePrompts.length === 2,
+    `gate prompt capture: 2 gate dispatches recorded (got ${gatePrompts.length})`,
+  );
+  assert(
+    gatePrompts[1]?.includes("status: resolved") === true,
+    "Bug 3: round-2 gate prompt carries the re-draft with prior gaps as status: resolved",
+  );
+  assert(
+    gatePrompts[1]?.includes("status: pending") !== true,
+    "Bug 3: round-2 re-injection no longer renders carried gaps as status: pending",
+  );
+  assert(
+    gatePrompts[1]?.includes("missing acceptance criterion") === true,
+    "Bug 3: the round-1 gap text travels into the re-draft's Open Questions section",
+  );
   assert(
     /prior-art|interfaces-and-contracts|test-surface/.test(text),
     "the spec carries the type-specialised angle names",
@@ -328,6 +358,56 @@ async function invoke(params: Record<string, unknown>) {
   assert(
     /Expected deliverable/.test(spike.body),
     "spike: deliverable section replaces acceptance criteria",
+  );
+}
+
+{
+  // Bug 3 (#606): draftSpec renders open questions with a status. Items the
+  // driver carries from a prior gate round are prefixed `resolved:` and
+  // render as `status: resolved`; plain strings stay `status: pending`.
+  const withResolved = draftSpec(
+    "feature",
+    "descriptor",
+    [],
+    [],
+    ["resolved: missing acceptance criterion — proposed resolution: sharper criterion", "a fresh open question"],
+    [],
+    0,
+  );
+  assert(
+    /status: resolved/.test(withResolved.body),
+    "draftSpec: carried gate items render as status: resolved",
+  );
+  assert(
+    /status: pending/.test(withResolved.body),
+    "draftSpec: fresh open questions still render as status: pending",
+  );
+  assert(
+    !/resolved: missing acceptance criterion/.test(withResolved.body),
+    "draftSpec: the resolved: marker itself is stripped from the rendered question",
+  );
+  const plain = draftSpec("feature", "descriptor", [], [], ["no prefix, just a question"], [], 0);
+  assert(
+    !/status: resolved/.test(plain.body) && /status: pending/.test(plain.body),
+    "draftSpec: no prefix → no resolved rendering (backward compatible)",
+  );
+}
+
+{
+  // parseGapsForTest is the seam the driver's gap gate runs on; pin the
+  // verdict default (silence = READY) and the MEDIUM fallback for
+  // unparseable replies so a future parse change is a conscious decision.
+  const clean = parseGapsForTest("No issues found.\nVERDICT: READY");
+  assert(clean.verdict === "READY", "parseGaps: explicit READY verdict");
+  const silent = parseGapsForTest("looks good, nothing to flag");
+  assert(
+    silent.verdict === "READY" && silent.gaps.length === 1 && silent.gaps[0]?.severity === "MEDIUM",
+    "parseGaps: missing verdict defaults to READY with the MEDIUM fallback gap",
+  );
+  const prose = parseGapsForTest("- CRITICAL — something important is missing\nVERDICT: NEEDS_ITERATION");
+  assert(
+    prose.verdict === "NEEDS_ITERATION" && prose.gaps.length === 1 && prose.gaps[0]?.severity === "MEDIUM",
+    "parseGaps: bare severity lines without GAP: markers do NOT parse as gaps (fallback only)",
   );
 }
 

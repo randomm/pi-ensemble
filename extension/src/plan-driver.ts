@@ -138,6 +138,15 @@ export function parseGaps(reply: string): {
   return { gaps, verdict };
 }
 
+/**
+ * Export seam for tests: `parseGaps` is module-private (the gap gate has no
+ * other injection point — the driver runs it directly on the gate child's
+ * reply), so the smoke test reaches it through this alias.
+ */
+export function parseGapsForTest(reply: string) {
+  return parseGaps(reply);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5 — filing
 // ---------------------------------------------------------------------------
@@ -319,7 +328,13 @@ export async function runPlanPipeline(
       ready = parsed.verdict === "READY" && blocking.length === 0;
       if (!ready && iterations < GAP_GATE_MAX_ITERATIONS) {
         for (const g of blocking) {
-          openQuestions.push(`${g.description} — proposed resolution: ${g.resolution}`);
+          // Bug 3 (#606): gaps from this round are carried into the re-draft
+          // with the reviewer's proposed resolution attached and tagged so
+          // draftSpec renders them as `status: resolved` (the spec now states
+          // the decision, re-reviewed next round), not the old hard-coded
+          // `status: pending`.
+          g.status = "resolved";
+          openQuestions.push(`resolved: ${g.description} — proposed resolution: ${g.resolution}`);
         }
         ({ title, body } = draftSpec(
           type,
