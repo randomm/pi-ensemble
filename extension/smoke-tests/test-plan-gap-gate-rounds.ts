@@ -234,6 +234,21 @@ installForgeStub();
     filedBody.includes("[MEDIUM]"),
     "UNION: [MEDIUM] severity is disclosed",
   );
+  // Adversarial follow-up: the inline cap list must use the SAME union as
+  // the filed body — a 2-round CRITICAL-then-HIGH case used to disclose the
+  // round-1 HIGH in the body but not in the inline list (last-round-only).
+  assert(
+    (r1.residualForDisclosure ?? []).some((g) =>
+      g.description.includes("mock curl's -o flag"),
+    ),
+    "UNION follow-up: the residual union on the result carries the round-1 HIGH (inline list source)",
+  );
+  assert(
+    (r1.residualForDisclosure ?? []).some((g) =>
+      g.description.includes("clarify the retry boundary"),
+    ),
+    "UNION follow-up: the residual union on the result carries the round-2 MEDIUM (inline list source)",
+  );
 
   setPlanDispatch(null);
 }

@@ -16,9 +16,10 @@
  *                       explore dispatch for duplicate risk
  *   Phase 2  Investigate type-specialised explore angles in parallel
  *   Phase 3  Draft      the driver assembles the structured body
- *   Phase 4  Gap gate   one adversarial-developer dispatch; CRITICAL/HIGH
- *                       get one corrective pass, then the residual gaps
- *                       travel with the spec (cap hit, no loop)
+ *   Phase 4  Gap gate   one adversarial-developer dispatch; CRITICAL gets
+ *                       one corrective pass (CRITICAL-only terminal rule,
+ *                       #664 transposed — HIGH/MEDIUM/LOW never re-draft),
+ *                       then the residual findings travel with the spec
  *   Phase 5  File       `gh issue create --body-file` via execp
  *
  * **dryRun is the confirmation seam.** `dryRun: true` returns
@@ -145,17 +146,28 @@ function renderPlanResult(r: PlanResult, dryRun: boolean): string {
   // (HIGH findings travel in the disclosure) and residual-medium-low both
   // mean the spec FILED; only unresolved-blocking (CRITICAL remains) does
   // not.
+  // Adversarial follow-up: the wording is round-count-agnostic. The no-op
+  // round elimination means a MEDIUM-only or HIGH-only NEEDS_ITERATION
+  // terminates after a SINGLE dispatch — the old text claimed "the
+  // reviewer asked for another iteration" / "fresh findings each round",
+  // both false when one round ran. Lead with the load-bearing fact (the
+  // spec WAS filed), same defect class D1 fixed. The inline list uses the
+  // UNION (residualForDisclosure) to match the filed body's residual
+  // section, which also uses the union — the old last-round-only list
+  // could omit a round-1 finding the body discloses (2-round
+  // CRITICAL-then-HIGH case).
   let cap = "";
   if (r.capHit && r.gaps.length > 0) {
+    const residual = (r.residualForDisclosure ?? [])
+      .map((g) => `[${g.severity}] ${g.description}`)
+      .join(", ");
     if (r.capReason === "unresolved-blocking") {
       cap =
         "\n\nGAP GATE CAP HIT: after the iteration cap, unresolved CRITICAL gaps remain. They are listed below and must be resolved with the operator before /work. (HIGH findings no longer block filing — they travel in the residual disclosure instead; only CRITICAL stops the gate.)";
     } else if (r.capReason === "residual-high") {
-      const residual = r.gaps.map((g) => `[${g.severity}] ${g.description}`).join(", ");
-      cap = `\n\nGAP GATE CAP HIT: the reviewer returned fresh findings each round (${residual}); the iteration cap was reached with no CRITICAL gaps remaining, so the spec is FILED with the residual findings disclosed in the issue body (see '## Residual gap-gate findings'). HIGH findings travel in that disclosure — the terminal rule is CRITICAL-only.`;
+      cap = `\n\nGAP GATE CAP HIT: the reviewer returned HIGH findings alongside MEDIUM/LOW items (${residual}); with no CRITICAL gap the spec is FILED with the residual findings disclosed in the issue body (see '## Residual gap-gate findings'). HIGH findings travel in that disclosure — the terminal rule is CRITICAL-only.`;
     } else if (r.capReason === "residual-medium-low") {
-      const residual = r.gaps.map((g) => `[${g.severity}] ${g.description}`).join(", ");
-      cap = `\n\nGAP GATE CAP HIT: the reviewer asked for another iteration over MEDIUM/LOW items (${residual}); the iteration cap was reached with no CRITICAL gaps remaining, so the spec is FILED with the residual findings disclosed in the issue body (see '## Residual gap-gate findings').`;
+      cap = `\n\nGAP GATE CAP HIT: the reviewer returned only MEDIUM/LOW findings (${residual}); with no CRITICAL gap the spec is FILED with the residual findings disclosed in the issue body (see '## Residual gap-gate findings').`;
     } else if (r.capReason === "verdict-absent") {
       cap =
         "\n\nGAP GATE NOTE: the reviewer never wrote a verdict line; no CRITICAL gap was found, so the spec proceeded — but the absence is recorded here (the gate did not explicitly say READY).";
@@ -207,6 +219,7 @@ function resultDetails(r: PlanResult, dryRun: boolean): Record<string, unknown> 
     dryRun,
     gapCount: r.gaps.length,
     capHit: r.capHit ?? false,
+    residualForDisclosure: r.residualForDisclosure,
   };
   if (r.issueUrl) d.issueUrl = r.issueUrl;
   if (r.capReason) d.capReason = r.capReason;

@@ -155,6 +155,19 @@ installForgeStub();
     gatePrompts.length - gatePromptsBefore === 1,
     `D1: exactly ONE gate dispatch (got ${gatePrompts.length - gatePromptsBefore})`,
   );
+  // Adversarial follow-up: the inline cap list is sourced from the residual
+  // UNION (plan-tool.ts reads r.residualForDisclosure), not the last round's
+  // gaps. With a single round they coincide; the union source is what keeps
+  // a 2-round CRITICAL-then-HIGH run from omitting the round-1 HIGH from
+  // the inline list (covered by the UNION block below).
+  assert(
+    result.residualForDisclosure?.length === 2,
+    `D1 follow-up: residual union carried on the result (got ${result.residualForDisclosure?.length ?? "none"})`,
+  );
+  assert(
+    (result.residualForDisclosure ?? []).some((g) => g.description === "criterion 2 is ambiguous"),
+    "D1 follow-up: the residual union carries the MEDIUM finding for the inline list",
+  );
 
   // Canary: the old message (D1 defect) would have been caught.
   const oldMsg = "GAP GATE CAP HIT: after the iteration cap, unresolved CRITICAL/HIGH gaps remain.";

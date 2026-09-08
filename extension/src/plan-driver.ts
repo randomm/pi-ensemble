@@ -440,6 +440,7 @@ export async function runPlanPipeline(
     issueUrl,
     capHit: capHit || undefined,
     capReason,
+    residualForDisclosure: residualForDisclosure.length > 0 ? residualForDisclosure : undefined,
     filingFailure,
   };
 }

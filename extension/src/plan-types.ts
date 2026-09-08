@@ -46,9 +46,23 @@ export interface PlanResult {
   issueUrl?: string;
   capHit?: boolean;
   /**
+   * The residual union (non-blocking findings across ALL gate rounds,
+   * deduped) that the filed body's "## Residual gap-gate findings" section
+   * discloses. Carried separately from `gaps` (the LAST round's gaps) so
+   * the operator-visible cap message in plan-tool.ts can list the SAME
+   * union as the filed body — with the old last-round list, a 2-round
+   * CRITICAL-then-HIGH run disclosed the round-1 HIGH in the body but not
+   * in the inline cap message. Present only when a residual disclosure
+   * was written.
+   */
+  residualForDisclosure?: PlanGap[];
+  /**
    * D1: the ACTUAL reason the gap gate stopped, so the operator-visible
-   * text names the cause instead of claiming "unresolved CRITICAL/HIGH gaps
-   * remain" when a MEDIUM-only NEEDS_ITERATION verdict burned the rounds.
+   * text names the cause instead of the old message — "the reviewer asked
+   * for another iteration over MEDIUM/LOW items ... the iteration cap was
+   * reached" — which the no-op round elimination made false: a MEDIUM-only
+   * NEEDS_ITERATION now terminates on a SINGLE dispatch, so neither a
+   * second iteration was asked for nor the cap reached.
    * `residual-medium-low` (D2: routed to filing with disclosure, nothing
    * above LOW survived) vs `residual-high` (routed to filing with the
    * residual HIGH findings disclosed — #664 transposed: HIGH no longer
