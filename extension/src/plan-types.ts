@@ -9,6 +9,7 @@
  * erased at compile time, so no runtime edge between the two modules.
  */
 import type { FilingFailure } from "./plan-filing.ts";
+import type { GapGateLoopCapReason } from "./plan-gaps.ts";
 
 export const PLAN_TYPES = ["bug", "feature", "epic", "chore", "spike"] as const;
 export type PlanType = (typeof PLAN_TYPES)[number];
@@ -32,8 +33,15 @@ export interface PlanGap {
    * round-2 re-draft's Open Questions section are re-reviewed against the
    * revised spec — they render as `status: resolved` there — while fresh
    * findings from the reviewer stay `pending`.
+   *
+   * Readonly so the invariant is expressed in the type (lens review, PR
+   * #637 finding 3): the gap-gate loop carries blocking gaps into a
+   * re-draft as `{ ...g, status: "resolved" }` COPIES, never by mutating
+   * the parsed original — the same object also lives in `lastGaps` and
+   * (for the round-1 case) in the residual union, and mutating it would
+   * rewrite the union's copy in place.
    */
-  status?: "pending" | "resolved";
+  readonly status?: "pending" | "resolved";
 }
 
 export interface PlanResult {
@@ -72,13 +80,16 @@ export interface PlanResult {
    * acceptable but the absence is recorded) vs `gate-unavailable` (the
    * gap-gate dispatch itself failed, so no reviewer ever saw the spec —
    * not filed, surfaced, matching the all-angles-failed halt).
+   *
+   * Declared ONCE in plan-gaps.ts (`GapGateLoopCapReason`) and referenced
+   * here — a member added on the gap-gate side is forced onto this type,
+   * and vice versa (the same single-declaration convention plan-filing.ts
+   * carries for FilingFailure; lens review, PR #637 finding 2 — before
+   * it, the two unions were structurally identical copies with nothing
+   * tying them, and a new member on this side was silently accepted and
+   * simply never produced).
    */
-  capReason?:
-    | "residual-medium-low"
-    | "residual-high"
-    | "unresolved-blocking"
-    | "verdict-absent"
-    | "gate-unavailable";
+  capReason?: GapGateLoopCapReason;
   /**
    * D7: a DISCRIMINATED filing failure (or deliberate skip) carried on the
    * result so the operator-visible text can say WHY the issue did not file

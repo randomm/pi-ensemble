@@ -345,17 +345,18 @@ export async function runPlanPipeline(
     //    (deduped by exact description string), so the residual section
     //    discloses the union, not just the last round.
     const loopResult: GapGateLoopResult = await runGapGateLoop(
-      dispatch,
-      pi,
+      (spec, opts) => dispatch(pi, spec, opts),
       () => gapGatePrompt(body, findings, priorContext),
       GAP_GATE_MAX_ITERATIONS,
       (blocking: PlanGap[]) => {
         // Bug 3 (#606): blocking (CRITICAL) gaps are carried into the
         // re-draft with the reviewer's proposed resolution attached and
         // tagged so draftSpec renders them as `status: resolved` (the spec
-        // now states the decision, re-reviewed next round).
+        // now states the decision, re-reviewed next round). The status is
+        // read on a COPY (the loop passes `{ ...g, status: "resolved" }
+        // objects — status is readonly on PlanGap), never by mutating the
+        // parsed original, which also lives in the residual union.
         for (const g of blocking) {
-          g.status = "resolved";
           openQuestions.push(`resolved: ${g.description} — proposed resolution: ${g.resolution}`);
         }
         ({ title, body } = draftSpec(

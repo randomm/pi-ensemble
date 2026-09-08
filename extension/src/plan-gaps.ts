@@ -71,7 +71,7 @@ export function parseGaps(reply: string): GapGateParse {
     if (!description) continue;
     gaps.push({
       severity: (m[1] ?? "MEDIUM").toUpperCase() as PlanGap["severity"],
-      description: description.slice(0, 300),
+      description,
       resolution,
     });
   }
@@ -153,6 +153,26 @@ export function capRouted(blocking: PlanGap[]): "file" | "surface" {
 }
 
 /**
+ * The display bound for operator-visible residual findings.
+ *
+ * Applied ONLY at the render sites (the filed body's residual section via
+ * `residualGapsSection`, and the inline cap-message list in plan-tool.ts via
+ * `renderResidualList`). parseGaps keeps the FULL description on the object
+ * so the union dedupe (seenDescriptions) keys on the complete string — two
+ * genuinely different findings that share a 300-char prefix used to collide
+ * on the truncated form and the second was silently dropped from the
+ * disclosure (lens review, PR #637 finding 1 — a disclosure-completeness
+ * bug in the terminal rule's precondition, since under CRITICAL-only blocking
+ * the disclosure IS what allows filing).
+ */
+const RESIDUAL_DISPLAY_MAX = 300;
+
+/** The single truncation applied to residual findings for display. */
+export function truncateForDisclosure(s: string): string {
+  return s.length > RESIDUAL_DISPLAY_MAX ? `${s.slice(0, RESIDUAL_DISPLAY_MAX - 1)}…` : s;
+}
+
+/**
  * The residual-findings disclosure appended to the spec when the cap routes
  * to filing (D2). Naming each gap with its severity + proposed resolution is
  * what makes the disclosure a disclosure — an unposted residual would be the
@@ -160,7 +180,7 @@ export function capRouted(blocking: PlanGap[]): "file" | "surface" {
  */
 export function residualGapsSection(residual: PlanGap[]): string {
   const items = residual
-    .map((g) => `- [${g.severity}] ${g.description} → ${g.resolution}`)
+    .map((g) => `- [${g.severity}] ${truncateForDisclosure(g.description)} → ${g.resolution}`)
     .join("\n");
   return `## Residual gap-gate findings\n\n${items}\n`;
 }
@@ -169,6 +189,12 @@ export function residualGapsSection(residual: PlanGap[]): string {
 // runGapGateLoop — the Phase-4 gate loop, extracted from plan-driver.ts
 // ---------------------------------------------------------------------------
 
+/**
+ * The ACTUAL reason the gap-gate loop stopped. Declared ONCE here and
+ * referenced by `PlanResult.capReason` (plan-types.ts) — a member added on
+ * either side is forced onto the other (the same single-declaration
+ * convention plan-filing.ts carries for FilingFailure).
+ */
 export type GapGateLoopCapReason =
   | "residual-medium-low"
   | "residual-high"
@@ -197,17 +223,32 @@ export interface GapGateLoopResult {
  *    useless second round. The gate goes straight to the cap/file path.
  *
  * 2. UNION DISCLOSURE: non-blocking findings are accumulated across rounds
- *    (deduped by exact description string only — no fuzzy matching), so the
- *    residual section discloses what the reviewer found across ALL rounds,
- *    not just the last.
+ *    (deduped by the FULL description string only — no fuzzy matching), so
+ *    the residual section discloses what the reviewer found across ALL
+ *    rounds, not just the last.
  */
-export async function runGapGateLoop<P>(
-  dispatch: (
-    pi: P,
-    spec: { role: string; prompt: string },
-    opts?: { label: string },
-  ) => Promise<{ ok: boolean; errorStop?: unknown; text: string; toolUses: unknown[] }>,
-  pi: P,
+/**
+ * The gap-gate dispatch seam the loop runs against.
+ *
+ * `pi` is deliberately ABSENT from this signature (it was the unbounded
+ * generic `P` on the old `runGapGateLoop<P>` — "opaque, threaded
+ * opaquely," a type that said nothing). The loop never inspects the
+ * dispatch function's `pi` argument — it was threaded through but never
+ * used. Removing it makes the seam honest: the loop's contract is
+ * "call dispatch with a spec and an optional label" — nothing more.
+ *
+ * The call site adapts: `dispatchCore` (which DOES take `pi: ExtensionAPI`
+ * as its first arg) is wrapped in a closure that binds `pi` outside the
+ * loop's seam type. The one-line wrapper at the call site is the "adjust
+ * the one call site" the finding asked for.
+ */
+export type GapGateDispatch = (
+  spec: { role: string; prompt: string },
+  opts?: { label: string },
+) => Promise<{ ok: boolean; errorStop?: unknown; text: string; toolUses: unknown[] }>;
+
+export async function runGapGateLoop(
+  dispatch: GapGateDispatch,
   makeGatePrompt: () => string,
   maxIterations: number,
   onCorrective: (blocking: PlanGap[]) => void,
@@ -226,7 +267,6 @@ export async function runGapGateLoop<P>(
   while (iterations < maxIterations && !ready) {
     iterations++;
     const gate = await dispatch(
-      pi,
       { role: "adversarial-developer", prompt: makeGatePrompt() },
       { label: `plan-gap-gate-${iterations}` },
     );
@@ -240,10 +280,15 @@ export async function runGapGateLoop<P>(
 
     // Problem 2: accumulate non-blocking findings (CRITICAL travels via the
     // blocking path; HIGH/MEDIUM/LOW accumulate here for the residual union).
+    // The dedupe keys on the FULL description: two distinct findings that
+    // share a 300-char prefix are NOT the same finding, and silently
+    // dropping the second from the disclosure is exactly what the D2
+    // guarantee forbids (lens review, PR #637 finding 1). Truncation
+    // happens only at the render sites (truncateForDisclosure).
     for (const g of lastGaps) {
       if (g.severity !== "CRITICAL" && !seenDescriptions.has(g.description)) {
         seenDescriptions.add(g.description);
-        allNonBlocking.push(g);
+        allNonBlocking.push({ ...g });
       }
     }
 
@@ -255,36 +300,41 @@ export async function runGapGateLoop<P>(
       // empty array, push nothing to openQuestions, and call draftSpec again
       // producing a byte-identical body — a provably useless second round.
       // Go straight to the cap/file path instead.
-      for (const g of evald.blocking) {
-        g.status = "resolved";
-      }
-      onCorrective(evald.blocking);
+      // The carried copies are NEW objects (status is readonly on PlanGap):
+      // the originals in lastGaps / allNonBlocking are never mutated, so the
+      // re-review round and the residual union see the gaps exactly as the
+      // reviewer wrote them.
+      onCorrective(evald.blocking.map((g) => ({ ...g, status: "resolved" as const })));
     } else if (!ready) {
       // Two cases reach here:
       // (a) at the cap (corrective is false) — the iteration budget is
       //     exhausted; apply the routing policy.
       // (b) zero CRITICAL (blocking is empty) — the corrective round would
-      //     be a no-op (empty array, byte-identical body); go straight to
-      //     the cap/file path.
+      //     be a no-op (empty array, byte-identical body); go straight
+      //     to the cap/file path.
       capHit = true;
       const route = capRouted(evald.blocking);
+      // D3: an ABSENT verdict on this terminal round is recorded HERE (it
+      // used to be recorded post-loop, but the no-op round elimination made
+      // that path unreachable: a zero-CRITICAL single round sets capHit=true
+      // in-branch, and a CRITICAL round routes unresolved-blocking instead).
+      // The D3 guarantee ("an absent verdict must not silently pass") still
+      // lives in evaluateGapGate's override — an absent verdict with a
+      // CRITICAL gap routes NEEDS_ITERATION there, never READY. This only
+      // qualifies the operator-visible reason.
       capReason =
-        route === "file"
-          ? lastGaps.some((g) => g.severity === "HIGH")
-            ? "residual-high"
-            : "residual-medium-low"
-          : "unresolved-blocking";
+        !lastParse.verdictParsed && evald.blocking.length === 0
+          ? "verdict-absent"
+          : route === "file"
+            ? lastGaps.some((g) => g.severity === "HIGH")
+              ? "residual-high"
+              : "residual-medium-low"
+            : "unresolved-blocking";
       // The gate has produced its routing decision. Stop here — a second
       // dispatch would be a provably useless no-op (case b) or a cap
       // overrun (case a).
       break;
     }
-  }
-
-  // D3: an ABSENT verdict with only HIGH/MEDIUM/LOW gaps records that the
-  // verdict was missing.
-  if (lastParse && !lastParse.verdictParsed && !capHit) {
-    capReason = "verdict-absent";
   }
 
   // Problem 2: the residual disclosure is the UNION of all non-blocking

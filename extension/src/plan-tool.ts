@@ -36,6 +36,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { runPlanPipeline } from "./plan-driver.ts";
+import { truncateForDisclosure } from "./plan-gaps.ts";
 import type { PlanResult } from "./plan-types.ts";
 import { trace } from "./trace.ts";
 import { resolveRepoRoot } from "./work-entry.ts";
@@ -158,8 +159,12 @@ function renderPlanResult(r: PlanResult, dryRun: boolean): string {
   // CRITICAL-then-HIGH case).
   let cap = "";
   if (r.capHit && r.gaps.length > 0) {
+    // The inline list renders the SAME union as the filed body's residual
+    // section, through the SAME single truncation (truncateForDisclosure) —
+    // the two render sites cannot drift (lens review, PR #637 finding 1;
+    // the PERFORMANCE lens flagged the drift risk specifically).
     const residual = (r.residualForDisclosure ?? [])
-      .map((g) => `[${g.severity}] ${g.description}`)
+      .map((g) => `[${g.severity}] ${truncateForDisclosure(g.description)}`)
       .join(", ");
     if (r.capReason === "unresolved-blocking") {
       cap =

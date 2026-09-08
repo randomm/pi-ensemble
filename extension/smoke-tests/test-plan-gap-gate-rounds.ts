@@ -314,5 +314,70 @@ installForgeStub();
   setPlanDispatch(null);
 }
 
+// ------------------------------ DEDUPE COMPLETENESS (lens finding 1, PR #637)
+
+{
+  // Lens review finding 1 (four independent lenses, PR #637): the union
+  // dedupe keyed seenDescriptions on the description, but parseGaps had
+  // ALREADY truncated it to 300 chars at parse time. Two genuinely different
+  // findings sharing a 300-char prefix therefore collided and the second was
+  // silently dropped from residualForDisclosure — which feeds BOTH the
+  // residual section in the filed issue body AND the inline cap-message
+  // list. Under the CRITICAL-only terminal rule, disclosure IS the
+  // precondition for filing, so silent under-disclosure breaks the D2
+  // guarantee (AGENTS.md §7: "passing a finding on is not discarding it").
+  //
+  // TDD: this test MUST FAIL before the fix (dedupe on the truncated
+  // string drops the second finding) and pass after (dedupe on the FULL
+  // string keeps both; truncation happens only at the render sites).
+  const sharedPrefix =
+    "the retry backoff policy in spawn.ts is under-specified in the following respects: " +
+    "x".repeat(320);
+  const findingA = `${sharedPrefix} the initial delay is never named`;
+  const findingB = `${sharedPrefix} the max delay is never named`;
+  const longReplies = [
+    `GAP: HIGH — ${findingA} — proposed resolution: name the initial delay\n` +
+      `GAP: MEDIUM — ${findingB} — proposed resolution: name the max delay\n` +
+      `VERDICT: NEEDS_ITERATION`,
+  ];
+  forgeStub.created.length = 0;
+  forgeStub.mode = "ok";
+  setPlanDispatch(makeDispatchStub(longReplies) as never);
+
+  const r1 = await runPlanPipeline(
+    {} as never,
+    { descriptor: "add a start_plan_driver tool for the plan pipeline in extension" },
+    process.cwd(),
+  );
+
+  const descs = (r1.residualForDisclosure ?? []).map((g) => g.description);
+  assert(
+    descs.some((d) => d.includes("the initial delay is never named")),
+    "DEDUPE: first finding (shared >300-char prefix) is in the residual disclosure",
+  );
+  assert(
+    descs.some((d) => d.includes("the max delay is never named")),
+    "DEDUPE: second finding (same >300-char prefix, different tail) is NOT silently dropped",
+  );
+  assert(
+    (r1.residualForDisclosure ?? []).length === 2,
+    `DEDUPE: both findings disclosed (got ${(r1.residualForDisclosure ?? []).length} — a prefix collision dropped one)`,
+  );
+  // Both renderings (filed body residual section AND inline list source)
+  // must carry both findings — the two cannot drift (PERFORMANCE lens).
+  // The filed body uses truncateForDisclosure, so the identifying tail
+  // (beyond 300 chars) is truncated there — assert on the shared prefix
+  // (which IS within 300 chars) to verify both entries are present.
+  const filedBody = forgeStub.created[0]?.body ?? "";
+  const residualSection = filedBody.slice(filedBody.indexOf("## Residual gap-gate findings"));
+  const bulletCount = (residualSection.match(/^- \[/gm) ?? []).length;
+  assert(
+    bulletCount === 2,
+    `DEDUPE: the filed body's residual section has 2 bullets (got ${bulletCount} — a prefix collision dropped one from the body)`,
+  );
+
+  setPlanDispatch(null);
+}
+
 console.log(`\nexit ${exit}`);
 process.exit(exit);
