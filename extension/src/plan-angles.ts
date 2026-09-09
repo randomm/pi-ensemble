@@ -7,6 +7,7 @@
  * limit (AGENTS.md §12).
  */
 import { VIPUNE_PRECEDENCE_NOTE, priorContextHasVipune, renderPriorContext } from "./plan-draft.ts";
+import type { AngleFindings } from "./plan-draft.ts";
 import { PLAN_ITEM_KINDS } from "./plan-reporter.ts";
 import type { PlanType } from "./plan-types.ts";
 
@@ -62,14 +63,31 @@ const ANGLES: Record<PlanType, Angle[]> = {
   ],
   epic: [
     {
+      // #639 DEFECT 1 (Cause 1b): decomposition-surface is the ONLY angle
+      // chartered to emit `sub-issue` items for type epic. The shared
+      // PLAN_REPORTER_PROMPT still lists the kind for every angle (the schema
+      // cannot know which angle is running — schema hardening is future work,
+      // out of scope here), so the charter is PROMPT-LEVEL: this prompt is
+      // the only one that INVITES sub-issue emission, and success-criteria
+      // below is the only one that explicitly FORBIDS it. The epic's
+      // sub-issue section (draftSpec: epicSubIssues) reconciles any
+      // cross-angle duplicates on exact normalised text and attributes the
+      // surviving copy to this chartered angle.
       name: "decomposition-surface",
       build: ({ descriptor }) =>
-        `Break this epic into natural sub-issues: "${descriptor}". For each: a title proposal, a brief scope, dependencies on other sub-issues, and a suggested ordering. Return subIssues[] (title, scope, deps, order).`,
+        `Break this epic into natural sub-issues: "${descriptor}". For each, report a sub-issue item via the report_plan_item tool (kind "sub-issue"): a title proposal, a brief scope, dependencies on other sub-issues, and a suggested ordering. Return subIssues[] (title, scope, deps, order).`,
     },
     {
+      // #639 DEFECT 1 (Cause 1b): the epic's sub-issue section is the
+      // decomposition-surface angle's charter (above). This angle reports
+      // criteria and milestones ONLY — the explicit no-emit instruction is
+      // what closes the structural permission the shared kind menu leaves
+      // open (the run-3 reproduction: 5 sub-issues from decomposition-
+      // surface + 3 from success-criteria, concatenated with no
+      // reconciliation).
       name: "success-criteria",
       build: ({ descriptor }) =>
-        `How do we know this epic is done? "${descriptor}". Outcome metrics, user-visible behaviour, technical milestones. Return criteria[] (type, description, measurement).`,
+        `How do we know this epic is done? "${descriptor}". Outcome metrics, user-visible behaviour, technical milestones. Return criteria[] (type, description, measurement). Do NOT report sub-issue items: the sub-issue decomposition is the decomposition-surface angle's charter, and your criteria belong in the criteria/acceptance kinds only.`,
     },
   ],
   chore: [
@@ -114,7 +132,7 @@ const PLAN_REPORTER_PROMPT = [
   `  - kind: one of ${PLAN_ITEM_KINDS.map((k) => `"${k}"`).join(" | ")}`,
   "  - text: the item — one complete, self-contained item (no bullet marker, no preamble, no heading)",
   "  - angle: your angle name (omit if not applicable)",
-  "Kind meanings: acceptance-criterion = a testable outcome; test-surface-item = an existing test to extend or a missing one to add (file + name); edge-case = a pitfall, failure mode or boundary condition the implementer must handle; sub-issue = one sub-ticket of this epic (title + brief scope); reference = a file/pattern already in the work area (path + why it matters); out-of-scope = something this ticket must NOT do. If you found nothing of a kind, do not call it for that kind.",
+  "Kind meanings: acceptance-criterion = a testable outcome; test-surface-item = an existing test to extend or a missing one to add (file + name); edge-case = a pitfall, failure mode or boundary condition the implementer must handle; sub-issue = one sub-ticket of this EPIC (title + brief scope) — for EPIC type only, and only when your angle's prompt chartered sub-issue emission to you (for epics that is the decomposition-surface angle); reference = a file/pattern already in the work area (path + why it matters); out-of-scope = something this ticket must NOT do. If you found nothing of a kind, do not call it for that kind.",
 ].join("\n");
 
 function buildAnglePrompt(
@@ -138,4 +156,45 @@ function buildAnglePrompt(
       : "";
   const taskLine = `INVESTIGATION (angle: ${angle.name}, ticket type: ${type})\n\n${prior}${task}\n\n`;
   return `${taskLine}${PLAN_REPORTER_PROMPT}\nWhen you have finished all tool calls, write a SHORT prose summary (2-4 sentences) of what you confirmed. The tool calls are the record; the prose is only a human-readable summary.`;
+}
+
+// ---------------------------------------------------------------------------
+// #639 DEFECT 1: sub-issue reconciliation (epic only)
+// ---------------------------------------------------------------------------
+
+/** The chartered angle for epic sub-issue emission (decomposition-surface). */
+const EPIC_SUB_ISSUE_CHARTERED_ANGLE = "decomposition-surface";
+
+function normaliseSubIssueText(t: string): string {
+  return t.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * #639 DEFECT 1: the sub-issue kind is the ONLY kind that gets reconciled
+ * across angles. The key is exact normalised text only (trim, collapse
+ * internal whitespace, lowercase — no fuzzy/semantic matching). On a
+ * collision, the chartered angle's copy wins; emission order is preserved
+ * and the running index renumbers 1..k over the deduped list.
+ */
+export function epicSubIssues(findings: AngleFindings[]): string[] {
+  const subs = findings.flatMap((f) => f.toolUses).filter((i) => i.kind === "sub-issue");
+  if (subs.length === 0) return [];
+  const byKey = new Map<string, (typeof subs)[number]>();
+  for (const s of subs) {
+    const key = normaliseSubIssueText(s.text);
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, s);
+    } else {
+      if (
+        s.angle === EPIC_SUB_ISSUE_CHARTERED_ANGLE &&
+        prev.angle !== EPIC_SUB_ISSUE_CHARTERED_ANGLE
+      ) {
+        byKey.set(key, s);
+      }
+    }
+  }
+  return [...byKey.values()].map(
+    (s, i) => `- [ ] #N — ${s.text} (sub-issue ${i + 1}, from ${s.angle})`,
+  );
 }

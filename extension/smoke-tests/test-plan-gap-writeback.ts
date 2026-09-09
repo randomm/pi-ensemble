@@ -1,0 +1,363 @@
+#!/usr/bin/env bun
+/**
+ * #639 DEFECT 2 — Decision-A writeback pipeline tests.
+ *
+ * The old onCorrective closure dropped the gap's status, string-prefixed the
+ * resolution into openQuestions, and re-drafted; draftSpec then RE-DETERMINED
+ * "resolved" via a string-prefix regex — a contradiction (the body still
+ * contained the original text while the bullet claimed resolved). Decision A
+ * makes the writeback real and three-branch:
+ *
+ *   1. body-applicable resolution (names no section, or the default
+ *      Acceptance criteria) → the resolution text is appended as a NEW
+ *      bullet to that section (outside Open Questions), and the Open
+ *      Questions bullet renders `status: resolved` (decision owner PM).
+ *   2. a resolution that explicitly names a DIFFERENT section → the bullet
+ *      goes to that section.
+ *   3. the parseGaps placeholder (or a resolution naming no renderable
+ *      section) → the bullet renders `status: open` with
+ *      `decision owner: operator`, and the body is NOT modified.
+ *
+ * The round-2 gate prompt must be built from the RE-DRAFTED body (the
+ * reviewer sees the applied resolution) — the makeGatePrompt thunk closes
+ * over the reassigned `body` binding in onCorrective; a refactor that moved
+ * the re-draft into a local variable would silently break this AC.
+ *
+ * The single-round corrective shape only (GAP_GATE_MAX_ITERATIONS stays 2 —
+ * the two-consecutive-corrective shape is unreachable and explicitly not a
+ * required case, per the out-of-scope note).
+ *
+ * The seam wiring (makeDispatchStub / installForgeStub) is copied verbatim
+ * from test-plan-gap-gate-rounds.ts (the golden fixture for pipeline-level
+ * /plan tests).
+ */
+
+import { setPlanDispatch } from "../src/plan-driver.ts";
+import { setPlanForge } from "../src/plan-filing.ts";
+import { runPlanPipeline } from "../src/plan-driver.ts";
+import { GAP_RESOLUTION_PLACEHOLDER } from "../src/plan-gaps.ts";
+import type { Forge } from "../src/forge.ts";
+
+let exit = 0;
+function assert(cond: boolean, msg: string) {
+  if (cond) console.log(`✓ ${msg}`);
+  else {
+    console.error(`✗ ${msg}`);
+    exit = 1;
+  }
+}
+
+// ----------------------------------------------------------- stub the seams
+
+const gatePrompts: string[] = [];
+
+interface ForgeStubState {
+  created: { title: string; body: string }[];
+  mode: "ok" | "throw" | "empty-url";
+  error?: string;
+}
+const forgeStub: ForgeStubState = { created: [], mode: "ok" };
+
+function installForgeStub() {
+  const stub = {
+    issueCreate: (title: string, body: string) => {
+      forgeStub.created.push({ title, body });
+      if (forgeStub.mode === "throw") {
+        return Promise.reject(new Error(forgeStub.error ?? "gh: HTTP 403 (rate limit exceeded)"));
+      }
+      if (forgeStub.mode === "empty-url") {
+        return Promise.resolve({ url: "" });
+      }
+      return Promise.resolve({ url: "https://github.com/test/test/issues/1" });
+    },
+  } as unknown as Forge;
+  setPlanForge(() => Promise.resolve(stub));
+}
+
+function makeDispatchStub(gateReply: string | string[]) {
+  const replies = Array.isArray(gateReply) ? gateReply : [gateReply];
+  let gateIteration = 0;
+  return ((pi: unknown, spec: { role: string; prompt: string }) => {
+    if (spec.role === "adversarial-developer") {
+      gatePrompts.push(spec.prompt);
+      const text = replies[gateIteration] ?? replies[replies.length - 1] ?? "";
+      gateIteration++;
+      return Promise.resolve({
+        role: "adversarial-developer",
+        ok: true,
+        text,
+        toolUses: [],
+        ms: 1,
+        exitCode: 0,
+      } as never);
+    }
+    if (spec.prompt.includes("DUPLICATE RISK CHECK")) {
+      return Promise.resolve({
+        role: "explore",
+        ok: true,
+        text: "DUPLICATE_RISK: none — no overlapping open work",
+        toolUses: [],
+        ms: 1,
+        exitCode: 0,
+      } as never);
+    }
+    return Promise.resolve({
+      role: "explore",
+      ok: true,
+      text: "summary prose",
+      toolUses: [
+        {
+          name: "report_plan_item",
+          arguments: { kind: "acceptance-criterion", text: "the tool registers", angle: "x" },
+        },
+      ],
+      ms: 1,
+      exitCode: 0,
+    } as never);
+  }) as never;
+}
+
+installForgeStub();
+
+const DESCRIPTOR = "add a start_plan_driver tool for the plan pipeline in extension";
+
+function sectionOf(body: string, heading: string, nextHeading: string): string {
+  const start = body.indexOf(`## ${heading}`);
+  const end = body.indexOf(`## ${nextHeading}`, start);
+  return body.slice(start, end === -1 ? body.length : end);
+}
+
+// ------------------------------ branch 1: resolution names Acceptance criteria
+
+{
+  // A CRITICAL whose resolution explicitly names the Acceptance criteria
+  // section → written back to that section (outside Open Questions), and the
+  // Open Questions bullet renders status: resolved. Round 2 has no CRITICAL,
+  // so the cap routes to file (the single-round corrective shape).
+  const replies = [
+    "GAP: CRITICAL no failure-mode criterion — proposed resolution: add a criterion for the retry path to the Acceptance criteria section\nVERDICT: NEEDS_ITERATION",
+    "GAP: MEDIUM minor clarification — proposed resolution: add a note\nVERDICT: READY",
+  ];
+  forgeStub.created.length = 0;
+  forgeStub.mode = "ok";
+  gatePrompts.length = 0;
+  setPlanDispatch(makeDispatchStub(replies) as never);
+
+  const r = await runPlanPipeline(
+    {} as never,
+    { descriptor: DESCRIPTOR, dryRun: true },
+    process.cwd(),
+  );
+
+  const body = r.spec;
+  const ac = sectionOf(body, "Acceptance criteria", "References");
+  const oq = sectionOf(body, "Open Questions", "Out of scope");
+  assert(
+    ac.includes("- add a criterion for the retry path to the Acceptance criteria section"),
+    "branch 1: the resolution text is a NEW bullet in the Acceptance criteria section",
+  );
+  assert(
+    !oq.includes("- add a criterion for the retry path to the Acceptance criteria section"),
+    "branch 1: the resolution text is NOT a bullet in Open Questions (writeback is outside it)",
+  );
+  assert(
+    oq.includes("no failure-mode criterion"),
+    "branch 1: the gap description renders in Open Questions",
+  );
+  assert(
+    /status: resolved/.test(oq),
+    "branch 1: the written-back decision renders status: resolved",
+  );
+  assert(
+    !/status: open/.test(oq),
+    "branch 1: no status: open bullet for a written-back decision",
+  );
+  // The round-2 gate prompt is built from the re-drafted body: the reviewer
+  // sees the applied resolution (not just the round-1 body).
+  const r2 = gatePrompts[1] ?? "";
+  assert(
+    r2.includes("add a criterion for the retry path to the Acceptance criteria section"),
+    "branch 1: round-2 gate prompt contains the written-back resolution (built from the re-drafted body)",
+  );
+  assert(
+    r2.includes("status: resolved"),
+    "branch 1: round-2 gate prompt renders the carried gap as status: resolved",
+  );
+
+  setPlanDispatch(null);
+}
+
+// ------------------------------ branch 2: resolution names a different section
+
+{
+  // A CRITICAL whose resolution explicitly names the Edge cases section →
+  // the bullet is written back THERE, not to Acceptance criteria.
+  const replies = [
+    "GAP: CRITICAL the boundary condition is unnamed — proposed resolution: document the boundary in the Edge cases section\nVERDICT: NEEDS_ITERATION",
+    "GAP: LOW cosmetic nit — proposed resolution: retitle\nVERDICT: READY",
+  ];
+  forgeStub.created.length = 0;
+  forgeStub.mode = "ok";
+  gatePrompts.length = 0;
+  setPlanDispatch(makeDispatchStub(replies) as never);
+
+  const r = await runPlanPipeline(
+    {} as never,
+    { descriptor: DESCRIPTOR, dryRun: true },
+    process.cwd(),
+  );
+
+  const body = r.spec;
+  const edge = sectionOf(body, "Edge cases & pitfalls", "Open Questions");
+  const ac = sectionOf(body, "Acceptance criteria", "References");
+  const oq = sectionOf(body, "Open Questions", "Out of scope");
+  assert(
+    edge.includes("- document the boundary in the Edge cases section"),
+    "branch 2: the named-section resolution is written to that section (Edge cases)",
+  );
+  assert(
+    !ac.includes("- document the boundary in the Edge cases section"),
+    "branch 2: the named-section resolution is NOT also written to Acceptance criteria",
+  );
+  assert(
+    /status: resolved/.test(oq) && !/status: open/.test(oq),
+    "branch 2: the written-back (named section) decision renders status: resolved, not open",
+  );
+
+  setPlanDispatch(null);
+}
+
+// ------------------------------ branch 3: placeholder → open, body unmodified
+
+{
+  // A CRITICAL whose resolution is the parseGaps placeholder (no
+  // "proposed resolution:" segment on the GAP: line) → NOT written back:
+  // the bullet renders status: open with decision owner operator, and the
+  // body sections are NOT modified (no resolution text injected anywhere).
+  const replies = [
+    "GAP: CRITICAL the boundary condition is unnamed\nVERDICT: NEEDS_ITERATION",
+    "GAP: LOW cosmetic nit — proposed resolution: retitle\nVERDICT: READY",
+  ];
+  forgeStub.created.length = 0;
+  forgeStub.mode = "ok";
+  gatePrompts.length = 0;
+  setPlanDispatch(makeDispatchStub(replies) as never);
+
+  const r = await runPlanPipeline(
+    {} as never,
+    { descriptor: DESCRIPTOR, dryRun: true },
+    process.cwd(),
+  );
+
+  const body = r.spec;
+  const ac = sectionOf(body, "Acceptance criteria", "References");
+  const oq = sectionOf(body, "Open Questions", "Out of scope");
+  assert(
+    !ac.includes(GAP_RESOLUTION_PLACEHOLDER),
+    "branch 3: the placeholder resolution is NOT written back to Acceptance criteria",
+  );
+  assert(
+    /status: open/.test(oq),
+    "branch 3: the unwritten (placeholder) decision renders status: open",
+  );
+  assert(
+    /decision owner: operator/.test(oq),
+    "branch 3: the unwritten decision names the operator as decision owner",
+  );
+  // The bullet still shows the resolution so the operator can see it
+  // (residual finding 2).
+  assert(
+    oq.includes(GAP_RESOLUTION_PLACEHOLDER),
+    "branch 3: the bullet names the placeholder resolution so the operator can see it was not applied",
+  );
+  assert(
+    !/status: resolved/.test(oq),
+    "branch 3: no status: rendered resolved for an unwritten decision",
+  );
+
+  setPlanDispatch(null);
+}
+
+// ------------------------- branch 3b: real resolution naming no section
+
+{
+  // A real, non-placeholder resolution that names NO renderable section →
+  // also falls to branch 3 (open, decision owner operator, body unmodified).
+  // The resolution text must still be visible in the bullet.
+  const replies = [
+    "GAP: CRITICAL the approach cannot work — proposed resolution: revisit the architecture before building\nVERDICT: NEEDS_ITERATION",
+    "GAP: LOW cosmetic nit — proposed resolution: retitle\nVERDICT: READY",
+  ];
+  forgeStub.created.length = 0;
+  forgeStub.mode = "ok";
+  gatePrompts.length = 0;
+  setPlanDispatch(makeDispatchStub(replies) as never);
+
+  const r = await runPlanPipeline(
+    {} as never,
+    { descriptor: DESCRIPTOR, dryRun: true },
+    process.cwd(),
+  );
+
+  const body = r.spec;
+  const ac = sectionOf(body, "Acceptance criteria", "References");
+  const oq = sectionOf(body, "Open Questions", "Out of scope");
+  assert(
+    !ac.includes("- revisit the architecture before building"),
+    "branch 3b: a no-section real resolution is NOT written back (no fabricated destination)",
+  );
+  assert(
+    /status: open/.test(oq) && /decision owner: operator/.test(oq),
+    "branch 3b: a no-section real resolution renders status: open, decision owner operator",
+  );
+  assert(
+    oq.includes("revisit the architecture before building"),
+    "branch 3b: the bullet names the (unapplied) resolution so the operator can see it",
+  );
+
+  setPlanDispatch(null);
+}
+
+// ------------------------------ spike: default destination is Expected deliverable
+
+{
+  // Residual finding 3: for type spike the default writeback destination is
+  // the "Expected deliverable" section (the spike analogue of Acceptance
+  // criteria — spikes render no "Acceptance criteria" heading).
+  const replies = [
+    "GAP: CRITICAL the deliverable is undefined — proposed resolution: name the decision the spike must reach in the Expected deliverable section\nVERDICT: NEEDS_ITERATION",
+    "GAP: LOW cosmetic nit — proposed resolution: retitle\nVERDICT: READY",
+  ];
+  forgeStub.created.length = 0;
+  forgeStub.mode = "ok";
+  gatePrompts.length = 0;
+  setPlanDispatch(makeDispatchStub(replies) as never);
+
+  const r = await runPlanPipeline(
+    {} as never,
+    { descriptor: "investigate the feasibility of a new sandbox approach", dryRun: true },
+    process.cwd(),
+  );
+
+  const body = r.spec;
+  assert(r.type === "spike", `spike: classified as spike (got ${r.type})`);
+  const edge = sectionOf(body, "Expected deliverable", "References");
+  const oq = sectionOf(body, "Open Questions", "Out of scope");
+  assert(
+    edge.includes("- name the decision the spike must reach in the Expected deliverable section"),
+    "spike branch: the writeback goes to the Expected deliverable section (not the absent Acceptance criteria)",
+  );
+  assert(
+    !body.includes("## Acceptance criteria"),
+    "spike branch: the spike body has no Acceptance criteria heading (the writeback cannot go there)",
+  );
+  assert(
+    /status: resolved/.test(oq),
+    "spike branch: the written-back (spike) decision renders status: resolved",
+  );
+
+  setPlanDispatch(null);
+}
+
+console.log(`\nexit ${exit}`);
+process.exit(exit);

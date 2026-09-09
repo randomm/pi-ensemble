@@ -379,5 +379,57 @@ installForgeStub();
   setPlanDispatch(null);
 }
 
+// ------------------------------ #639: PlanGap.status is DELETED (canary)
+
+{
+  // #639 DECISION B: PlanGap.status ("pending" | "resolved", Bug 3 #606)
+  // has ZERO consumers — the only writer was runGapGateLoop's
+  // `{ ...g, status: "resolved" }` copy (deleted: the gaps now pass through
+  // plain) and the only "reader" was a string-prefix regex in draftSpec's
+  // open-questions renderer (also deleted). The field is gone from
+  // plan-types.ts and no plan-* source file references it. The copy-on-carry
+  // comment block in plan-gaps.ts that justified the spread-copy exists only
+  // to protect that field — it must be gone too.
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const srcDir = resolve(import.meta.dirname, "..", "src");
+  const planFiles = [
+    "plan-types.ts",
+    "plan-gaps.ts",
+    "plan-draft.ts",
+    "plan-driver.ts",
+    "plan-writeback.ts",
+  ];
+  let statusFieldPresent = false;
+  let statusRefPresent = false;
+  let copyOnCarryCommentPresent = false;
+  for (const f of planFiles) {
+    const src = readFileSync(resolve(srcDir, f), "utf8");
+    if (f === "plan-types.ts" && /status\?\s*:\s*["']pending["']/.test(src)) {
+      statusFieldPresent = true;
+    }
+    // The old writer shape was the object tag `{ ...g, status: "resolved" as
+    // const }`. The canary is that literal tag (plus any `.status` property
+    // access on the gap). The rendered `status: resolved` / `status: open`
+    // TEXT in plan-draft.ts / plan-writeback.ts is the NEW structured
+    // renderer — legitimate and not matched here.
+    if (/status:\s*["']resolved["']\s*as\s*const/.test(src) || /\.status\b/.test(src)) {
+      statusRefPresent = true;
+    }
+    if (f === "plan-gaps.ts" && /copy[- ]on[- ]carry|never mutated, so the/i.test(src)) {
+      copyOnCarryCommentPresent = true;
+    }
+  }
+  assert(!statusFieldPresent, "#639 canary: PlanGap.status field is deleted from plan-types.ts");
+  assert(
+    !statusRefPresent,
+    "#639 canary: no plan-* source file references the deleted status field (object-tag shape or .status)",
+  );
+  assert(
+    !copyOnCarryCommentPresent,
+    "#639 canary: the copy-on-carry comment block (justified only by the status field) is removed from plan-gaps.ts",
+  );
+}
+
 console.log(`\nexit ${exit}`);
 process.exit(exit);

@@ -17,8 +17,15 @@ import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { detectForge } from "./forge-detect.ts";
 import { type Forge, createForge } from "./forge.ts";
+import { epicSubIssues } from "./plan-angles.ts";
 import { PLAN_ITEM_KINDS } from "./plan-reporter.ts";
 import { EPIC_SUB_ISSUE_DEPTH_LIMIT, type PlanType, planTitle } from "./plan-types.ts";
+import {
+  type ResolvedDecision,
+  applyWritebackToBody,
+  buildWritebackMap,
+  renderOpenQuestions,
+} from "./plan-writeback.ts";
 import type { MemoryHit } from "./vipune.ts";
 import { vipuneSearch } from "./vipune.ts";
 
@@ -208,7 +215,14 @@ function sectionBullets(items: string[], fallback: string): string {
   return clean.length > 0 ? clean.map((s) => `- ${s}`).join("\n") : `- ${fallback}`;
 }
 
-function itemsByKind(findings: AngleFindings[], kind: PlanItemKindName): PlanItemKind[] {
+/**
+ * #639: the plain cross-angle aggregation (flatMap + filter, NO dedupe) the
+ * non-sub-issue kinds legitimately pool through. Exported for the
+ * reconciliation canary (test-plan-subissue-reconciliation.ts): the shared
+ * normalisation helper must NOT leak into this helper — the Test surface /
+ * References sections keep aggregating identical items across angles.
+ */
+export function itemsByKind(findings: AngleFindings[], kind: PlanItemKindName): PlanItemKind[] {
   return findings.flatMap((f) => f.toolUses).filter((i) => i.kind === kind);
 }
 
@@ -239,12 +253,8 @@ export function renderPriorContext(priorContext: { source: string; fact: string 
   return `${kept.join("\n")}\n- [truncated] ${lines.length - kept.length} prior context item(s) omitted for child-prompt size (full inventory is in the filed body)`;
 }
 
-function epicSubIssues(findings: AngleFindings[]): string[] {
-  const subs = itemsByKind(findings, "sub-issue");
-  // no prose fallback — the driver halts on all-angles-failed before reaching here
-  if (subs.length === 0) return [];
-  return subs.map((s, i) => `- [ ] #N — ${s.text} (sub-issue ${i + 1}, from ${s.angle})`);
-}
+// #639: epicSubIssues is in plan-angles.ts (the natural home for the epic
+// angle charter); imported below where it's used in draftSpec.
 
 const DEPTH_LIMIT_NOTE =
   "- spec depth limit reached — run start_plan_driver with this descriptor for the full spec";
@@ -327,6 +337,14 @@ export function draftSpec(
   outOfScope: string[],
   depth: number,
   directives: OperatorDirectives,
+  /**
+   * #639 DECISION B: the structured record of carried gap-gate decisions
+   * (the separate parameter). `openQuestions` stays `string[]` for
+   * GENUINELY OPEN questions; resolved decisions come from here, never from
+   * a string-prefix test of the question text (the old resolved-prefix
+   * renderer is deleted — the prefix is dead). See plan-writeback.ts.
+   */
+  resolvedDecisions: ResolvedDecision[],
 ): { title: string; body: string } {
   const title = planTitle(descriptor, type);
 
@@ -412,20 +430,26 @@ export function draftSpec(
           acItems,
           "derive the testable outcomes from the investigation findings before /work",
         )}\n`;
-  const openQ =
-    openQuestions.length > 0
-      ? openQuestions
-          .map((q) => {
-            const status = /^resolved:\s*/i.test(q) ? "resolved" : "pending";
-            return `- **${q.replace(/^resolved:\s*/i, "")}** — decision owner: PM; status: ${status}`;
-          })
-          .join("\n")
-      : "- (none)";
+  // #639 DECISION A: the writeback bullets. Each resolved decision that was
+  // written back (writtenBack === true) has its resolution appended as a NEW
+  // bullet to the target section during the re-draft. The bullet is part of
+  // the re-draft inputs (not a post-hoc modification to the body, which would
+  // be lost when draftSpec rebuilds the body from scratch). The heading is
+  // #639: the writeback bullets (resolved decisions that were written back)
+  // are appended to their target sections during the re-draft (plan-
+  // writeback.ts: buildWritebackMap + applyWritebackToBody). The Open
+  // Questions section is rendered from the structured decisions (plan-
+  // writeback.ts: renderOpenQuestions) — the status comes from the
+  // structured record, NOT from a string-prefix test.
+  const writebackMap = buildWritebackMap(resolvedDecisions);
+  const openQ = renderOpenQuestions(openQuestions, resolvedDecisions);
   const oos =
     oosAll.length > 0
       ? oosAll.map((s) => `- ${s}`).join("\n")
       : "- everything not named in the sections above";
-  const body = `## Context & motivation
+  // #639 DECISION A: apply the writeback bullets to their target sections.
+  // The writebackHeading in each ResolvedDecision names the section heading
+  let body = `## Context & motivation
 
 Descriptor: ${descriptor}
 Type: ${type}
@@ -459,6 +483,8 @@ ${openQ}
 
 ${oos}
 ${subIssues}${depthLimit}`;
+  body = body.replace(/\n{3,}/g, "\n\n");
+  body = applyWritebackToBody(body, writebackMap);
 
-  return { title, body: body.replace(/\n{3,}/g, "\n\n") };
+  return { title, body };
 }

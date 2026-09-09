@@ -96,6 +96,7 @@ import {
   classifyPlanType,
   planTitle,
 } from "./plan-types.ts";
+import { type ResolvedDecision, writebackGapToBody } from "./plan-writeback.ts";
 import { trace } from "./trace.ts";
 
 const GAP_GATE_MAX_ITERATIONS = 2;
@@ -320,6 +321,7 @@ export async function runPlanPipeline(
     outOfScope,
     depth,
     directives,
+    [],
   );
 
   // Phase 4 — gap gate (mandatory except chore/spike + escape hatch).
@@ -349,16 +351,31 @@ export async function runPlanPipeline(
       () => gapGatePrompt(body, findings, priorContext),
       GAP_GATE_MAX_ITERATIONS,
       (blocking: PlanGap[]) => {
-        // Bug 3 (#606): blocking (CRITICAL) gaps are carried into the
-        // re-draft with the reviewer's proposed resolution attached and
-        // tagged so draftSpec renders them as `status: resolved` (the spec
-        // now states the decision, re-reviewed next round). The status is
-        // read on a COPY (the loop passes `{ ...g, status: "resolved" }
-        // objects — status is readonly on PlanGap), never by mutating the
-        // parsed original, which also lives in the residual union.
+        // #639 DEFECT 2 / DECISION A: each carried (CRITICAL) gap's proposed
+        // resolution is routed through the three-branch writeback
+        // (plan-writeback.ts: a resolution that names a renderable section,
+        // or none at all (the default), is written back into that section as
+        // a NEW bullet and the decision renders as resolved; the parseGaps
+        // placeholder (or an empty resolution) is NOT written back and the
+        // decision renders as open with the operator as decision owner, body
+        // unmodified). The structured decisions travel to draftSpec via the
+        // separate resolvedDecisions parameter (DECISION B) — the old
+        // string-prefixed openQuestions push and the resolved-prefix test
+        // are both deleted. The outer `body` is REASSIGNED here (the
+        // makeGatePrompt thunk closes over it) so the round-2 gate prompt is
+        // built from the re-drafted body — the reviewer sees the applied
+        // resolution.
+        const decisions: ResolvedDecision[] = [];
         for (const g of blocking) {
-          openQuestions.push(`resolved: ${g.description} — proposed resolution: ${g.resolution}`);
+          const wb = writebackGapToBody(body, g, type);
+          body = wb.body;
+          decisions.push(wb.decision);
         }
+        // Re-assign BOTH bindings: the re-drafted body is what the
+        // makeGatePrompt thunk reads on the next round (the round-2 reviewer
+        // sees the applied resolution), and the re-drafted title is the
+        // title filed (the decisions do not change the title, but the
+        // re-draft is the single source of truth for both).
         ({ title, body } = draftSpec(
           type,
           descriptor,
@@ -368,6 +385,7 @@ export async function runPlanPipeline(
           outOfScope,
           depth,
           directives,
+          decisions,
         ));
       },
     );
