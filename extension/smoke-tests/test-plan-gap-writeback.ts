@@ -27,16 +27,26 @@
  * the two-consecutive-corrective shape is unreachable and explicitly not a
  * required case, per the out-of-scope note).
  *
- * The seam wiring (makeDispatchStub / installForgeStub) is copied verbatim
- * from test-plan-gap-gate-rounds.ts (the golden fixture for pipeline-level
- * /plan tests).
+ * The seam wiring (makeDispatchStub / installForgeStub / gatePrompts /
+ * forgeStub) lives in the shared plan-test-stubs.ts — the single copy both
+ * gap-gate test files import (it used to be copied verbatim here from
+ * test-plan-gap-gate-rounds.ts; a dispatch/forge shape change now updates
+ * one place).
  */
 
-import { setPlanDispatch } from "../src/plan-driver.ts";
-import { setPlanForge } from "../src/plan-filing.ts";
-import { runPlanPipeline } from "../src/plan-driver.ts";
+import { runPlanPipeline, setPlanDispatch } from "../src/plan-driver.ts";
 import { GAP_RESOLUTION_PLACEHOLDER } from "../src/plan-gaps.ts";
-import type { Forge } from "../src/forge.ts";
+import {
+  applyWritebackToBody,
+  appendBulletsToSection,
+  buildWritebackMap,
+} from "../src/plan-writeback.ts";
+import {
+  forgeStub,
+  gatePrompts,
+  installForgeStub,
+  makeDispatchStub,
+} from "./plan-test-stubs.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
@@ -48,74 +58,7 @@ function assert(cond: boolean, msg: string) {
 }
 
 // ----------------------------------------------------------- stub the seams
-
-const gatePrompts: string[] = [];
-
-interface ForgeStubState {
-  created: { title: string; body: string }[];
-  mode: "ok" | "throw" | "empty-url";
-  error?: string;
-}
-const forgeStub: ForgeStubState = { created: [], mode: "ok" };
-
-function installForgeStub() {
-  const stub = {
-    issueCreate: (title: string, body: string) => {
-      forgeStub.created.push({ title, body });
-      if (forgeStub.mode === "throw") {
-        return Promise.reject(new Error(forgeStub.error ?? "gh: HTTP 403 (rate limit exceeded)"));
-      }
-      if (forgeStub.mode === "empty-url") {
-        return Promise.resolve({ url: "" });
-      }
-      return Promise.resolve({ url: "https://github.com/test/test/issues/1" });
-    },
-  } as unknown as Forge;
-  setPlanForge(() => Promise.resolve(stub));
-}
-
-function makeDispatchStub(gateReply: string | string[]) {
-  const replies = Array.isArray(gateReply) ? gateReply : [gateReply];
-  let gateIteration = 0;
-  return ((pi: unknown, spec: { role: string; prompt: string }) => {
-    if (spec.role === "adversarial-developer") {
-      gatePrompts.push(spec.prompt);
-      const text = replies[gateIteration] ?? replies[replies.length - 1] ?? "";
-      gateIteration++;
-      return Promise.resolve({
-        role: "adversarial-developer",
-        ok: true,
-        text,
-        toolUses: [],
-        ms: 1,
-        exitCode: 0,
-      } as never);
-    }
-    if (spec.prompt.includes("DUPLICATE RISK CHECK")) {
-      return Promise.resolve({
-        role: "explore",
-        ok: true,
-        text: "DUPLICATE_RISK: none — no overlapping open work",
-        toolUses: [],
-        ms: 1,
-        exitCode: 0,
-      } as never);
-    }
-    return Promise.resolve({
-      role: "explore",
-      ok: true,
-      text: "summary prose",
-      toolUses: [
-        {
-          name: "report_plan_item",
-          arguments: { kind: "acceptance-criterion", text: "the tool registers", angle: "x" },
-        },
-      ],
-      ms: 1,
-      exitCode: 0,
-    } as never);
-  }) as never;
-}
+// (see plan-test-stubs.ts for the shared stub harness)
 
 installForgeStub();
 
@@ -357,6 +300,41 @@ function sectionOf(body: string, heading: string, nextHeading: string): string {
   );
 
   setPlanDispatch(null);
+}
+
+// ------------------- unit: the shared splice helper (single implementation)
+
+{
+  // The two splice paths (inline writeback + re-draft re-apply) were
+  // collapsed into ONE shared helper (plan-writeback.ts:
+  // appendBulletsToSection). These unit cases pin the parenthetical
+  // heading behaviour directly (lens finding: the old second implementation
+  // had a lookahead-less heading regex — the spike's "Expected deliverable
+  // (NOT code — …)" line was matched differently by the two paths, and no
+  // test called the re-apply path in isolation). The prefix-match with the
+  // parenthetical lookahead is what the shared helper must keep.
+  const body = "## Expected deliverable (NOT code — a decision or proof of concept)\n\n- the decision to make\n\n## References\n\n- (none)\n";
+  const out = appendBulletsToSection(body, "Expected deliverable", ["the new deliverable criterion"]);
+  assert(out !== null, "shared helper: a parenthetical heading matches by prefix (the lookahead keeps the trailing text)");
+  assert(
+    out?.includes("- the decision to make\n- the new deliverable criterion\n## References") ?? false,
+    "shared helper: the new bullet is appended AFTER the section's last existing bullet (before the next heading)",
+  );
+  // applyWritebackToBody delegates to the same helper (one splice
+  // implementation, one heading regex — a divergent re-implementation is
+  // gone): the map-driven path reaches the same parenthetical heading.
+  const map = buildWritebackMap([
+    { description: "d", writtenBack: true, resolution: "the re-applied criterion", writebackHeading: "Expected deliverable" },
+  ]);
+  const out2 = applyWritebackToBody(body, map);
+  assert(
+    out2.includes("- the decision to make\n- the re-applied criterion"),
+    "shared helper: applyWritebackToBody (the re-draft re-apply path) hits the parenthetical heading via the shared splice",
+  );
+  // A heading that did not survive rendering is a no-op (the decision
+  // record is unchanged; the caller's residual note carries the loss).
+  const missing = appendBulletsToSection(body, "Acceptance criteria", ["x"]);
+  assert(missing === null, "shared helper: an absent heading returns null (no fabricated section, no mutation)");
 }
 
 console.log(`\nexit ${exit}`);

@@ -351,19 +351,13 @@ export async function runPlanPipeline(
       () => gapGatePrompt(body, findings, priorContext),
       GAP_GATE_MAX_ITERATIONS,
       (blocking: PlanGap[]) => {
-        // #639 DEFECT 2 / DECISION A: each carried (CRITICAL) gap's proposed
-        // resolution is routed through the three-branch writeback
-        // (plan-writeback.ts: a resolution that names a renderable section,
-        // or none at all (the default), is written back into that section as
-        // a NEW bullet and the decision renders as resolved; the parseGaps
-        // placeholder (or an empty resolution) is NOT written back and the
-        // decision renders as open with the operator as decision owner, body
-        // unmodified). The structured decisions travel to draftSpec via the
-        // separate resolvedDecisions parameter (DECISION B) — the old
-        // string-prefixed openQuestions push and the resolved-prefix test
-        // are both deleted. The outer `body` is REASSIGNED here (the
-        // makeGatePrompt thunk closes over it) so the round-2 gate prompt is
-        // built from the re-drafted body — the reviewer sees the applied
+        // #639 DECISION A: each carried (CRITICAL) gap's proposed resolution
+        // is routed through the three-branch writeback (plan-writeback.ts —
+        // written back as a NEW bullet into the named/default section, or
+        // left open with the operator as decision owner). The structured
+        // decisions travel to draftSpec via the resolvedDecisions parameter
+        // (DECISION B). `body` is REASSIGNED here (the makeGatePrompt thunk
+        // closes over it) so the round-2 reviewer sees the applied
         // resolution.
         const decisions: ResolvedDecision[] = [];
         for (const g of blocking) {
@@ -376,17 +370,40 @@ export async function runPlanPipeline(
         // sees the applied resolution), and the re-drafted title is the
         // title filed (the decisions do not change the title, but the
         // re-draft is the single source of truth for both).
-        ({ title, body } = draftSpec(
-          type,
-          descriptor,
-          findings,
-          priorContext,
-          openQuestions,
-          outOfScope,
-          depth,
-          directives,
-          decisions,
-        ));
+        //
+        // If the re-draft THROWS, the loop would otherwise propagate the raw
+        // error with no record that a resolution was already written into
+        // the body (the writeback loop above mutated `body` before the
+        // re-draft — a silent loss of computed state). Catch, surface WHAT
+        // WAS APPLIED (gap descriptions + resolutions + destination) in the
+        // error, and rethrow: the pipeline still halts (draftSpec throwing
+        // is a real failure, not something to fall past), but the operator
+        // sees the state that was lost rather than only the re-draft error.
+        try {
+          ({ title, body } = draftSpec(
+            type,
+            descriptor,
+            findings,
+            priorContext,
+            openQuestions,
+            outOfScope,
+            depth,
+            directives,
+            decisions,
+          ));
+        } catch (e) {
+          const applied = decisions
+            .map((d) =>
+              d.writtenBack
+                ? `• written back to ${d.writebackHeading}: ${d.description} → ${d.resolution}`
+                : `• NOT written back (open, decision owner operator): ${d.description} → ${d.resolution}`,
+            )
+            .join("\n");
+          const msg = e instanceof Error ? e.message : String(e);
+          throw new Error(
+            `corrective re-draft failed AFTER applying ${decisions.length} carried gap decision(s) (lens: ERROR_HANDLING — the writeback decisions are disclosed here so the loss is visible):\n${applied}\noriginal error: ${msg}`,
+          );
+        }
       },
     );
     gaps = loopResult.gaps;

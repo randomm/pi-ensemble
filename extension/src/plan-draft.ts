@@ -430,25 +430,17 @@ export function draftSpec(
           acItems,
           "derive the testable outcomes from the investigation findings before /work",
         )}\n`;
-  // #639 DECISION A: the writeback bullets. Each resolved decision that was
-  // written back (writtenBack === true) has its resolution appended as a NEW
-  // bullet to the target section during the re-draft. The bullet is part of
-  // the re-draft inputs (not a post-hoc modification to the body, which would
-  // be lost when draftSpec rebuilds the body from scratch). The heading is
-  // #639: the writeback bullets (resolved decisions that were written back)
-  // are appended to their target sections during the re-draft (plan-
-  // writeback.ts: buildWritebackMap + applyWritebackToBody). The Open
-  // Questions section is rendered from the structured decisions (plan-
-  // writeback.ts: renderOpenQuestions) — the status comes from the
-  // structured record, NOT from a string-prefix test.
+  // #639 DECISION A: the writeback bullets for carried decisions are applied
+  // to their target sections below (plan-writeback.ts: buildWritebackMap +
+  // applyWritebackToBody); the Open Questions section is rendered from the
+  // structured decisions (plan-writeback.ts: renderOpenQuestions) — the
+  // status comes from the structured record, NOT from a string-prefix test.
   const writebackMap = buildWritebackMap(resolvedDecisions);
   const openQ = renderOpenQuestions(openQuestions, resolvedDecisions);
   const oos =
     oosAll.length > 0
       ? oosAll.map((s) => `- ${s}`).join("\n")
       : "- everything not named in the sections above";
-  // #639 DECISION A: apply the writeback bullets to their target sections.
-  // The writebackHeading in each ResolvedDecision names the section heading
   let body = `## Context & motivation
 
 Descriptor: ${descriptor}

@@ -298,8 +298,7 @@ function epicBody(findings: Parameters<typeof draftSpec>[2]) {
 
   // Import runPlanPipeline directly (it's exported from plan-driver.ts).
   const { runPlanPipeline } = await import("../src/plan-driver.ts");
-  // biome-ignore lint/suspicious/noExplicitAny: minimal pi stub
-  const piStub = {} as any;
+  const piStub = {};
   const result = await runPlanPipeline(piStub, {
     descriptor: "spike: investigate the feasibility of a new approach",
     dryRun: true,

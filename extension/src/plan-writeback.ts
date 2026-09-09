@@ -15,6 +15,12 @@
  * The matching is deliberately conservative and mechanical (Decision A):
  * case-insensitive containment of the rendered section headings.
  */
+// GAP_RESOLUTION_PLACEHOLDER is declared ONCE in plan-gaps.ts (which owns
+// parseGaps — the parser that assigns the sentinel) and imported here so the
+// branch-3 comparison below keys on the EXACT string the parser writes:
+// a parser-side rename must flip both files at once, not silently drift.
+// plan-gaps.ts imports nothing from this module, so the dependency is one-way.
+import { GAP_RESOLUTION_PLACEHOLDER } from "./plan-gaps.ts";
 import type { PlanGap, PlanType } from "./plan-types.ts";
 
 /**
@@ -43,14 +49,11 @@ const WRITABLE_SECTIONS: { heading: string; re: RegExp }[] = [
  * type with no "Acceptance criteria" heading). The bullet is appended under
  * the type's ACTUAL rendered heading (the spike deliverable line carries a
  * trailing parenthetical), so this must match what draftSpec renders;
- * appendBulletToSection matches the heading as a prefix, not the full line.
+ * appendBulletsToSection matches the heading as a prefix, not the full line.
  */
 export function defaultDestinationHeading(type: PlanType): string {
   return type === "spike" ? "Expected deliverable" : "Acceptance criteria";
 }
-
-/** The parseGaps placeholder sentinel (Decision A branch 3). */
-export const GAP_RESOLUTION_PLACEHOLDER = "address during /work plan phase";
 
 /**
  * The structured record of one resolved decision passed to draftSpec as the
@@ -111,6 +114,7 @@ export function writebackGapToBody(body: string, gap: PlanGap, type: PlanType): 
       decision: { description: gap.description, writtenBack: false, resolution },
     };
   }
+
   // Decision A branch 2: the resolution explicitly names a renderable
   // section → write there. The "default destination is the Acceptance
   // criteria section" means: when the resolution names "Acceptance
@@ -126,7 +130,7 @@ export function writebackGapToBody(body: string, gap: PlanGap, type: PlanType): 
   }
   const heading =
     named.heading === "Acceptance criteria" ? defaultDestinationHeading(type) : named.heading;
-  const next = appendBulletToSection(body, heading, `- ${resolution}`);
+  const next = appendBulletsToSection(body, heading, [resolution]);
   if (next === null) {
     // The heading did not survive rendering. Fall to branch 1: no
     // fabricated heading, body unchanged, status open.
@@ -147,47 +151,54 @@ export function writebackGapToBody(body: string, gap: PlanGap, type: PlanType): 
 }
 
 /**
- * Append one bullet line to a rendered "## <heading>" section, AFTER the
- * section's existing bullets (i.e. after the SECTION_MAX_ITEMS slice and
- * after sectionBullets' dedupe — a carried writeback must render even when
- * the section is full or textually duplicate, residual finding 4). The
- * bullet is inserted immediately after the section's last bullet line; the
- * section terminator is the next "## " heading (or end of body).
+ * The SINGLE section-insertion implementation (lens findings: the inline
+ * writeback and the re-draft re-apply used to each re-implement "match ##
+ * heading → locate section end → find last '- ' bullet → insert", and the
+ * two heading regexes had diverged). The parenthetical lookahead below is
+ * what keeps the spike's "Expected deliverable (NOT code — …)" line matched
+ * by the prefix-only heading the writeback records, so one regex serves
+ * both call sites.
  *
- * The heading may carry a trailing parenthetical (the spike deliverable
- * line), so the heading is matched as a prefix, not the full line. The
- * regex is built with the RegExp constructor from an explicit string
- * (avoids template-literal backslash escaping in source).
+ * The bullet texts are passed WITHOUT the "- " prefix — this helper adds
+ * the prefix (the old second implementation had re-prefixed on its own).
+ * Appends AFTER the section's existing bullets (i.e. after the
+ * SECTION_MAX_ITEMS slice and after sectionBullets' dedupe — a carried
+ * writeback must render even when the section is full or textually
+ * duplicate, residual finding 4). The section terminator is the next
+ * "## " heading (or end of body). Returns null when the heading did not
+ * survive rendering OR the section has no bullets to insert after.
  */
-function appendBulletToSection(body: string, heading: string, bullet: string): string | null {
+export function appendBulletsToSection(
+  body: string,
+  heading: string,
+  bullets: string[],
+): string | null {
   // The heading may carry a trailing parenthetical (the spike deliverable
   // line), so match the heading as a prefix, not the full line. The regex is
   // built with the RegExp constructor from an explicit string (avoids
   // template-literal backslash escaping in source).
   const re = new RegExp(`^## ${escapeRe(heading)}(?= [^\n]|$)`, "gm");
   const m = re.exec(body);
-  if (m) {
-    const start = m.index + m[0].length;
-    const nextHeading = body.indexOf("\n## ", start);
-    const end = nextHeading === -1 ? body.length : nextHeading + 1;
-    const section = body.slice(start, end);
-    const lines = section.split("\n");
-    // Find the last bullet line in the section (all lines here are bullets
-    // or blanks; the fallback string is also a bullet by construction).
-    let lastBullet = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i]?.trimStart().startsWith("- ")) {
-        lastBullet = i;
-        break;
-      }
+  if (!m) return null;
+  const start = m.index + m[0].length;
+  const nextHeading = body.indexOf("\n## ", start);
+  const end = nextHeading === -1 ? body.length : nextHeading + 1;
+  const section = body.slice(start, end);
+  const lines = section.split("\n");
+  // Find the last bullet line in the section (all lines here are bullets
+  // or blanks; the fallback string is also a bullet by construction).
+  let lastBullet = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i]?.trimStart().startsWith("- ")) {
+      lastBullet = i;
+      break;
     }
-    if (lastBullet === -1) return null;
-    const inserted = `${
-      body.slice(0, start) + lines.slice(0, lastBullet + 1).join("\n")
-    }\n${bullet}${lines.slice(lastBullet + 1).join("\n")}${body.slice(end)}`;
-    return inserted;
   }
-  return null;
+  if (lastBullet === -1) return null;
+  const inserted = `${body.slice(0, start) + lines.slice(0, lastBullet + 1).join("\n")}\n${bullets
+    .map((b) => `- ${b}`)
+    .join("\n")}${lines.slice(lastBullet + 1).join("\n")}${body.slice(end)}`;
+  return inserted;
 }
 
 function escapeRe(s: string): string {
@@ -213,34 +224,18 @@ export function buildWritebackMap(decisions: ResolvedDecision[]): Map<string, st
 }
 
 /**
- * Apply the writeback bullets to their target sections in the rendered body.
- * Each heading in the map gets its resolution bullets appended after the
- * last bullet in that section (after the SECTION_MAX_ITEMS slice and dedupe —
- * a carried writeback must render even when the section is full).
+ * Apply the writeback bullets to their target sections in the rendered
+ * body, delegating each heading to appendBulletsToSection (one splice
+ * implementation, one heading regex — the second inline reimplementation
+ * with the divergent lookahead-less regex is deleted). A heading that did
+ * not survive rendering is skipped: the decision record is unchanged, so
+ * the caller's residual note is what carries the loss.
  */
 export function applyWritebackToBody(body: string, writebackMap: Map<string, string[]>): string {
   let result = body;
   for (const [heading, bullets] of writebackMap) {
-    const re = new RegExp(`^(## ${escapeRe(heading)})`, "gm");
-    const m = re.exec(result);
-    if (m) {
-      const start = m.index + m[0].length;
-      const nextHeading = result.indexOf("\n## ", start);
-      const end = nextHeading === -1 ? result.length : nextHeading + 1;
-      const section = result.slice(start, end);
-      const lines = section.split("\n");
-      let lastBullet = -1;
-      for (let i = lines.length - 1; i >= 0; i--) {
-        if (lines[i]?.trimStart().startsWith("- ")) {
-          lastBullet = i;
-          break;
-        }
-      }
-      if (lastBullet !== -1) {
-        const inserted = `${lines.slice(0, lastBullet + 1).join("\n")}\n${bullets.map((b) => `- ${b}`).join("\n")}${lines.slice(lastBullet + 1).join("\n")}`;
-        result = result.slice(0, start) + inserted + result.slice(end);
-      }
-    }
+    const next = appendBulletsToSection(result, heading, bullets);
+    if (next !== null) result = next;
   }
   return result;
 }

@@ -21,10 +21,13 @@
  *     dispatch, file with residual).
  */
 
-import { setPlanDispatch } from "../src/plan-driver.ts";
-import { setPlanForge } from "../src/plan-filing.ts";
-import { runPlanPipeline } from "../src/plan-driver.ts";
-import type { Forge } from "../src/forge.ts";
+import { runPlanPipeline, setPlanDispatch } from "../src/plan-driver.ts";
+import {
+  forgeStub,
+  gatePrompts,
+  installForgeStub,
+  makeDispatchStub,
+} from "./plan-test-stubs.ts";
 
 let exit = 0;
 function assert(cond: boolean, msg: string) {
@@ -36,74 +39,9 @@ function assert(cond: boolean, msg: string) {
 }
 
 // ----------------------------------------------------------- stub the seams
-
-const gatePrompts: string[] = [];
-
-interface ForgeStubState {
-  created: { title: string; body: string }[];
-  mode: "ok" | "throw" | "empty-url";
-  error?: string;
-}
-const forgeStub: ForgeStubState = { created: [], mode: "ok" };
-
-function installForgeStub() {
-  const stub = {
-    issueCreate: (title: string, body: string) => {
-      forgeStub.created.push({ title, body });
-      if (forgeStub.mode === "throw") {
-        return Promise.reject(new Error(forgeStub.error ?? "gh: HTTP 403 (rate limit exceeded)"));
-      }
-      if (forgeStub.mode === "empty-url") {
-        return Promise.resolve({ url: "" });
-      }
-      return Promise.resolve({ url: "https://github.com/test/test/issues/1" });
-    },
-  } as unknown as Forge;
-  setPlanForge(() => Promise.resolve(stub));
-}
-
-function makeDispatchStub(gateReply: string | string[]) {
-  const replies = Array.isArray(gateReply) ? gateReply : [gateReply];
-  let gateIteration = 0;
-  return ((pi: unknown, spec: { role: string; prompt: string }) => {
-    if (spec.role === "adversarial-developer") {
-      gatePrompts.push(spec.prompt);
-      const text = replies[gateIteration] ?? replies[replies.length - 1] ?? "";
-      gateIteration++;
-      return Promise.resolve({
-        role: "adversarial-developer",
-        ok: true,
-        text,
-        toolUses: [],
-        ms: 1,
-        exitCode: 0,
-      } as never);
-    }
-    if (spec.prompt.includes("DUPLICATE RISK CHECK")) {
-      return Promise.resolve({
-        role: "explore",
-        ok: true,
-        text: "DUPLICATE_RISK: none — no overlapping open work",
-        toolUses: [],
-        ms: 1,
-        exitCode: 0,
-      } as never);
-    }
-    return Promise.resolve({
-      role: "explore",
-      ok: true,
-      text: "summary prose",
-      toolUses: [
-        {
-          name: "report_plan_item",
-          arguments: { kind: "acceptance-criterion", text: "the tool registers", angle: "x" },
-        },
-      ],
-      ms: 1,
-      exitCode: 0,
-    } as never);
-  }) as never;
-}
+// (makeDispatchStub / installForgeStub / gatePrompts / forgeStub live in
+// the shared plan-test-stubs.ts — the single copy both gap-gate test
+// files import, so a dispatch/forge shape change updates one place.)
 
 // Install the forge stub BEFORE any non-dryRun invocation.
 installForgeStub();
