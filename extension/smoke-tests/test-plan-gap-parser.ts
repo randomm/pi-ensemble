@@ -113,6 +113,11 @@ function assert(cond: boolean, msg: string) {
   // from the renderer, so a plain open question that literally begins
   // "resolved: " renders pending, not resolved (the canary below).
   const NO_DIRS = { acceptanceCriteria: [], pitfalls: [], outOfScope: [] };
+  // Six-lens re-review (PR #640): the writtenBack flag is now PRODUCED BY
+  // the write (markWrittenDecisions reads the SpliceOutcome list), not
+  // predicted before it. The test must pass a writebackMap for the
+  // "written back" case — the map is what the single splice site in
+  // draftSpec applies, and the flag is set only if the splice lands.
   const withResolved = draftSpec(
     "feature",
     "descriptor",
@@ -125,10 +130,11 @@ function assert(cond: boolean, msg: string) {
     [
       {
         description: "missing acceptance criterion",
-        writtenBack: true,
         resolution: "sharper criterion added to Acceptance criteria",
+        writebackHeading: "Acceptance criteria",
       },
     ],
+    new Map([["Acceptance criteria", ["sharper criterion added to Acceptance criteria"]]]),
   );
   const oqSection = withResolved.body.slice(withResolved.body.indexOf("## Open Questions"));
   assert(

@@ -23,7 +23,7 @@ import { EPIC_SUB_ISSUE_DEPTH_LIMIT, type PlanType, planTitle } from "./plan-typ
 import {
   type ResolvedDecision,
   applyWritebackToBody,
-  buildWritebackMap,
+  markWrittenDecisions,
   renderOpenQuestions,
 } from "./plan-writeback.ts";
 import type { MemoryHit } from "./vipune.ts";
@@ -345,7 +345,17 @@ export function draftSpec(
    * renderer is deleted — the prefix is dead). See plan-writeback.ts.
    */
   resolvedDecisions: ResolvedDecision[],
-): { title: string; body: string } {
+  /**
+   * The writeback heading → resolution bullet map for this round's carried
+   * decisions (plan-writeback.ts: buildResolvedDecisions). This is the
+   * SINGLE splice site (six-lens re-review, PR #640, ARCHITECTURE lens —
+   * the dead onCorrective splice is gone): draftSpec rebuilds the body from
+   * scratch and applies the writeback HERE, once. The splice outcomes are
+   // reported back so the returned decisions' writtenBack flags are PRODUCED
+   * BY the write, not predicted before it.
+   */
+  writebackMap?: Map<string, string[]>,
+): { title: string; body: string; resolvedDecisions: ResolvedDecision[] } {
   const title = planTitle(descriptor, type);
 
   // D2: no clipping of operator context; the inventory is not capped at 8.
@@ -430,18 +440,15 @@ export function draftSpec(
           acItems,
           "derive the testable outcomes from the investigation findings before /work",
         )}\n`;
-  // #639 DECISION A: the writeback bullets for carried decisions are applied
-  // to their target sections below (plan-writeback.ts: buildWritebackMap +
-  // applyWritebackToBody); the Open Questions section is rendered from the
-  // structured decisions (plan-writeback.ts: renderOpenQuestions) — the
-  // status comes from the structured record, NOT from a string-prefix test.
-  const writebackMap = buildWritebackMap(resolvedDecisions);
-  const openQ = renderOpenQuestions(openQuestions, resolvedDecisions);
   const oos =
     oosAll.length > 0
       ? oosAll.map((s) => `- ${s}`).join("\n")
       : "- everything not named in the sections above";
-  let body = `## Context & motivation
+
+  // Placeholder Open Questions section ("- (none)"): the real content is
+  // rendered LAST — after the splice and markWrittenDecisions — because
+  // writtenBack is produced by the write, not predicted before it.
+  const body = `## Context & motivation
 
 Descriptor: ${descriptor}
 Type: ${type}
@@ -469,14 +476,25 @@ ${edgeCases}
 
 ## Open Questions
 
-${openQ}
+- (none)
 
 ## Out of scope
 
 ${oos}
 ${subIssues}${depthLimit}`;
-  body = body.replace(/\n{3,}/g, "\n\n");
-  body = applyWritebackToBody(body, writebackMap);
 
-  return { title, body };
+  // PR #640: single splice site (the dead onCorrective splice is gone).
+  // Splice → collapse → render Open Questions from marked decisions →
+  // replace placeholder. A heading that did not survive rendering
+  // renders status: open (the loss is visible, never a false resolved).
+  const { body: spliced, outcomes } = applyWritebackToBody(body, writebackMap ?? new Map());
+  const collapsed = spliced.replace(/\n{3,}/g, "\n\n");
+  const markedDecisions = markWrittenDecisions(resolvedDecisions, outcomes);
+  const openQ = renderOpenQuestions(openQuestions, markedDecisions);
+  const finalBody = collapsed.replace(
+    "## Open Questions\n\n- (none)\n",
+    `## Open Questions\n\n${openQ}\n`,
+  );
+
+  return { title, body: finalBody, resolvedDecisions: markedDecisions };
 }

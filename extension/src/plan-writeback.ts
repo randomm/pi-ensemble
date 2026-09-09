@@ -14,6 +14,19 @@
  * Split out of plan-draft.ts (500-line hard limit, AGENTS.md section 12).
  * The matching is deliberately conservative and mechanical (Decision A):
  * case-insensitive containment of the rendered section headings.
+ *
+ * Six-lens re-review (PR #640), ARCHITECTURE lens: the responsibilities
+ * split. `writebackGapToBody` USED to take the current body, splice a
+ * bullet into it, and return the mutated body — but its only caller
+ * (plan-driver.ts onCorrective) discarded that body: the very next
+ * statement re-assigned it from draftSpec, which rebuilds the body from
+ * scratch and applies the writeback itself. The splice was dead work
+ * (PERFORMANCE lens), and `writtenBack` was decided against the discarded
+ * body yet later rendered against the rebuilt one — a flag predicting a
+ * write instead of recording one (TYPE_SAFETY lens). The split: this
+ * module RESOLVES destinations (where a resolution would go) and renders;
+ * draftSpec is the SINGLE site that actually splices, and it reports back
+ * which splices landed so the flag is produced BY the write.
  */
 // GAP_RESOLUTION_PLACEHOLDER is declared ONCE in plan-gaps.ts (which owns
 // parseGaps — the parser that assigns the sentinel) and imported here so the
@@ -59,95 +72,151 @@ export function defaultDestinationHeading(type: PlanType): string {
  * The structured record of one resolved decision passed to draftSpec as the
  * new separate parameter (Decision B): the gap's description (the Open
  * Questions bullet text) plus a decision on where its resolution went.
+ *
+ * NOTE (six-lens re-review, PR #640, TYPE_SAFETY lens): the `writtenBack`
+ * and `writebackHeading` fields on the INPUT record are DEAD — the splice
+ * that would have justified them moved out of the onCorrective closure into
+ * draftSpec, so nothing reads them. The driver's onCorrective builds these
+ * records without the fields (buildResolvedDecisions). They stay on the
+ * interface only because draftSpec still writes them on the RETURNED
+ * records (draftSpec's return type is this same interface). Removing them
+ * would mean a separate input/return type split — deferred; the field is
+ * inert, and removing it is a one-line change when that split happens.
  */
 export interface ResolvedDecision {
   /** The Open Questions bullet text (the gap description). */
   description: string;
-  /** True when the resolution was written back into a section of the body. */
-  writtenBack: boolean;
+  /**
+   * True when the resolution was written back into a section of the body.
+   * Set by draftSpec AFTER the splice (the flag is produced by the write,
+   * not predicted before it). Not set by callers.
+   */
+  writtenBack?: boolean;
   /**
    * The resolution text (always present — when not written back, the bullet
    * still names the resolution so the operator can see it was not applied).
    */
   resolution: string;
   /**
-   * The section heading where the resolution bullet was written back
-   * (draftSpec appends the bullet to that section during the re-draft — the
-   * bullet is part of the re-draft inputs, not a post-hoc modification to
-   * the body, which would be lost when draftSpec rebuilds the body from
-   * scratch). Undefined when not written back.
+   * The section heading the resolution bullet was written back to
+   * (draftSpec sets this on the RETURNED record after the splice lands —
+   * the bullet is part of the re-draft, not a post-hoc modification to a
+   * separate body, which would be lost when draftSpec rebuilds from
+   * scratch). Not set by callers.
    */
   writebackHeading?: string;
 }
 
-/** The result of applying one carried gap's resolution to the body. */
-export interface WritebackResult {
-  /** The body with (at most) one new bullet appended to a section. */
-  body: string;
-  /** The structured record draftSpec renders in Open Questions. */
-  decision: ResolvedDecision;
+/** The destination a carried resolution resolves to, or null (no write). */
+export interface WritebackDestination {
+  /** The section heading the resolution should be spliced into. */
+  heading: string;
+}
+
+/** One bullet's application outcome, reported back by the single splice. */
+export interface SpliceOutcome {
+  /** True when the bullet was actually appended (the heading survived rendering). */
+  applied: boolean;
+  /** The heading the bullet targeted (set whether applied or not). */
+  heading: string;
+  /** The bullet text that was (or would have been) spliced under the heading. */
+  bullet: string;
 }
 
 /**
- * Apply one carried (blocking, gate-round) gap to the spec body per
- * Decision A:
+ * Resolve the destination for one carried (blocking, gate-round) gap's
+ * proposed resolution per Decision A — WITHOUT touching any body (the
+ * splice lives in a single site: draftSpec, see the module header).
  *
  *   1. placeholder resolution, or a resolution naming no renderable
- *      section, or a heading that did not survive rendering: the bullet
- *      renders status open, decision owner operator, body unchanged.
- *   2. a resolution naming a renderable section (or none at all — the
- *      default) → the resolution text is appended as a NEW bullet to that
- *      section (after the section's cap and dedupe — a carried writeback
- *      must always render, residual finding 4) and the record says
- *      writtenBack.
+ *      section → null: the bullet renders status open, decision owner
+ *      operator, body unchanged.
+ *   2. a resolution naming a renderable section → the heading it maps to
+ *      (the "Acceptance criteria" entry maps to the type's actual rendered
+ *      heading via defaultDestinationHeading — the spike analogue).
+ *
+ * The PLACEHOLDER short-circuit is FIRST on purpose (six-lens re-review,
+ * PR #640, SIMPLICITY lens): branch 1's contract must not depend on the
+ * sentinel text happening to name no writable section — if the placeholder
+ * is ever reworded into a string that contains a heading name, section
+ * matching must not suddenly give it a destination. The current sentinel
+ * only works because of its wording; this ordering makes branch 1
+ * unconditional.
  *
  * Matching rule (residual finding 1): case-insensitive containment of one
  * of the rendered section headings; the FIRST heading found in the
  * resolution text wins, in WRITABLE_SECTIONS order. A resolution naming a
  * heading that is not renderable falls to branch 1.
  */
-export function writebackGapToBody(body: string, gap: PlanGap, type: PlanType): WritebackResult {
+export function destinationFor(gap: PlanGap, type: PlanType): WritebackDestination | null {
   const resolution = gap.resolution;
-  if (!resolution || resolution === GAP_RESOLUTION_PLACEHOLDER) {
-    return {
-      body,
-      decision: { description: gap.description, writtenBack: false, resolution },
-    };
-  }
-
-  // Decision A branch 2: the resolution explicitly names a renderable
-  // section → write there. The "default destination is the Acceptance
-  // criteria section" means: when the resolution names "Acceptance
-  // criteria" (or the spike equivalent), that is the destination. A
-  // resolution that names NO section falls to branch 3 (open, body
-  // unmodified) — the "otherwise maps to no section" case.
+  if (!resolution || resolution === GAP_RESOLUTION_PLACEHOLDER) return null;
   const named = WRITABLE_SECTIONS.find((s) => s.re.test(resolution));
-  if (!named) {
-    return {
-      body,
-      decision: { description: gap.description, writtenBack: false, resolution },
-    };
-  }
+  if (!named) return null;
   const heading =
     named.heading === "Acceptance criteria" ? defaultDestinationHeading(type) : named.heading;
-  const next = appendBulletsToSection(body, heading, [resolution]);
-  if (next === null) {
-    // The heading did not survive rendering. Fall to branch 1: no
-    // fabricated heading, body unchanged, status open.
-    return {
-      body,
-      decision: { description: gap.description, writtenBack: false, resolution },
-    };
+  return { heading };
+}
+
+/**
+ * Build the structured records for a corrective round's carried gaps from
+ * their resolved destinations. These records travel into draftSpec; the
+ * writtenBack / writebackHeading fields are NOT set here — they are
+ * produced by the write itself (draftSpec reports which splices landed via
+ * applyWritebackToBody's SpliceOutcome list), so a flag claiming a write
+ * happened can never be predicted against a body that was discarded.
+ */
+export function buildResolvedDecisions(
+  gaps: PlanGap[],
+  type: PlanType,
+): { decisions: ResolvedDecision[]; writebackMap: Map<string, string[]> } {
+  const decisions: ResolvedDecision[] = [];
+  const writebackMap = new Map<string, string[]>();
+  for (const g of gaps) {
+    const dest = destinationFor(g, type);
+    decisions.push({
+      description: g.description,
+      resolution: g.resolution,
+      ...(dest ? { writebackHeading: dest.heading } : {}),
+    });
+    if (dest) {
+      const existing = writebackMap.get(dest.heading) ?? [];
+      existing.push(g.resolution);
+      writebackMap.set(dest.heading, existing);
+    }
   }
-  return {
-    body: next,
-    decision: {
-      description: gap.description,
-      writtenBack: true,
-      resolution,
-      writebackHeading: heading,
-    },
-  };
+  return { decisions, writebackMap };
+}
+
+/**
+ * Map draftSpec's splice outcomes back onto the returned decision records:
+ * writtenBack is set ONLY for the bullets the single splice actually
+ * applied (a heading that did not survive rendering leaves the record
+ * unwritten — the status open / decision owner operator rendering carries
+ * the loss, per Decision A branch 1). The outcomes are matched by the
+ * bullet text + heading pair, in the order draftSpec applied them.
+ */
+export function markWrittenDecisions(
+  decisions: ResolvedDecision[],
+  outcomes: SpliceOutcome[],
+): ResolvedDecision[] {
+  // Index the outcomes by (heading → list of applied bullet texts) so each
+  // record is matched against exactly the splice that targeted its heading.
+  const appliedByHeading = new Map<string, string[]>();
+  for (const o of outcomes) {
+    if (!o.applied) continue;
+    const list = appliedByHeading.get(o.heading) ?? [];
+    list.push(o.bullet);
+    appliedByHeading.set(o.heading, list);
+  }
+  return decisions.map((d) => {
+    if (!d.writebackHeading) return { ...d, writtenBack: false };
+    const list = appliedByHeading.get(d.writebackHeading) ?? [];
+    const idx = list.indexOf(d.resolution);
+    if (idx === -1) return { ...d, writtenBack: false };
+    list.splice(idx, 1);
+    return { ...d, writtenBack: true };
+  });
 }
 
 /**
@@ -206,47 +275,46 @@ function escapeRe(s: string): string {
 }
 
 /**
- * Build the writeback heading → resolution bullet map from the resolved
- * decisions. Exported so draftSpec can use it to apply the bullets to the
- * re-drafted body (the bullets are part of the re-draft, not a post-hoc
- * modification to the body).
- */
-export function buildWritebackMap(decisions: ResolvedDecision[]): Map<string, string[]> {
-  const m = new Map<string, string[]>();
-  for (const d of decisions) {
-    if (d.writtenBack && d.writebackHeading) {
-      const existing = m.get(d.writebackHeading) ?? [];
-      existing.push(d.resolution);
-      m.set(d.writebackHeading, existing);
-    }
-  }
-  return m;
-}
-
-/**
  * Apply the writeback bullets to their target sections in the rendered
  * body, delegating each heading to appendBulletsToSection (one splice
  * implementation, one heading regex — the second inline reimplementation
  * with the divergent lookahead-less regex is deleted). A heading that did
- * not survive rendering is skipped: the decision record is unchanged, so
- * the caller's residual note is what carries the loss.
+ * not survive rendering is reported as not applied (the matching decision
+ * record then renders status open — the loss is visible, Decision A
+ * branch 1). This is the SINGLE splice site: the SpliceOutcome list is what
+ * the flag is produced from (see markWrittenDecisions), so a bullet that
+ * was not actually written can never render status: resolved.
  */
-export function applyWritebackToBody(body: string, writebackMap: Map<string, string[]>): string {
+export function applyWritebackToBody(
+  body: string,
+  writebackMap: Map<string, string[]>,
+): { body: string; outcomes: SpliceOutcome[] } {
   let result = body;
+  const outcomes: SpliceOutcome[] = [];
   for (const [heading, bullets] of writebackMap) {
-    const next = appendBulletsToSection(result, heading, bullets);
-    if (next !== null) result = next;
+    let applied = false;
+    for (const bullet of bullets) {
+      const next = appendBulletsToSection(result, heading, [bullet]);
+      if (next !== null) {
+        result = next;
+        applied = true;
+        outcomes.push({ applied: true, heading, bullet });
+      }
+    }
+    if (!applied) outcomes.push({ applied: false, heading, bullet: bullets[0] ?? "" });
   }
-  return result;
+  return { body: result, outcomes };
 }
 
 /**
  * Render the Open Questions section bullets from the structured resolved
  * decisions and the plain open questions. Genuinely open questions render
  * as `status: pending` with the PM as decision owner; carried decisions
- * render as `status: resolved` (written back) or `status: open` with
- * `decision owner: operator` (not written back). The status comes from the
- * structured record, NOT from a string-prefix test.
+ * render as `status: resolved` (the write landed — writtenBack is set by
+ * draftSpec from the splice outcome) or `status: open` with
+ * `decision owner: operator` (no destination, or the heading did not
+ * survive rendering). The status comes from the structured record, NOT
+ * from a string-prefix test.
  */
 export function renderOpenQuestions(
   openQuestions: string[],

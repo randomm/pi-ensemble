@@ -135,7 +135,10 @@ registerPlanTool(fakePi);
 // ---------------------------------------------------------- the pipeline
 
 setPlanDispatch(((pi: unknown, spec: { role: string; prompt: string }) => {
-  calls.push(`${spec.role}:${spec.prompt.slice(0, 40)}`);
+  // Six-lens re-review (PR #640): the prompt now starts with
+  // DESCRIPTOR_DATA_FRAMING (141 chars) before the task text, so the
+  // 40-char window no longer reaches "DUPLICATE RISK". Widened to 200.
+  calls.push(`${spec.role}:${spec.prompt.slice(0, 200)}`);
   const ctx = (pi as { __testContext?: string }).__testContext;
   return Promise.resolve(__responses({ ...spec, prompt: ctx ? `${ctx}\n${spec.prompt}` : spec.prompt }));
 }) as never);

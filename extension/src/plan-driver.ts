@@ -83,6 +83,7 @@ let _dispatchOverride: PlanDispatchFn | null = null;
 export function setPlanDispatch(fn: PlanDispatchFn | null): void {
   _dispatchOverride = fn;
 }
+import { DESCRIPTOR_DATA_FRAMING } from "./plan-angles.ts";
 import {
   type GapGateLoopResult,
   parseGaps,
@@ -96,7 +97,7 @@ import {
   classifyPlanType,
   planTitle,
 } from "./plan-types.ts";
-import { type ResolvedDecision, writebackGapToBody } from "./plan-writeback.ts";
+import { type ResolvedDecision, buildResolvedDecisions } from "./plan-writeback.ts";
 import { trace } from "./trace.ts";
 
 const GAP_GATE_MAX_ITERATIONS = 2;
@@ -138,7 +139,8 @@ export function gapGatePrompt(
     .join("\n");
   const head =
     "GAP DETECTION: review this draft spec and find what is missing, under-specified, ambiguous or unverifiable.\n\n";
-  const spec = `DRAFT SPEC:\n${body}\n\n`;
+  // PR #640 SECURITY: descriptor interpolated verbatim; prompt-level mitigation only, not a boundary.
+  const spec = `${DESCRIPTOR_DATA_FRAMING}DRAFT SPEC:\n${body}\n\n`;
   const sum = `PHASE 2 FINDINGS SUMMARY:\n${summary}\n\n`;
   const prior =
     priorContext.length > 0
@@ -213,7 +215,12 @@ export async function runPlanPipeline(
       {
         role: "explore",
         prompt: [
-          `DUPLICATE RISK CHECK for a proposed ${type} ticket: "${descriptor}".`,
+          // SECURITY (six-lens re-review, PR #640): the descriptor is
+          // untrusted operator input (the second child-prompt surface that
+          // interpolates it raw — the angle prompts were framed in #640,
+          // this one was missed). Prompt-level mitigation, not a boundary —
+          // the same constant as the angle and gap-gate prompts, one copy.
+          `${DESCRIPTOR_DATA_FRAMING}DUPLICATE RISK CHECK for a proposed ${type} ticket: "${descriptor}".`,
           `Mechanical scan found: ${
             inv.related.map((r) => `#${r.number} (${r.state}) ${r.title}`).join("; ") ||
             "no related issues"
@@ -351,36 +358,17 @@ export async function runPlanPipeline(
       () => gapGatePrompt(body, findings, priorContext),
       GAP_GATE_MAX_ITERATIONS,
       (blocking: PlanGap[]) => {
-        // #639 DECISION A: each carried (CRITICAL) gap's proposed resolution
-        // is routed through the three-branch writeback (plan-writeback.ts —
-        // written back as a NEW bullet into the named/default section, or
-        // left open with the operator as decision owner). The structured
-        // decisions travel to draftSpec via the resolvedDecisions parameter
-        // (DECISION B). `body` is REASSIGNED here (the makeGatePrompt thunk
-        // closes over it) so the round-2 reviewer sees the applied
-        // resolution.
-        const decisions: ResolvedDecision[] = [];
-        for (const g of blocking) {
-          const wb = writebackGapToBody(body, g, type);
-          body = wb.body;
-          decisions.push(wb.decision);
-        }
-        // Re-assign BOTH bindings: the re-drafted body is what the
-        // makeGatePrompt thunk reads on the next round (the round-2 reviewer
-        // sees the applied resolution), and the re-drafted title is the
-        // title filed (the decisions do not change the title, but the
-        // re-draft is the single source of truth for both).
-        //
-        // If the re-draft THROWS, the loop would otherwise propagate the raw
-        // error with no record that a resolution was already written into
-        // the body (the writeback loop above mutated `body` before the
-        // re-draft — a silent loss of computed state). Catch, surface WHAT
-        // WAS APPLIED (gap descriptions + resolutions + destination) in the
-        // error, and rethrow: the pipeline still halts (draftSpec throwing
-        // is a real failure, not something to fall past), but the operator
-        // sees the state that was lost rather than only the re-draft error.
+        // PR #640: resolve destinations here, splice in draftSpec (single site).
+        // Catch is WIDE: covers destination-resolution + re-draft; cause preserves stack.
+        let computed: ResolvedDecision[] = [];
+        let writebackMap: Map<string, string[]> | null = null;
+        let writtenOutcomes: { applied: boolean; heading: string }[] = [];
         try {
-          ({ title, body } = draftSpec(
+          ({ decisions: computed, writebackMap: writebackMap } = buildResolvedDecisions(
+            blocking,
+            type,
+          ));
+          const redraft = draftSpec(
             type,
             descriptor,
             findings,
@@ -389,19 +377,36 @@ export async function runPlanPipeline(
             outOfScope,
             depth,
             directives,
-            decisions,
-          ));
+            computed,
+            writebackMap,
+          );
+          // Re-draft RETURN: marked decisions (writtenBack from the splice,
+          // not predicted). Body/title re-assigned for round 2.
+          ({ title, body } = redraft);
+          writtenOutcomes = redraft.resolvedDecisions.map((d) => ({
+            applied: d.writtenBack ?? false,
+            heading: d.writebackHeading ?? "(no destination — status open)",
+          }));
         } catch (e) {
-          const applied = decisions
-            .map((d) =>
-              d.writtenBack
-                ? `• written back to ${d.writebackHeading}: ${d.description} → ${d.resolution}`
-                : `• NOT written back (open, decision owner operator): ${d.description} → ${d.resolution}`,
-            )
-            .join("\n");
-          const msg = e instanceof Error ? e.message : String(e);
+          // Disclosure: names what was computed before the throw.
+          const disclosed = computed.length
+            ? computed
+                .map((d, i) => {
+                  const o = writtenOutcomes[i];
+                  const s = o
+                    ? o.applied
+                      ? `• written back to ${o.heading}: ${d.description} → ${d.resolution}`
+                      : `• NOT written back (open, decision owner operator): ${d.description} → ${d.resolution}`
+                    : `• not yet applied: ${d.description} → ${d.resolution}`;
+                  return s;
+                })
+                .join("\n")
+            : "(no decisions computed — the throw preceded the re-draft)";
+          const err = e instanceof Error ? e : new Error(String(e));
+          const msg = err.message;
           throw new Error(
-            `corrective re-draft failed AFTER applying ${decisions.length} carried gap decision(s) (lens: ERROR_HANDLING — the writeback decisions are disclosed here so the loss is visible):\n${applied}\noriginal error: ${msg}`,
+            `corrective re-draft failed AFTER computing ${computed.length} carried gap decision(s) (the writeback decisions are disclosed here so the loss is visible):\n${disclosed}\noriginal error: ${msg}`,
+            { cause: err },
           );
         }
       },
