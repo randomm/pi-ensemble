@@ -99,8 +99,8 @@ export const FACT_SECTIONS: {
  * Pure body for the `code-style` managed section: a dense bullet list built
  * from a plain string[]. This section is agent-derived, not manifest-derived,
  * so it has no omission concept — `codeStyleBody` returns `undefined` (never
- * an empty string) when `bullets` is empty or absent, so no empty marker pair
- * can be emitted. The rendered body is a bare bullet list (no per-section
+ * an empty string) when `bullets` are empty or absent, so no empty heading +
+ * zero-body section can be emitted. The rendered body is a bare bullet list (no per-section
  * heading line), matching the other fact-section bodies, and satisfies the
  * wrap's code-style classification predicate: ≥1 bullet line, no table line,
  * ≤15 non-empty lines.
