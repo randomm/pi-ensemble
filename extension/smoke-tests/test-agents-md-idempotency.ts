@@ -475,8 +475,8 @@ rmSync(tmp, { recursive: true, force: true });
     "agentOverride (ruby): ciWorkflows rendered with .github/workflows/ prefix (applied by renderer)",
   );
   assert(
-    content.includes("<!-- pi-rukas:agents-md:begin code-style v1 -->"),
-    "agentOverride (ruby): code-style pair inserted",
+    content.includes("## Code Style"),
+    "agentOverride (ruby): code-style section inserted",
   );
   assert(
     content.includes("- Frozen string literals required"),

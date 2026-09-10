@@ -403,11 +403,16 @@ export function makeUpdateAgent(
     const drift = driftWarnings(existingLedger, auto);
 
     // Post-#680 M1: the ledger is NOT spliced back into the file — the merged
-    // rows are written to the sidecar below. A legacy in-file decision-ledger
-    // marker span (if one survived the strip) is M1's migration surface; this
-    // heading-based path never re-emits it. `inFileLedgerSpan` is consumed
-    // above (migration + corruption refusal); the span itself is not rewritten.
-    void inFileLedgerSpan;
+    // rows are written to the sidecar below. A pre-M1 in-file decision-ledger
+    // span is migrated on this first update: its rows were read above and
+    // merged into the sidecar rows, and the now-legacy markdown table body
+    // (orphaned after the one-pass strip removed its marker lines) is
+    // removed from the file so it is not left behind as stray table text in
+    // the heading-based file. A purely heading-based file has no table to
+    // remove (removeInFileLedgerBody is a byte-identical no-op then).
+    if (inFileLedgerSpan.kind === "ok") {
+      bytes = removeInFileLedgerBody(bytes);
+    }
 
     // Scaffold post-pass: detect boilerplate headings for idempotency.
     const existingIds = new Set(parsed);

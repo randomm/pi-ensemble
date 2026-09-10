@@ -417,6 +417,38 @@ const LEGACY_MARKER_LINE_RE =
   /<!--\s*(?:pi-rukas|pi-ensemble):agents-md:(?:begin\s+[a-z][a-z0-9-]*(?:\s+v\d+)?|end\s+[a-z][a-z0-9-]*|managed[^\n]*?)\s*-->/;
 
 /**
+ * Remove the in-file decision-ledger body (the markdown table that was
+ * marker-wrapped by the pre-M1 format) from `text`. Post-#681 M2 the ledger
+ * lives in the sidecar; this is a one-shot migration helper for files that
+ * still carry the table inline (with no heading — the sidecar migration is
+ * M1's concern, not M2's).
+ *
+ * The table is identified by its `| key | value | provenance |` header line
+ * and extends through all consecutive `|` lines. Surrounding blank lines are
+ * stripped; the result is byte-identical on a second pass (no table left to
+ * remove).
+ */
+export function removeInFileLedgerBody(text: string): string {
+  const lines = text.split("\n");
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\|\s*key\s*\|\s*value\s*\|\s*provenance\s*\|\s*$/.test(lines[i] ?? "")) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) return text;
+  let end = start;
+  while (end < lines.length && /^\|/.test(lines[end] ?? "")) end++;
+  let s = start;
+  if (s > 0 && (lines[s - 1] ?? "").trim() === "") s--;
+  let e = end;
+  if (e < lines.length && (lines[e] ?? "").trim() === "") e++;
+  const out = [...lines.slice(0, s), ...lines.slice(e)];
+  return out.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
+/**
  * The one-pass migration strip: remove EXACTLY the recognised managed
  * marker lines (begin/end, both pi-rukas and pi-ensemble prefixes, any
  * version shape) and the `:managed` preamble comment line, preserving every
