@@ -14,11 +14,8 @@ import {
   workNotYetOnBranch,
 } from "./work-driver-handoff-consolidate.ts";
 import { renderHandoffMarkdown } from "./work-driver-handoff-markdown.ts";
-import {
-  captureCommittedWork,
-  makeHandoffEmittedEvent,
-} from "./work-driver-handoff-post.ts";
 import { postHandoffWithRetry } from "./work-driver-handoff-post-retry.ts";
+import { captureCommittedWork, makeHandoffEmittedEvent } from "./work-driver-handoff-post.ts";
 import { buildCompletionEvent } from "./work-driver-merged.ts";
 import { releaseClaim } from "./work-driver-path-claims.ts";
 import { inlineHandoffOpsPrompt } from "./work-driver-prompts-late.ts";
@@ -221,14 +218,8 @@ export async function runHandoff(
   // event with a commentUrl is proof of delivery — reuse it (the label
   // re-application below stays: gh --add-label is idempotent server-side).
   let commentUrl = parseHandoffCommentUrl(opsReplyText) ?? priorHandoffCommentUrl(next.eventLog);
-  // #408 — this used to be `/label.*needs-human-attention/i.test(opsReplyText)`,
-  // which matches "I could not apply the label needs-human-attention" just as
-  // happily as a success. It recorded the label as applied, skipped the
-  // mechanical fallback below, and the issue never got labelled — the operator
-  // then had no way to find the cycle that needed them.
-  //
-  // There is nothing to parse here. `gh --add-label` is idempotent, the driver
-  // is already willing to run it, and running it is cheaper than reasoning
+  // #408 — there is nothing to parse here. `gh --add-label` is idempotent, the
+  // driver is already willing to run it, and running it is cheaper than reasoning
   // about whether an agent's prose meant success. Narration cannot establish
   // that a side effect happened; performing it can.
   let labelApplied = false;
@@ -273,12 +264,9 @@ export async function runHandoff(
       );
     }
   }
-  // #674 — carry the consolidation outcome into the handoff-emitted event so
-  // the renderers (chat + GitHub body + /work-status) can print either the
-  // branch-contains-the-work path (consolidated) or the accurate
-  // per-worktree fallback (consolidation infeasible). The `handoff-consolidated`
-  // event is the audit trail; the snapshot's `committedWork` field is the
-  // source the recovery renderers read for the per-worktree paths + SHAs.
+  // #674 — carry the consolidation outcome into the handoff-emitted event so the
+  // renderers can print either the branch-contains-the-work path or the accurate
+  // per-worktree fallback. The `handoff-consolidated` event is the audit trail.
   const consEvent = next.eventLog
     .slice()
     .reverse()
@@ -286,12 +274,6 @@ export async function runHandoff(
       (e): e is Extract<WorkEvent, { kind: "handoff-consolidated" }> =>
         e.kind === "handoff-consolidated",
     );
-  // #674 — carry the consolidation outcome into the handoff-emitted event so
-  // the renderers (chat + GitHub body + /work-status) can print either the
-  // branch-contains-the-work path (consolidated) or the accurate
-  // per-worktree fallback (consolidation infeasible). The `handoff-consolidated`
-  // event is the audit trail; the snapshot's `committedWork` field is the
-  // source the recovery renderers read for the per-worktree paths + SHAs.
   const emitted = makeHandoffEmittedEvent({
     at: Date.now(),
     commentUrl,

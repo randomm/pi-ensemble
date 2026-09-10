@@ -36,13 +36,10 @@ export type WorkStep =
   | "ci" // Step 8 — ops watches CI
   | "merged"; // Step 9 — merged + learnings stored (terminal: success)
 /**
- * Event log — append-only, typed. Driver appends one event per state
- * transition. The log is the audit trail; pipelineState is the derived
- * snapshot. Adding a new event type is additive (older readers will not
- * recognise it but won't crash — they'll see it as an opaque entry).
- *
- * Field naming: prefer `*At` for timestamps (epoch ms), `ms` for durations,
- * `<role>` (lower-case) for subagent roles to match DispatchResult.role.
+ * Event log — append-only, typed. The log is the audit trail; pipelineState
+ * is the derived snapshot. Adding a new event type is additive (older readers
+ * will not recognise it but won't crash). Field naming: `*At` for timestamps,
+ * `ms` for durations, `<role>` (lower-case) for subagent roles.
  */
 export type WorkEvent =
   | {
