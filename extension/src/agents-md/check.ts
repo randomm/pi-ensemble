@@ -27,7 +27,7 @@ import path from "node:path";
 import { detectFacts } from "./detect.ts";
 import { type LedgerRow, driftWarnings } from "./ledger.ts";
 import { omissionFor } from "./renderer.ts";
-import { SectionError, findManagedSections } from "./section-detect.ts";
+import { SectionError, findManagedSections, stripLegacyMarkers } from "./section-detect.ts";
 
 export const EXIT_CLEAN = 0;
 export const EXIT_FINDINGS = 1;
@@ -102,8 +102,14 @@ export function runChecks(
   //    duplicate managed heading) → refuse (exit 2), no further checks. A
   //    file with no managed headings is NOT corrupt — it is a plain operator
   //    file, and the check simply has no managed sections to validate.
+  // Post-#681 M2 migration: a pre-M2 file that still carries HTML-comment
+  // markers (no managed headings yet) is first reduced by the one-pass
+  // strip — the heading pipeline below then validates the now-headerless
+  // spans. The strip is a no-op on a heading-only file.
+  const content = stripLegacyMarkers(fileContent);
+
   try {
-    const spans = findManagedSections(fileContent);
+    const spans = findManagedSections(content);
     // 2. Empty managed sections → a finding (a managed heading with no body is
     //    a broken section, not a legitimate state).
     for (const span of spans) {
@@ -115,18 +121,39 @@ export function runChecks(
     if (e instanceof SectionError) {
       return {
         code: EXIT_REFUSE,
-        findings: [{ kind: "stale-path", message: `corrupt managed sections: ${e.message}` }],
+        findings: [{ kind: "empty-section", message: e.message }],
         corrupt: true,
       };
     }
     throw e;
   }
 
+  // 1b. A pre-M2 file whose markers cannot be reduced — a begin/end pair
+  //     whose id is not a managed heading (e.g. a hand-written span, or a
+  //     stray `pi-rukas:agents-md:` comment the strip cannot classify) — is a
+  //     corruption state: refuse (exit 2), never a guess. A file with no
+  //     recognised marker lines at all is untouched by the strip (the no-op
+  //     case) and is not corrupt.
+  if (content !== fileContent && /<!--\s*(?:pi-rukas|pi-ensemble):agents-md:/.test(fileContent)) {
+    return {
+      code: EXIT_REFUSE,
+      findings: [
+        ...findings,
+        {
+          kind: "empty-section",
+          message:
+            "legacy agent-md markers could not be reduced to managed headings; refusing to check",
+        },
+      ],
+      corrupt: true,
+    };
+  }
+
   // 3. Referenced paths: any backtick-wrapped repo-relative path in the file
   //    that no longer exists is a stale-path finding. Includes dotted paths
   //    like `.github/workflows/ci.yml` — a CI workflow the environment section
   //    named is exactly the thing that goes stale when the file is deleted.
-  for (const m of fileContent.matchAll(
+  for (const m of content.matchAll(
     /`([A-Za-z0-9_./-]+\.(?:ts|tsx|js|json|toml|yml|yaml|md|sh))`/g,
   )) {
     const p = m[1];

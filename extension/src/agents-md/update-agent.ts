@@ -34,6 +34,7 @@ import {
   findManagedSections,
   insertManagedSectionAfter,
   presentManagedIds,
+  removeInFileLedgerBody,
   spliceManagedSection,
   stripLegacyMarkers,
 } from "./section-detect.ts";
@@ -128,11 +129,23 @@ export function makeUpdateAgent(
       state = "no-file";
     } else {
       try {
-        // Post-#681 M2: discriminate on managed HEADINGS, not markers. A file
-        // with no managed heading (including a legacy file that still only has
-        // markers) routes to the wrap/migrate path, where the one-pass strip
-        // re-anchors it.
-        state = presentManagedIds(fs.readFile(file)).length > 0 ? "has-markers" : "no-markers";
+        // Post-#681 M2: discriminate on managed HEADINGS (with the legacy
+        // marker strip as tiebreaker), not on marker presence. A file with ≥1
+        // managed heading — or with no heading but a legacy marker line that
+        // post-strip resolves to one — takes the heading-splice path (strip +
+        // re-anchor + splice). A file with neither is brownfield → wrap.
+        const raw = fs.readFile(file);
+        const stripped = stripLegacyMarkers(raw);
+        // A legacy (pre-migration) file is one whose managed marker lines
+        // survive the strip (the strip removed pi-rukas/pi-ensemble marker
+        // lines from it). A file with neither managed headings nor managed
+        // marker lines is a true brownfield file → the wrap path.
+        const hadManagedMarkerLines =
+          stripped !== raw && /<!--\s*(?:pi-rukas|pi-ensemble):agents-md:/.test(raw);
+        state =
+          presentManagedIds(stripped).length > 0 || hadManagedMarkerLines
+            ? "has-markers"
+            : "no-markers";
       } catch {
         state = "has-markers"; // corrupt → treat as has-markers; verb will refuse
       }
@@ -143,33 +156,22 @@ export function makeUpdateAgent(
     }
 
     if (state === "no-markers") {
-      // Post-#681 M2: a file with no managed heading is either a true
-      // brownfield file (no markers, no headings) OR a legacy file that still
-      // has only markers (no headings yet). The one-pass strip tells them
-      // apart: if the strip removed any marker lines, the file is legacy and
-      // the has-markers path (strip + re-anchor + heading-splice) handles it.
-      // If the strip removed nothing, it is a true brownfield → the wrap path.
-      const raw = fs.readFile(file);
-      const strippedForState = stripLegacyMarkers(raw);
-      const hadMarkers = strippedForState !== raw;
-      if (!hadMarkers) {
-        // True brownfield: no markers, no headings → the wrap path.
-        const scaffoldBodies: { id: string; body: string }[] = [];
-        if (effectiveOpts.scaffold) {
-          const scaffoldResult = computeScaffold(new Set(), {
-            scaffold: true,
-            answers: effectiveOpts.answers,
-          });
-          for (const s of scaffoldResult.sections) scaffoldBodies.push({ id: s.id, body: s.body });
-        }
-        return runWrapFn(root, file, fs, effectiveDryRun, {
-          scaffoldBodies: scaffoldBodies.length ? scaffoldBodies : undefined,
+      // True brownfield: no managed heading, no managed marker lines → the
+      // wrap path. (The legacy marker case is has-markers by construction:
+      // the state discrimination above already routes a file whose managed
+      // marker lines survive the strip to the heading-splice path.)
+      const scaffoldBodies: { id: string; body: string }[] = [];
+      if (effectiveOpts.scaffold) {
+        const scaffoldResult = computeScaffold(new Set(), {
+          scaffold: true,
           answers: effectiveOpts.answers,
-        }) as UpdateVerbResult;
+        });
+        for (const s of scaffoldResult.sections) scaffoldBodies.push({ id: s.id, body: s.body });
       }
-      // Legacy file with markers → fall through to the has-markers path below
-      // (the strip is re-applied there; it is idempotent, so the second
-      // application is a no-op and `stripped` === `strippedForState`).
+      return runWrapFn(root, file, fs, effectiveDryRun, {
+        scaffoldBodies: scaffoldBodies.length ? scaffoldBodies : undefined,
+        answers: effectiveOpts.answers,
+      }) as UpdateVerbResult;
     }
 
     // --- has-markers path ---
@@ -311,7 +313,11 @@ export function makeUpdateAgent(
     }
     spans = findManagedSections(currentBytes);
     let bytes = currentBytes;
-    for (const span of spans) {
+    // Splice in the SAME order the sections appear in the file: splice
+    // re-detects spans on the bytes it was given, so splicing an EARLIER
+    // section after a later one would re-detect it under the later section's
+    // (larger) span and silently eat its body.
+    for (const span of [...spans].sort((a, b) => a.headingLine - b.headingLine)) {
       // The decision-ledger is not a managed heading section (it is a sidecar
       // post-M1, or a legacy in-file span M1 migrates) — never re-emit it here.
       const body = updates.get(span.id);
@@ -368,10 +374,13 @@ export function makeUpdateAgent(
         const isDetected = existing?.provenance === "detected";
         if (effectiveOpts.refresh === true) {
           if (!isDetected) continue; // refresh only touches [detected:agent] rows
-          const existingBody = findManagedSections(stripped).find((s) => s.id === id)?.body;
+          // The stored body carries the blank-line-after-heading separator by
+          // convention (section-detect.ts) — compare both normalised shapes.
+          const stored = (
+            findManagedSections(stripped).find((s) => s.id === id)?.body ?? ""
+          ).replace(/^\n/, "");
           const sameValue =
-            existingBody !== undefined &&
-            (existingBody.endsWith("\n") ? existingBody : `${existingBody}\n`) === spliceForm;
+            (stored.endsWith("\n") ? stored : `${stored}\n`) === spliceForm || stored === body;
           if (sameValue) continue; // byte-identical → keep row + date, no churn
           merged = upsertRow(merged, {
             key: id,

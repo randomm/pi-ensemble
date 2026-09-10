@@ -203,7 +203,9 @@ export function findManagedSections(text: string): SectionSpan[] {
     const id = managedIdForHeading(head.raw);
     if (!id) continue;
     if (seen.has(id)) {
-      throw new SectionError(`duplicate managed heading "${id}" (${head.raw})`);
+      throw new SectionError(
+        `duplicate managed heading "${head.raw}" (id "${id}"); it appears twice — refusing to guess which span is managed`,
+      );
     }
     seen.add(id);
 
@@ -220,25 +222,30 @@ export function findManagedSections(text: string): SectionSpan[] {
       }
     }
 
-    // The section's content starts after the heading, skipping the blank
-    // separator line(s) the renderer emits between the heading and the body.
-    // It ends at the next heading of level ≤ this heading (exclusive), or at
-    // EOF. Trailing blank lines are trimmed for the body so an empty section
-    // yields "".
-    let contentStart = head.line + 1;
-    while (contentStart <= endLine && (lines[contentStart] ?? "").trim() === "") contentStart++;
-    let lastNonBlank = endLine;
-    while (lastNonBlank >= contentStart && (lines[lastNonBlank] ?? "").trim() === "")
-      lastNonBlank--;
-    const contentEnd = lastNonBlank + 1;
-    const body = lines.slice(contentStart, contentEnd).join("\n");
+    // Body convention (shared with spliceManagedSection so read+re-splice
+    // round-trips are byte-identical): the body is the raw run of lines from
+    // the line AFTER the heading (so it LEADS with the blank separator line
+    // the renderer emits) through the last non-blank content line. An empty
+    // section (heading immediately followed by a boundary) yields "". The
+    // trailing blank before the next heading is NOT part of the body; the
+    // next heading line starts the following section.
+    let lastNonBlank = -1;
+    for (let k = endLine; k > head.line; k--) {
+      if ((lines[k] ?? "").trim() !== "") {
+        lastNonBlank = k;
+        break;
+      }
+    }
+    const contentEnd = lastNonBlank >= 0 ? lastNonBlank + 1 : head.line + 1;
+    const body =
+      contentEnd > head.line + 1 ? lines.slice(head.line + 1, contentEnd).join("\n") : "";
 
     spans.push({
       id,
       heading: head.raw,
       level: head.level,
       headingLine: head.line,
-      contentStart,
+      contentStart: head.line + 1,
       contentEnd,
       body,
     });
@@ -256,13 +263,16 @@ export function presentManagedIds(text: string): string[] {
 
 /**
  * The heading-delimited body of the managed section `id`, or undefined when
- * absent. A managed id that was never given a heading (e.g. the decision-
- * ledger, which is now a sidecar) simply returns undefined — absence is not
- * corruption. Throws SectionError on a duplicate managed heading.
+ * absent. Returned in the caller-facing convention: blank separator after
+ * the heading + content + trailing newline (an empty section is ""). A
+ * managed id that was never given a heading (e.g. the decision-ledger, which
+ * is now a sidecar) simply returns undefined — absence is not corruption.
+ * Throws SectionError on a duplicate managed heading.
  */
 export function managedSectionBody(text: string, id: string): string | undefined {
   const span = findManagedSections(text).find((s) => s.id === id);
-  return span ? span.body : undefined;
+  if (!span) return undefined;
+  return span.body === "" ? "" : `${span.body}\n`;
 }
 
 /**
@@ -276,54 +286,46 @@ export function managedSectionBody(text: string, id: string): string | undefined
  * section are copied verbatim, so hand-written prose and other owners'
  * comments survive byte-for-byte by construction (the #253 invariant).
  */
+/**
+ * Normalise a caller body to the stored convention (blank separator after
+ * the heading + content, no trailing newline). A body that ALREADY carries
+ * a leading blank separator is taken to be in stored form (the no-op
+ * re-splice case) and only its trailing newline (if any) is dropped; a body
+ * without a leading separator gets the blank separator prepended (the
+ * update case). An empty body stays empty.
+ */
+function spliceForm(body: string): string {
+  if (body === "") return "";
+  if (body.startsWith("\n")) {
+    // Already in stored form (leading separator present): drop only a
+    // trailing newline if there is one.
+    return body.endsWith("\n") ? body.slice(0, -1) : body;
+  }
+  return `\n${body}`.replace(/\n$/, "");
+}
+
 export function spliceManagedSection(text: string, id: string, body: string): string {
   const spans = findManagedSections(text);
   const span = spans.find((s) => s.id === id);
   if (!span) return text;
+  // Body-convention splice (matches `findManagedSections`): the span between
+  // the heading line and the next ≤-level heading (or EOF) is replaced with
+  // exactly the stored body — which, by convention, LEADS with the blank
+  // separator line after the heading (or is "" for an empty section) and
+  // carries no trailing newline (the following blank line / next heading is
+  // the `rest`). Replacing the same span with the same body reproduces the
+  // file byte-for-byte: the idempotency the ticket requires.
   const lines = text.split("\n");
-  // The section's content is the run of NON-HEADING lines between the heading
-  // and the next ≤-level heading (or EOF). Replace exactly the CONTENT lines
-  // with the new body lines, preserving the heading line, the blank separator
-  // line(s) between heading and content, and every byte outside the section.
-  // Copying the separator line(s) verbatim is what keeps the rest of the file
-  // byte-stable (the #253 invariant): bytes outside the managed content are
-  // copied verbatim, so hand-written prose and other owners' comments survive
-  // byte-for-byte by construction.
-  const content = body.endsWith("\n") ? body.slice(0, -1) : body;
-  const newBodyLines = content === "" ? [] : content.split("\n");
   const headLine = span.headingLine;
-  // Locate the content start (first non-blank line after the heading) and the
-  // next heading line (the start of the following section, or the file end).
-  // The blank separator line between the heading and the content is part of
-  // `before` (copied verbatim). The blank line between this section's body
-  // and the next heading is part of `rest` — so that the new body is followed
-  // by the existing separator before the next section. `rest` starts at
-  // (nextHeading - 1) when that line is a blank separator, or at nextHeading
-  // otherwise (the file-end case). This is what keeps the output byte-stable
-  // (the #253 invariant: bytes outside the managed content are copied
-  // verbatim, so hand-written prose and other owners' comments survive).
-  let contentStart = headLine + 1;
-  while (contentStart < lines.length && (lines[contentStart] ?? "").trim() === "") contentStart++;
-  let nextHeading = lines.length; // the next heading line, or EOF
-  for (let i = contentStart; i < lines.length; i++) {
-    if (HEADING_RE.test((lines[i] ?? "").trim())) {
-      nextHeading = i;
-      break;
-    }
-  }
-  // `rest` includes the blank separator line before the next heading (so the
-  // new body is followed by that separator), or starts at the next heading
-  // when there is no separator (e.g. the section is last in the file).
-  let restStart = nextHeading;
-  if (
-    nextHeading < lines.length &&
-    nextHeading > 0 &&
-    (lines[nextHeading - 1] ?? "").trim() === ""
-  ) {
-    restStart = nextHeading - 1;
-  }
-  const before = lines.slice(0, contentStart); // heading + blank separator(s)
-  const rest = lines.slice(restStart); // separator + next section onward (or empty)
+  // The span is lines headLine+1 .. span.contentEnd-1 (contentEnd is one past
+  // the last non-blank content line); everything from contentEnd onward (the
+  // trailing blank(s) and the next heading) is copied verbatim as `rest`.
+  // The stored body (by convention: blank separator + content, no trailing
+  // newline) replaces the span exactly, so re-splicing the same body is a
+  // byte-identical no-op (the idempotency the ticket requires).
+  const newBodyLines = spliceForm(body) === "" ? [] : spliceForm(body).split("\n");
+  const before = lines.slice(0, headLine + 1); // through the heading line
+  const rest = lines.slice(span.contentEnd); // separator + next section onward
   return [...before, ...newBodyLines, ...rest].join("\n");
 }
 
@@ -334,18 +336,37 @@ export function spliceManagedSection(text: string, id: string, body: string): st
  * in-place update must go through spliceManagedSection).
  */
 export function appendManagedSection(text: string, id: string, body: string): string {
-  const content = body.endsWith("\n") ? body.slice(0, -1) : body;
-  const heading = renderHeadingFor(id);
+  const known = MANAGED_HEADING_TEXT[id];
+  if (!known) throw new SectionError(`unknown managed id "${id}" — no heading text defined`);
+  const clean = body.endsWith("\n") ? body : `${body}\n`;
   // SCAFFOLD_BODIES embed the heading line in the body (e.g. the body starts
-  // with `# Git Workflow`). If the body already starts with a heading that maps
-  // to `id`, use the body as-is (the embedded heading IS the section heading);
-  // otherwise prepend the canonical heading. This keeps the rendered section
-  // byte-identical to the scaffold body (no double heading).
-  const firstLine = content.split("\n")[0] ?? "";
-  const bodyHasOwnHeading = managedIdForHeading(firstLine) === id;
-  const block = bodyHasOwnHeading ? content : `${heading}\n\n${content}`;
+  // with `# Git Workflow`). If the body starts with ANY heading line, the body
+  // IS the full section and is appended verbatim (no second heading); only a
+  // heading-less body gets the canonical heading from the single-source table.
+  const headingLine = /^(#{1,6})\s/.test(clean) ? undefined : known;
+  const block = headingLine ? `${headingLine}\n\n${clean}` : clean;
   const prefix = text.length === 0 || text.endsWith("\n") ? "" : "\n";
-  return `${text}${prefix}\n${block}\n`;
+  return text.length === 0 ? `${block}\n` : `${text}${prefix}\n${block}\n`;
+}
+
+/**
+ * The insertion seam for `targetId`: the byte offset one past the section's
+ * last body character, with the separator newline(s) after it skipped (the
+ * inserted section is separated from the target by exactly one blank line).
+ * Returns undefined when the target section is absent.
+ */
+function managedSectionEndOffset(text: string, targetId: string): number | undefined {
+  const s = findManagedSections(text).find((x) => x.id === targetId);
+  if (!s) return undefined;
+  // contentEnd is one past the last content line; the offset just after that
+  // line's text is where the separator blank(s) begin.
+  const lines = text.split("\n");
+  let off = 0;
+  for (let i = 0; i < s.contentEnd; i++) off += (lines[i] ?? "").length + 1;
+  let end = off;
+  if (end < text.length && (text[end] ?? "") === "\n") end++;
+  while (end < text.length && (text[end] ?? "") === "\n") end++;
+  return end;
 }
 
 /**
@@ -370,39 +391,26 @@ export function insertManagedSectionAfter(
   if (spans.some((s) => s.id === id)) {
     throw new SectionError(`section id "${id}" already exists; use splice to update it`);
   }
-  const target = spans.find((s) => s.id === targetId);
-  if (!target) return appendManagedSection(text, id, body);
-
-  const lines = text.split("\n");
-  // The insertion point is just after the target's delimiter boundary
-  // (contentEnd, the first line past the body's trailing blank). Walk forward
-  // from contentEnd past any existing blank separator lines to place the new
-  // section right after the target's content, before the next heading.
-  const insertAt = target.contentEnd;
-  // Find the next line that is a heading (the section after target); insert
-  // before it, keeping one blank line of separation.
-  let nextHeadingLine = -1;
-  for (let i = insertAt; i < lines.length; i++) {
-    if (HEADING_RE.test((lines[i] ?? "").trim())) {
-      nextHeadingLine = i;
-      break;
-    }
+  const seam = managedSectionEndOffset(text, targetId);
+  if (seam === undefined) return appendManagedSection(text, id, body);
+  const known = MANAGED_HEADING_TEXT[id];
+  if (!known) throw new SectionError(`unknown managed id "${id}" — no heading text defined`);
+  const clean = body.endsWith("\n") ? body : `${body}\n`;
+  // A body carrying its own heading line (scaffold bodies do) is inserted
+  // verbatim; a heading-less body gets the canonical heading.
+  const headingLine = /^(#{1,6})\s/.test(clean) ? undefined : known;
+  const block = headingLine ? `${headingLine}\n\n${clean}` : clean;
+  const tail = text.slice(seam);
+  if (/^#{1,6}\s/.test(tail)) {
+    // The tail starts at the next section's heading: head + one blank line +
+    // the block + one blank line + tail.
+    return `${text.slice(0, seam)}\n${block}\n${tail}`;
   }
-  const content = body.endsWith("\n") ? body.slice(0, -1) : body;
-  const heading = renderHeadingFor(id);
-  const block = [...content.split("\n"), ""];
-
-  if (nextHeadingLine === -1) {
-    // Target is the last section — append after it (at EOF).
-    const trimmed = lines.slice(0, insertAt).join("\n");
-    const base = trimmed.endsWith("\n") ? trimmed.slice(0, -1) : trimmed;
-    return `${base}\n\n${heading}\n\n${content}\n`;
-  }
-  // Insert the new section before the next heading, with blank-line separation.
-  const before = lines.slice(0, nextHeadingLine).join("\n").replace(/\n+$/, "\n");
-  const after = lines.slice(nextHeadingLine).join("\n");
-  const inserted = `${heading}\n\n${content}\n\n`;
-  return `${before}${inserted}${after}`;
+  // Plain-prose tail: collapse the target's trailing blank(s) to one blank
+  // line, insert the block, then the prose without its leading blanks.
+  const head = text.slice(0, seam).replace(/\n+$/, "");
+  const prose = tail.replace(/^\n+/, "");
+  return `${head}\n\n${block}${prose}`;
 }
 
 // ---------------------------------------------------------------- migration

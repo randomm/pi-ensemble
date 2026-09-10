@@ -130,6 +130,11 @@ export function runWrap(
   return {
     verb: "update",
     plan: {
+      // Under M2 the FileState "no-markers" literal means "brownfield file
+      // with no managed headings" (the wrap path). (The dispatch reached the
+      // wrap from the has-markers state when the file carried legacy marker
+      // lines that the strip resolved to managed headings — the resulting
+      // plan still records the brownfield wrap that produced these bytes.)
       state: "no-markers",
       newBytes: bytes,
       oldBytes: current,

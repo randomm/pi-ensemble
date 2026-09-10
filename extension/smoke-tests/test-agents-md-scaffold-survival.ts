@@ -40,7 +40,7 @@ import {
 import {
   managedSectionBody,
   presentManagedIds,
-  spliceSectionBody,
+  spliceManagedSection as spliceSectionBody,
 } from "../src/agents-md/section-detect.ts";
 import { type OperatorAnswers } from "../src/agents-md/scaffold.ts";
 

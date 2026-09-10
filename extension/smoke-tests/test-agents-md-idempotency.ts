@@ -105,14 +105,16 @@ let A: string;
     res.exitCode === 0 && res.plan?.wouldWrite === true,
     "create writes a fresh file (wouldWrite)",
   );
-  // Post-#681 M2: the fact sections are heading-delimited (## Quality Gates,
-  // ## Commands, ## Environment) by the new renderAgent. The renderer's own
+  // Post-#681 M2: fact sections are heading-delimited by renderAgent; the
   // zero-`<!--` and h1/h2 boundary guarantees are pinned in the dedicated
-  // renderAgent/sectionExtent blocks below (no out-of-scope preamble/scaffold).
+  // renderAgent/sectionExtent blocks below.
   assert(
     A.includes("## Quality Gates") && A.includes("## Commands") && A.includes("## Environment"),
     "create: the three fact sections are heading-delimited (M2 renderer output)",
   );
+  for (const id of ["quality-gates", "commands", "environment"]) {
+    assert(res.plan?.managedIds.includes(id), `create emits the ${id} section`);
+  }
   assert(
     !A.includes("## Decision ledger"),
     "create: decision-ledger is NOT an in-file section (moved to sidecar post-#680 M1)",
@@ -476,7 +478,7 @@ rmSync(tmp, { recursive: true, force: true });
   );
   assert(
     content.includes("## Code Style"),
-    "agentOverride (ruby): code-style section inserted",
+    "agentOverride (ruby): code-style section inserted (heading-delimited, M2)",
   );
   assert(
     content.includes("- Frozen string literals required"),

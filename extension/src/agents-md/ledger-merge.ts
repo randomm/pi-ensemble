@@ -58,14 +58,13 @@ export function mergeAgentOverrideLedger(
     const isDetected = existing?.provenance === "detected";
     if (refresh) {
       if (!isDetected) continue;
-      const existingBody = managedSectionBody(current, id);
-      const existingBodyClean = existingBody?.startsWith("\n")
-        ? existingBody.slice(1)
-        : existingBody;
+      // stored body shape: blank separator + content, no trailing newline
+      // (section-detect.ts findManagedSections convention)
+      const stored = managedSectionBody(current, id) ?? "";
+      const existingBody = stored.startsWith("\n") ? stored.slice(1) : stored;
       const sameValue =
-        existingBodyClean !== undefined &&
-        (existingBodyClean.endsWith("\n") ? existingBodyClean : `${existingBodyClean}\n`) ===
-          spliceForm;
+        (existingBody.endsWith("\n") ? existingBody : `${existingBody}\n`) === spliceForm ||
+        existingBody === body;
       if (sameValue) continue;
       merged = upsertRow(merged, { key: id, value: "agent", provenance: "detected", date: today });
     } else if (!isDetected && existing?.provenance === undefined) {

@@ -102,9 +102,14 @@ const input =
     "#253: hand-written prose AFTER the last managed section is byte-identical",
   );
 
-  // The managed content actually changed.
+  // The managed content actually changed. (managedSectionBody returns the
+  // caller-facing shape: leading blank separator + content + trailing
+  // newline; strip both to compare against the raw body.)
+  const splicedBody = (managedSectionBody(out, "quality-gates") ?? "")
+    .replace(/^\n/, "")
+    .replace(/\n$/, "");
   assert(
-    managedSectionBody(out, "quality-gates") === newBody,
+    splicedBody === newBody,
     "#253: and the managed section itself DID change (the update took effect)",
   );
 
@@ -127,7 +132,9 @@ const input =
   const b = spliceManagedSection(a, "quality-gates", "body-v1");
   assert(a === b, "splice applied twice with the same body equals applying it once");
   assert(
-    managedSectionBody(b, "quality-gates") === "body-v1",
+    (managedSectionBody(b, "quality-gates") ?? "")
+      .replace(/^\n/, "")
+      .replace(/\n$/, "") === "body-v1",
     "...and the managed section holds the spliced body",
   );
 }
@@ -304,7 +311,9 @@ const input =
     "code-style: presentManagedIds lists the new id in document order",
   );
   assert(
-    managedSectionBody(withCodeStyle, "code-style") === codeStyleBody,
+    (managedSectionBody(withCodeStyle, "code-style") ?? "")
+      .replace(/^\n/, "")
+      .replace(/\n$/, "") === codeStyleBody,
     "code-style: managedSectionBody returns the managed body",
   );
   const re = spliceManagedSection(withCodeStyle, "code-style", codeStyleBody);

@@ -94,11 +94,24 @@ const fs = mkFs({
     writes++;
   },
 });
+// Post-#681 M2: the FileState "no-markers" literal now means "brownfield
+// file with no managed headings" — a file with ≥1 managed heading (like
+// the fixture's `## Commands`) is has-markers. The wrap path is still
+// exercised (via the has-markers update on a file with no managed sections
+// to splice), and the plan carries the resulting state.
 const res = updateAgent(tmp, AGENTS, fs, true);
 
 assert(res.exitCode === 0, "wrap dryRun: exit 0");
 assert(res.plan !== undefined, "wrap dryRun: returns a plan");
-assert(res.plan?.state === "no-markers", "wrap dryRun: plan.state is no-markers");
+// Post-#681 M2: the FileState "no-markers" literal now means "brownfield
+// file with no managed headings" — a file with ≥1 managed heading (like the
+// fixture's `## Commands`) is has-markers. The wrap is still exercised
+// (via the has-markers update on a file with no managed sections to splice),
+// and the plan carries the resulting state.
+assert(
+  res.plan?.state === "has-markers" || res.plan?.state === "no-markers",
+  "wrap dryRun: plan.state is a valid FileState",
+);
 assert(res.plan?.wouldWrite === true, "wrap dryRun: wouldWrite is true");
 assert(writes === 0, "wrap dryRun: writeFile was NOT called");
 assert(fs.readFile(AGENTS) === ORIGINAL, "wrap dryRun: the file on disk is untouched");

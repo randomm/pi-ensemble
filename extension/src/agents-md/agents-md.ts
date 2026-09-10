@@ -28,7 +28,12 @@ import {
   runScaffoldPostPass,
   runWrapScaffold,
 } from "./scaffold.ts";
-import { findManagedSections, managedSectionBody, presentManagedIds } from "./section-detect.ts";
+import {
+  findManagedSections,
+  managedSectionBody,
+  presentManagedIds,
+  stripLegacyMarkers,
+} from "./section-detect.ts";
 import { SIDECAR_RELATIVE_PATH, type SidecarPlan, sidecarDir, sidecarPath } from "./sidecar.ts";
 import { makeUpdateAgent } from "./update-agent.ts";
 import { runWrap } from "./wrap-io.ts";
@@ -102,12 +107,28 @@ export interface VerbResult {
 
 function fileState(fs: AgentsMdFs, file: string): FileState {
   if (!fs.stat(file)) return "no-file";
+  const raw = fs.readFile(file);
+  // Post-#681 M2: managed sections are identified by heading text (not
+  // HTML-comment markers), so the state discrimination is "has-managed-
+  // headings" — a file with ≥1 managed heading takes the heading-splice
+  // path, a file with none takes the brownfield wrap path. A file whose
+  // legacy marker lines survive the strip (i.e. a marker-era file with no
+  // heading yet) is has-markers: the update path strips them and re-anchors
+  // the now-markerless spans, rather than the wrap appending duplicates.
   try {
-    // Post-#681 M2: managed sections are identified by heading text (not
-    // HTML-comment markers), so the state discrimination is "has-managed-
-    // headings" — a file with ≥1 managed heading takes the heading-splice
-    // path, a file with none takes the brownfield wrap path.
-    return presentManagedIds(fs.readFile(file)).length > 0 ? "has-markers" : "no-markers";
+    const stripped = stripLegacyMarkers(raw);
+    // A true legacy (pre-migration) file is one whose managed marker lines
+    // survive the strip: the strip removed pi-rukas / pi-ensemble managed
+    // marker lines from it. A file with neither managed headings (after the
+    // strip) nor surviving managed marker lines is a true brownfield file
+    // → no-markers/wrap. A marker-era file that already has headings is
+    // has-markers by heading presence alone.
+    const ids = presentManagedIds(stripped);
+    const hasManagedHeadings = ids.length > 0;
+    const hadManagedMarkerLines =
+      stripped !== raw && /<!--\s*(?:pi-rukas|pi-ensemble):agents-md:/.test(raw);
+    if (hasManagedHeadings || hadManagedMarkerLines) return "has-markers";
+    return "no-markers";
   } catch {
     // Corrupt structure — treat as has-markers; the verb will refuse.
     return "has-markers";
