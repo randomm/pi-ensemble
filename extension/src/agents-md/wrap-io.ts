@@ -9,15 +9,15 @@
 import type { AgentsMdFs, VerbResult } from "./agents-md.ts";
 import { detectFacts } from "./detect.ts";
 import { renderLedger } from "./ledger.ts";
-import { presentIds } from "./markers.ts";
 import { commandsBody, environmentBody, gatesBody, omissionFor } from "./renderer.ts";
 import { type OperatorAnswers, computeScaffold, runWrapScaffold } from "./scaffold.ts";
+import { presentManagedIds } from "./section-detect.ts";
 import { type SidecarPlan, sidecarDir, sidecarPath } from "./sidecar.ts";
 import { WrapError, isInsertionsOnly, wrapBytes, wrapLedgerRows } from "./wrap.ts";
 
 function parseMarkersSafe(bytes: string): string[] {
   try {
-    return presentIds(bytes);
+    return presentManagedIds(bytes);
   } catch {
     return [];
   }

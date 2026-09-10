@@ -43,7 +43,7 @@
 
 import type { DetectedFacts } from "./detect.ts";
 import type { LedgerRow } from "./ledger.ts";
-import { MARKER_VERSION } from "./markers.ts";
+import { renderHeadingFor } from "./section-detect.ts";
 
 /** A refusal from the wrap: the caller maps this to exit 2. */
 export class WrapError extends Error {}
@@ -160,15 +160,6 @@ export function classifySections(original: string): WrapSection[] {
   return sections;
 }
 
-// Emission uses the new pi-rukas prefix (#630); legacy pi-ensemble: pairs
-// in brownfield files stay doctrine and are left byte-for-byte untouched.
-function markerBegin(id: string): string {
-  return `<!-- pi-rukas:agents-md:begin ${id} v${MARKER_VERSION} -->`;
-}
-function markerEnd(id: string): string {
-  return `<!-- pi-rukas:agents-md:end ${id} -->`;
-}
-
 /**
  * Produce the wrapped bytes. Throws WrapError when:
  *   - any section is ambiguous (caller: exit 1 + a finding per section)
@@ -221,46 +212,31 @@ export function wrapBytes(
     );
   }
 
+  // Post-#681 M2: the wrap emits NO marker pairs. A machine section is already
+  // a heading-delimited managed section (its heading names the id and its body
+  // matches the id's shape), so the wrap leaves it EXACTLY where it is — the
+  // heading is the anchor, and nothing is inserted around it. This makes the
+  // wrap idempotent on its own output (a second wrap is a byte-identical
+  // no-op), which the marker-era wrap could not guarantee because re-wrapping
+  // emitted a nested marker pair. Only MISSING managed ids (no section with
+  // that heading) are appended as heading-delimited blocks.
   const out: string[] = [];
-  const nextHeading = new Map<number, number>(); // heading line -> contentEnd + 1
-  for (const s of sections) {
-    const last = s.contentLines[s.contentLines.length - 1];
-    nextHeading.set(s.headingLine, (last === undefined ? s.headingLine : last) + 1);
-  }
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-    const sec = machineByLine.get(i);
-    if (sec) {
-      // Emit the section (heading, begin marker, verbatim content lines, end
-      // marker) exactly once, then skip the content lines in the walk — a
-      // second emission would duplicate bytes and break insertions-only.
-      out.push(line);
-      out.push(markerBegin(sec.id as string));
-      for (const cl of sec.contentLines) {
-        // Verbatim, blanks and all — the insertions-only invariant does not
-        // permit even deleting a blank.
-        out.push(lines[cl] ?? "");
-      }
-      out.push(markerEnd(sec.id as string));
-      i = (nextHeading.get(i) ?? i + 1) - 1;
-    } else {
-      out.push(line);
-    }
+  for (const line of lines) {
+    out.push(line);
   }
 
   const appendBlock: string[] = [];
   for (const b of appended) {
-    appendBlock.push(
-      markerBegin(b.id),
-      b.body.endsWith("\n") ? b.body : `${b.body}\n`,
-      markerEnd(b.id),
-    );
+    // Each appended managed section is a heading-delimited block: the exact
+    // heading text for the id (single source in section-detect.ts), a blank
+    // line, the body, a trailing newline. No comment bytes.
+    appendBlock.push(`${renderHeadingFor(b.id)}\n\n${b.body}`.replace(/\n$/, ""));
   }
 
   let result = out.join("\n");
   if (!result.endsWith("\n")) result += "\n";
   if (appendBlock.length > 0) {
-    result += `\n${appendBlock.join("\n")}\n`;
+    result += `\n${appendBlock.join("\n\n")}\n`;
   }
 
   return {

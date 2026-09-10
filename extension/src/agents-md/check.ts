@@ -26,8 +26,8 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { detectFacts } from "./detect.ts";
 import { type LedgerRow, driftWarnings } from "./ledger.ts";
-import { MarkerError, parseMarkers } from "./markers.ts";
 import { omissionFor } from "./renderer.ts";
+import { SectionError, findManagedSections } from "./section-detect.ts";
 
 export const EXIT_CLEAN = 0;
 export const EXIT_FINDINGS = 1;
@@ -98,30 +98,29 @@ export function runChecks(
   const findings: CheckFinding[] = [];
   const corrupt = false;
 
-  // 1. Parse markers. Corruption → refuse (exit 2), no further checks.
-  let ids: string[] = [];
+  // 1. Detect managed sections by heading text. Structural corruption (a
+  //    duplicate managed heading) → refuse (exit 2), no further checks. A
+  //    file with no managed headings is NOT corrupt — it is a plain operator
+  //    file, and the check simply has no managed sections to validate.
   try {
-    ids = parseMarkers(fileContent).spans.map((s) => s.id);
+    const spans = findManagedSections(fileContent);
+    // 2. Empty managed sections → a finding (a managed heading with no body is
+    //    a broken section, not a legitimate state).
+    for (const span of spans) {
+      if (span.body.trim().length === 0) {
+        findings.push({ kind: "empty-section", message: `managed section "${span.id}" is empty` });
+      }
+    }
   } catch (e) {
-    if (e instanceof MarkerError) {
+    if (e instanceof SectionError) {
       return {
         code: EXIT_REFUSE,
-        findings: [{ kind: "stale-path", message: `corrupt markers: ${e.message}` }],
+        findings: [{ kind: "stale-path", message: `corrupt managed sections: ${e.message}` }],
         corrupt: true,
       };
     }
     throw e;
   }
-
-  // 2. Empty managed sections → refuse (a managed section with no content is a
-  //    broken splice, not a legitimate state).
-  for (const span of parseMarkers(fileContent).spans) {
-    const body = fileContent.slice(span.contentStart, span.contentEnd).trim();
-    if (body.length === 0) {
-      findings.push({ kind: "empty-section", message: `managed section "${span.id}" is empty` });
-    }
-  }
-  void ids;
 
   // 3. Referenced paths: any backtick-wrapped repo-relative path in the file
   //    that no longer exists is a stale-path finding. Includes dotted paths

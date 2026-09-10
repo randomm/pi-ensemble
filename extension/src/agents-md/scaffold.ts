@@ -31,7 +31,15 @@
 
 import type { DetectedFacts } from "./detect.ts";
 import type { LedgerRow } from "./ledger.ts";
-import { MARKER_VERSION, appendSection, insertSectionAfter } from "./markers.ts";
+import { appendManagedSection, insertManagedSectionAfter } from "./section-detect.ts";
+
+// Pre-#681 M2 the scaffold post-pass inserted marker-wrapped spans via
+// markers.ts `appendSection`/`insertSectionAfter`. Post-#681 M2 the same
+// primitives are heading-based (section-detect.ts): a managed section is a
+// heading-delimited block, and the insertion seam is the heading boundary.
+// The names below keep the call sites readable as the marker-era names.
+const appendSection = appendManagedSection;
+const insertSectionAfter = insertManagedSectionAfter;
 
 // ------------------------------------------------------------------ types
 
