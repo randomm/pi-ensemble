@@ -402,5 +402,53 @@ function mkState(issue: number): WorkState {
   );
 }
 
+// ============ 8. A group with an EMPTY issues array must not busy-spin
+// ============ The lens review found the #676 cursor refactor left this
+// branch spinning on the same `gi` forever: `runWorkQueue` is exported and
+// takes hand-built IssueGroup[], so a degenerate fixture was a hang. The
+// cursor must advance (and the queue must settle) on every continue path.
+{
+  let ran = 0;
+  const degenerate: IssueGroup = { id: "group-empty", scope: "", paths: [], outOfScope: [], issues: [] };
+  const groups: IssueGroup[] = [degenerate, g("group-b", 101, []), g("group-c", 102, [])];
+  const t0 = Date.now();
+  const summary = await runWorkQueue({
+    repoRoot: "/repo",
+    groups,
+    restart: false,
+    concurrency: 2,
+    runGroup: async () => {
+      ran += 1;
+      return { started: true };
+    },
+    readStateFn: async (_r, issue) => mkState(issue),
+  });
+  assert(ran === 2, "the degenerate group was skipped; the other two groups ran");
+  assert(Date.now() - t0 < 2000, "the queue settled promptly — no busy-spin on the empty-issues group");
+  assert(
+    summary.merged === 2,
+    "the two valid groups merged; the degenerate group is absent from the report",
+  );
+  assert(
+    !summary.entries.some((e) => e.groupId === "group-empty"),
+    "the degenerate group produced no entry (skipped, not parked/halted)",
+  );
+}
+
+// ========================= 9. Symmetric basename matching (both directions)
+{
+  // The overlap predicate is symmetric: a basename mention in EITHER group
+  // matches a directory-qualified mention in the other.
+  assert(
+    groupPathsOverlap(g("a", 1, ["extension/src/commands.ts"]), g("b", 2, ["commands.ts"])) ===
+      groupPathsOverlap(g("a", 2, ["commands.ts"]), g("b", 1, ["extension/src/commands.ts"])),
+    "basename-vs-qualified overlap holds in both argument orders (symmetric rule)",
+  );
+  assert(
+    !groupPathsOverlap(g("a", 1, ["src/a.ts"]), g("b", 2, ["src/b.ts"])),
+    "distinct filenames still do not overlap (no false positive from the symmetric basename set)",
+  );
+}
+
 console.log(`\nexit ${exit}`);
 process.exit(exit);

@@ -31,6 +31,7 @@ import { type ParkReason, parkAction } from "./work-driver-intent.ts";
 import { processAlive } from "./work-driver-resume.ts";
 import { notify } from "./work-notify.ts";
 import { groupPathsOverlap } from "./work-queue-overlap.ts";
+import { writeQueueSummary } from "./work-queue-summary.ts";
 
 /** One entry of `groupIssues()`'s result — the unit the queue iterates. */
 export type IssueGroup = GroupingResult["groups"][string];
@@ -299,14 +300,41 @@ export async function runWorkQueue(opts: RunQueueOpts): Promise<QueueSummary> {
    * it through the `claimed` set.
    */
   const inFlight = new Map<string, number>();
+  // #676 lens-findings — a deferred group re-tests every 50ms until the
+  // overlapping sibling settles; a sibling whose runGroup never settles (a
+  // hung driver) would otherwise defer it forever. After this cap the
+  // deferral is dropped and the group proceeds — the reactive plan-time
+  // claim check remains the real safety net, so a false release costs at
+  // most the same park it would have produced, never a silent failure.
+  const deferralStart = new Map<string, number>();
+  const DEFER_CAP_MS = 30 * 60 * 1000;
   async function worker(): Promise<void> {
     for (;;) {
       if (halted) return;
       const gi = cursor;
       const g = groups[gi];
+      // #676 lens-findings — advance the cursor before ANY continue. The
+      // refactor that moved `cursor += 1` onto the claim path left this
+      // branch spinning on the same `gi` forever: a group whose `issues`
+      // array is empty (unreachable via groupIssues(), which always
+      // populates ≥1 member, but `runWorkQueue` is exported and takes
+      // hand-built IssueGroup[]) would hit a bare `continue` with no cursor
+      // advance and no await — an infinite synchronous busy-spin that never
+      // lets `Promise.all(workers)` settle.
       if (!g) return;
+      // #676 lens-findings — advance the cursor before continuing. The
+      // refactor that moved `cursor += 1` onto the claim path left this
+      // branch spinning on the same `gi` forever: a group whose `issues`
+      // array is empty (unreachable via groupIssues(), which always
+      // populates ≥1 member, but `runWorkQueue` is exported and takes
+      // hand-built IssueGroup[]) would hit a bare `continue` with no cursor
+      // advance and no await — an infinite synchronous busy-spin that never
+      // lets `Promise.all(workers)` settle.
+      if (g.issues[0] === undefined) {
+        cursor += 1;
+        continue;
+      }
       const primary = g.issues[0];
-      if (primary === undefined) continue;
       // #676 — defer if an in-flight group claimed EARLIER (index < gi) has
       // overlapping extracted paths; a deferred group re-tests its own cursor
       // position until the overlap clears or the queue halts.
@@ -316,9 +344,17 @@ export async function runWorkQueue(opts: RunQueueOpts): Promise<QueueSummary> {
         return other ? groupPathsOverlap(g, other) : false;
       });
       if (blocked) {
+        // #676 lens-findings — cap the total deferral time: a sibling whose
+        // runGroup never settles (a hung driver) must not pin this group to
+        // a 50ms busy-poll for the life of the process. After the cap the
+        // group proceeds and the reactive plan-time claim check decides.
+        const first = deferralStart.get(g.id);
+        if (first === undefined) deferralStart.set(g.id, Date.now());
+        else if (Date.now() - first > DEFER_CAP_MS) deferralStart.delete(g.id);
         await new Promise((r) => setTimeout(r, 50));
         continue;
       }
+      deferralStart.delete(g.id);
       cursor += 1;
       claimed.add(g.id);
       inFlight.set(g.id, gi);
@@ -331,6 +367,7 @@ export async function runWorkQueue(opts: RunQueueOpts): Promise<QueueSummary> {
         threw = err as Error;
       } finally {
         inFlight.delete(g.id);
+        deferralStart.delete(g.id);
       }
 
       if (threw) {
@@ -432,40 +469,6 @@ export async function runWorkQueue(opts: RunQueueOpts): Promise<QueueSummary> {
   // not turn a completed queue into an error.
   await writeQueueSummary(opts.repoRoot, summary);
   return summary;
-}
-
-/** Where the last queue run's outcome is kept, for `/work-status` and `/start`. */
-export function queueSummaryPath(repoRoot: string): string {
-  return path.join(workStateDir(repoRoot), "queue-summary.json");
-}
-
-/** Persist the queue outcome so it survives the session that produced it. */
-export async function writeQueueSummary(
-  repoRoot: string,
-  summary: QueueSummary,
-  at = Date.now(),
-): Promise<void> {
-  const file = queueSummaryPath(repoRoot);
-  try {
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    // tmp+rename so a crash mid-write cannot leave a half-parsed summary.
-    const tmp = `${file}.${process.pid}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify({ at, ...summary }, null, 2));
-    await fs.rename(tmp, file);
-  } catch (err) {
-    trace(`work-queue: could not persist queue summary: ${(err as Error).message?.slice(0, 160)}`);
-  }
-}
-
-/** Read back the last queue run's outcome, or undefined if there is none. */
-export async function readQueueSummary(repoRoot: string) {
-  try {
-    const raw = await fs.readFile(queueSummaryPath(repoRoot), "utf8");
-    const parsed = JSON.parse(raw) as QueueSummary & { at: number };
-    return Array.isArray(parsed.entries) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function finish(

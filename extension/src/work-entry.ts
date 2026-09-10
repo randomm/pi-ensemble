@@ -127,6 +127,12 @@ function runSingleIssue(
  * instead of one path emitting a pre-grouping placeholder that names neither
  * the actual group count nor the rules that fired. `concurrency` is derived
  * from the ACTUAL group count, not the raw issue count.
+ *
+ * `notify` is the caller-provided delivery function for the grouping-decided
+ * line (the slash-command path pipes it through notifyAgent; the tool path
+ * pipes it through its sink). `concurrency` is no longer a parameter — it is
+ * derived internally from `groupList.length` and `resolvedParallelGroups()`,
+ * so both entry paths share one correct value.
  */
 export async function runGroupedIssues(
   pi: ExtensionAPI,
@@ -139,8 +145,21 @@ export async function runGroupedIssues(
   const bodiesByIssue = await fetchIssueBodies(repoRoot, issues);
   const { groups, notes } = groupIssues(issues, bodiesByIssue);
   const groupList = Object.values(groups);
-  const summary = groupList.map((g) => `${g.id}: #${g.issues.join(", #")}`).join(" | ");
-  const notesLine = notes.length > 0 ? `\n  rules fired: ${notes.join("; ")}` : "";
+  // #676 lens-findings — the summary and per-issue rule notes are built from
+  // issue titles/bodies (untrusted content) and land in the agent prompt
+  // channel via notify/notifyAgent, which — unlike the #388 notify hook
+  // (stdin only) — has no bound. Cap each so a pathological title or a very
+  // large grouped invocation cannot bloat the PM session or shape
+  // prompt-injection text into the driver-event stream. A cut group keeps its
+  // id (that is the operator's lookup key); a cut notes list gets an ellipsis
+  // naming the count of the notes dropped.
+  const cut = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+  const groupBits = groupList.map((g) => cut(`${g.id}: #${g.issues.join(", #")}`, 120));
+  const summary = cut(groupBits.join(" | "), 2000);
+  const notesLine =
+    notes.length > 0
+      ? `\n  rules fired: ${notes.length > 4 ? `${cut(notes.slice(0, 4).join("; "), 800)} (+${notes.length - 4} more)` : cut(notes.join("; "), 800)}`
+      : "";
   const concurrency = Math.min(resolvedParallelGroups(), groupList.length);
   const restartTag = restart ? " (restart — prior state wiped)" : "";
   notify(
@@ -180,28 +199,6 @@ export async function runGroupedIssues(
     },
   });
   return renderQueueSummary(summaryResult);
-}
-
-/**
- * Fire-and-forget wrapper around the grouped runner for the slash-command
- * path: runs the full queue, then delivers the end-of-queue summary via
- * notifyAgent (best-effort — a notification failure must not turn a
- * completed queue into an error).
- */
-async function runGroupedIssuesFireAndForget(
-  pi: ExtensionAPI,
-  repoRoot: string,
-  issues: number[],
-  restart: boolean,
-  mergeGrant: boolean,
-  notify: (text: string) => void,
-): Promise<void> {
-  const summaryResult = await runGroupedIssues(pi, repoRoot, issues, restart, mergeGrant, notify);
-  try {
-    notifyAgent(pi, summaryResult);
-  } catch {
-    /* nothing we can do */
-  }
 }
 
 /**
@@ -303,13 +300,21 @@ export async function launchWork(
     `pi-rukas:driver-event v1 kind=group-start issue=${issues.join(", ")} at=${new Date().toISOString()}\npi-rukas: analyzing ${issues.length} issues (#${issues.join(", #")}) for grouping…`,
   );
   void (async () => {
-    await runGroupedIssuesFireAndForget(pi, repoRoot, issues, restart, mergeGrant, (text) => {
+    const notify: (text: string) => void = (text) => {
       try {
         notifyAgent(pi, text);
       } catch {
         /* nothing we can do */
       }
-    });
+    };
+    const summaryResult = await runGroupedIssues(pi, repoRoot, issues, restart, mergeGrant, notify);
+    // Best-effort end-of-queue summary delivery — a notification failure must
+    // not turn a completed queue into an error.
+    try {
+      notifyAgent(pi, summaryResult);
+    } catch {
+      /* nothing we can do */
+    }
   })();
   return { mode: "grouped", issues };
 }
