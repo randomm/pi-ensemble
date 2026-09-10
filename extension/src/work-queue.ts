@@ -30,9 +30,13 @@ import type { GroupingResult } from "./work-driver-grouping.ts";
 import { type ParkReason, parkAction } from "./work-driver-intent.ts";
 import { processAlive } from "./work-driver-resume.ts";
 import { notify } from "./work-notify.ts";
+import { groupPathsOverlap } from "./work-queue-overlap.ts";
 
 /** One entry of `groupIssues()`'s result — the unit the queue iterates. */
 export type IssueGroup = GroupingResult["groups"][string];
+// #676 — re-exported so importers of work-queue keep working; the predicates
+// live in work-queue-overlap.ts (own module, keeps work-queue under 500 lines).
+export { groupPathsOverlap, overlappingSiblingIds } from "./work-queue-overlap.ts";
 import { type WorkState, readState, workStateDir } from "./workflow-state.ts";
 
 /** #368 escape hatch: PI_ENSEMBLE_QUEUE_HALT_ON_FAILURE=1 restores halt-on-first-failure. */
@@ -53,16 +57,11 @@ export interface QueueEntry {
   outcome: "merged" | "parked" | "halted" | "not-started";
   /** Operator-facing why, for parked/halted. */
   reason?: string;
-  /** The step the cycle died on, when known — enough to re-drive it. */
+  /** The step the cycle died on, when known. */
   failedStep?: string;
-  /** What the operator has to do. Never "it failed"; always an action. */
+  /** What the operator has to do — an action, never "it failed". */
   humanAction?: string;
-  /**
-   * Raw token sum across the group's dispatch-completed and dispatch-failed*
-   * events (input+output+cacheRead+cacheWrite, matching async-jobs-report's
-   * totalTokens). Optional because the field is new and older
-   * queue-summary.json files predate it.
-   */
+  /** Raw token sum across the group's dispatch-completed/failed events (input+output+cacheRead+cacheWrite). Optional: older queue-summary.json files predate it. */
   tokens?: number;
   /** Cost in USD, when the total is priced. Never estimated when unknown. */
   cost?: number;
@@ -72,14 +71,8 @@ export interface QueueSummary {
   entries: QueueEntry[];
   merged: number;
   parked: number;
-  /**
-   * Groups the driver REFUSED to run — a live cycle already owns the issue, a
-   * terminal state, an attention label. Counted apart from `parked` because a
-   * refusal is not a failure and needs no operator action on this group.
-   */
-  refused: number;
-  /** Groups the queue never reached, because it halted first. */
-  notStarted: string[];
+  refused: number; // #368 — a refusal is not a failure; no operator action
+  notStarted: string[]; // groups the queue never reached — it halted first
 }
 
 /**
@@ -87,8 +80,8 @@ export interface QueueSummary {
  *
  * Systemic means "the next group will hit this too": a spend cap, or a quota
  * window that nothing will get past until it resets. Everything else — a
- * review cap, an adversarial rejection, a dirty tree, a transport blip that
- * exhausted its retries — is this issue's problem, not the queue's.
+ * review cap, an adversarial rejection, a dirty tree, a transport blip — is
+ * this issue's problem, not the queue's.
  */
 export function isSystemicFailure(state: WorkState | undefined): {
   systemic: boolean;
@@ -100,9 +93,9 @@ export function isSystemicFailure(state: WorkState | undefined): {
   // cycle can hit a quota window at `explore`, recover, run for another
   // twenty minutes, and then park for an unrelated semantic reason. Reading
   // the last failure unconditionally found the recovered quota event and
-  // halted every remaining group — the exact outcome #368 exists to prevent,
-  // arriving by a different route. A failure followed by a successful
-  // `dispatch-completed` was recovered and does not count.
+  // halted every remaining group — the exact outcome #368 exists to prevent.
+  // A failure followed by a successful `dispatch-completed` was recovered and
+  // does not count.
   let lastFailure: WorkState["eventLog"][number] | undefined;
   for (let i = state.eventLog.length - 1; i >= 0; i--) {
     const e = state.eventLog[i];
@@ -135,9 +128,9 @@ export function isSystemicFailure(state: WorkState | undefined): {
  * Is the process that owns this state file still alive?
  *
  * `processAlive` treats an EPERM as alive (the pid exists, owned by another
- * user), which is the safe direction here: mistaking a live cycle for a corpse
- * is what produced the `--restart` advice that would race two drivers on one
- * issue.
+ * user), which is the safe direction here: mistaking a live cycle for a
+ * corpse is what produced the `--restart` advice that would race two drivers
+ * on one issue.
  */
 function ownerAlive(state: WorkState): boolean {
   const pid = state.owner?.pid;
@@ -154,25 +147,22 @@ function parkReason(state: WorkState | undefined): { reason: string; failedStep?
     return { reason: "still running — this is not a terminal state" };
   }
   const cap = [...state.eventLog].reverse().find((e) => e.kind === "cap-hit");
-  // `lastCompletedStep` is the last step that SUCCEEDED, so reporting it as the
-  // failure point names the wrong step every time — an operator chasing a failed
-  // develop was sent to `branch` and spent half a session diagnosing a branch
-  // collision that never happened. The halt-cascade stamps the real step into
-  // the cap itself (`step-failed:<step>`); prefer that whenever it is present.
+  // `lastCompletedStep` is the last step that SUCCEEDED, so reporting it as
+  // the failure point names the wrong step. The halt-cascade stamps the real
+  // step into the cap itself (`step-failed:<step>`); prefer that when present.
   const capStep =
     cap?.kind === "cap-hit" && cap.cap.startsWith("step-failed:")
       ? cap.cap.slice("step-failed:".length)
       : undefined;
   const step = capStep ?? state.pipelineState.lastCompletedStep ?? state.pipelineState.currentStep;
   if (cap?.kind === "cap-hit") {
-    // Carry the intent park's specific reason, so humanActionFor and the
-    // summary can be specific rather than saying "cap intent-park".
+    // Carry the specific reason so humanActionFor can be specific rather
+    // than saying "cap intent-park". #380: the merge hold carries the PR
+    // number and whether authority was the blocker.
     let suffix = "";
     if (cap.cap === "intent-park" && state.pipelineState.normalisedSpec?.parkReason) {
       suffix = `:${state.pipelineState.normalisedSpec.parkReason}`;
     } else if (cap.cap === "awaiting-human-merge") {
-      // #380 — carry the PR number and whether authority was the blocker, so
-      // the action can name the PR instead of pointing at a state file.
       const granted = state.pipelineState.mergeHold?.authorityGranted ? "granted" : "no-authority";
       suffix = `:${granted}:pr${state.pipelineState.prNumber ?? 0}`;
     }
@@ -248,7 +238,7 @@ export function renderQueueSummary(s: QueueSummary): string {
       );
       if (e.humanAction) lines.push(`      → ${e.humanAction}`);
     } else if (e.outcome === "not-started") {
-      // Not a failure and emphatically not a halt: the driver declined to run,
+      // Not a failure, emphatically not a halt: the driver declined to run,
       // usually because a live cycle already owns the issue. Rendering it
       // through the `else` below reported a halt that never happened.
       lines.push(`  – ${e.groupId} (${issues}) — did not start: ${e.reason}`);
@@ -267,12 +257,11 @@ export interface RunQueueOpts {
   repoRoot: string;
   groups: IssueGroup[];
   restart: boolean;
-  /** Runs one group's cycle. Injected so the offline suite never spawns Pi. */
   /**
-   * Run one group. The returned `started: false` means the driver refused and
-   * never ran — a claim conflict, another live pid, a terminal state. The
-   * queue MUST NOT read a state file as this group's outcome in that case: the
-   * file on disk belongs to whatever cycle is actually running.
+   * Run one group. The returned `started: false` means the driver refused
+   * and never ran — a claim conflict, another live pid, a terminal state.
+   * The queue MUST NOT read a state file as this group's outcome in that
+   * case: the file on disk belongs to whatever cycle is actually running.
    */
   runGroup: (primary: number, issues: number[] | undefined) => Promise<GroupOutcome>;
   /** Groups to run at once. Defaults to 1 (strictly sequential). */
@@ -296,25 +285,43 @@ export async function runWorkQueue(opts: RunQueueOpts): Promise<QueueSummary> {
   const claimed = new Set<string>();
   let cursor = 0;
   let halted = false;
-
   const cap = Math.max(1, Math.min(opts.concurrency ?? 1, groups.length || 1));
-
   /**
    * One worker: claim the next unclaimed group, run it to completion, repeat.
    * `cursor++` is atomic because JS is single-threaded — the claim happens
-   * between awaits, never across one.
+   * between awaits, never across one. #676 — before claiming, a group whose
+   * extracted paths overlap any in-flight group claimed at an EARLIER position
+   * is deferred (re-tested on each pass) until that sibling reaches a terminal
+   * state, so the reactive plan-time check no longer parks the loser after a
+   * wasted explore+plan dispatch. Only looking at earlier positions avoids a
+   * deadlock when every remaining worker holds a position past every
+   * in-flight group; a deferred group is still claimed, so `finish()` reports
+   * it through the `claimed` set.
    */
+  const inFlight = new Map<string, number>();
   async function worker(): Promise<void> {
     for (;;) {
       if (halted) return;
       const gi = cursor;
-      cursor += 1;
-      if (gi >= groups.length) return;
       const g = groups[gi];
-      if (!g) continue;
+      if (!g) return;
       const primary = g.issues[0];
       if (primary === undefined) continue;
+      // #676 — defer if an in-flight group claimed EARLIER (index < gi) has
+      // overlapping extracted paths; a deferred group re-tests its own cursor
+      // position until the overlap clears or the queue halts.
+      const blocked = [...inFlight.entries()].some(([id, idx]) => {
+        if (idx >= gi) return false;
+        const other = groups.find((x) => x?.id === id);
+        return other ? groupPathsOverlap(g, other) : false;
+      });
+      if (blocked) {
+        await new Promise((r) => setTimeout(r, 50));
+        continue;
+      }
+      cursor += 1;
       claimed.add(g.id);
+      inFlight.set(g.id, gi);
 
       let threw: Error | undefined;
       let outcome: GroupOutcome | undefined;
@@ -322,6 +329,8 @@ export async function runWorkQueue(opts: RunQueueOpts): Promise<QueueSummary> {
         outcome = await opts.runGroup(primary, g.issues.length > 1 ? g.issues : undefined);
       } catch (err) {
         threw = err as Error;
+      } finally {
+        inFlight.delete(g.id);
       }
 
       if (threw) {
@@ -374,18 +383,19 @@ export async function runWorkQueue(opts: RunQueueOpts): Promise<QueueSummary> {
       const systemic = isSystemicFailure(state);
       if (systemic.systemic || queueHaltOnFailure()) {
         halted = true;
+        const why = systemic.reason ?? reason;
         entries.set(gi, {
           groupId: g.id,
           issues: g.issues,
           outcome: "halted",
-          reason: systemic.reason ?? reason,
+          reason: why,
           failedStep,
           humanAction: humanActionFor(reason, primary),
         });
         await notify({
           kind: "halted",
           issues: g.issues,
-          reason: systemic.reason ?? reason,
+          reason: why,
           action: humanActionFor(reason, primary),
         });
         return;
@@ -401,11 +411,10 @@ export async function runWorkQueue(opts: RunQueueOpts): Promise<QueueSummary> {
         humanAction: humanActionFor(reason, primary),
       });
       // #388 — one notification per parked group, carrying the action rather
-      // than the event. A merged group is never notified: nothing is asked
-      // of the operator, and a hook that fires on success is noise.
+      // than the event. A merged group is never notified: nothing is asked of
+      // the operator, and a hook that fires on success is noise. #380's hold
+      // is not a failure — the work is done and only the merge is waiting.
       await notify({
-        // #380's hold is not a failure — the work is done and only the merge
-        // is waiting, so it reads differently on a lock screen.
         kind: /awaiting-human-merge/.test(reason) ? "awaiting-merge" : "parked",
         issues: g.issues,
         reason,
@@ -439,8 +448,7 @@ export async function writeQueueSummary(
   const file = queueSummaryPath(repoRoot);
   try {
     await fs.mkdir(path.dirname(file), { recursive: true });
-    // tmp+rename so a crash mid-write cannot leave a half-parsed summary
-    // where a whole one is expected.
+    // tmp+rename so a crash mid-write cannot leave a half-parsed summary.
     const tmp = `${file}.${process.pid}.tmp`;
     await fs.writeFile(tmp, JSON.stringify({ at, ...summary }, null, 2));
     await fs.rename(tmp, file);
@@ -450,9 +458,7 @@ export async function writeQueueSummary(
 }
 
 /** Read back the last queue run's outcome, or undefined if there is none. */
-export async function readQueueSummary(
-  repoRoot: string,
-): Promise<(QueueSummary & { at: number }) | undefined> {
+export async function readQueueSummary(repoRoot: string) {
   try {
     const raw = await fs.readFile(queueSummaryPath(repoRoot), "utf8");
     const parsed = JSON.parse(raw) as QueueSummary & { at: number };

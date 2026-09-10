@@ -119,38 +119,89 @@ function runSingleIssue(
  *
  * #593 lens-findings #5/#6 — extracted to eliminate duplication between
  * launchWork and runDriver's multi-issue branches.
+ *
+ * #676 — the grouping pass (fetch bodies → groupIssues) now happens BEFORE
+ * the group-result notification, so both entry paths (slash command via
+ * launchWork, PM tool via runDriver) emit the SAME accurate
+ * `K=<actual group count> group(s) — <summary>` + `rules fired:` message
+ * instead of one path emitting a pre-grouping placeholder that names neither
+ * the actual group count nor the rules that fired. `concurrency` is derived
+ * from the ACTUAL group count, not the raw issue count.
  */
-async function runGroupedIssues(
+export async function runGroupedIssues(
   pi: ExtensionAPI,
   repoRoot: string,
   issues: number[],
   restart: boolean,
   mergeGrant: boolean,
-  concurrency: number,
+  notify: (text: string) => void,
 ): Promise<string> {
   const bodiesByIssue = await fetchIssueBodies(repoRoot, issues);
   const { groups, notes } = groupIssues(issues, bodiesByIssue);
   const groupList = Object.values(groups);
   const summary = groupList.map((g) => `${g.id}: #${g.issues.join(", #")}`).join(" | ");
   const notesLine = notes.length > 0 ? `\n  rules fired: ${notes.join("; ")}` : "";
+  const concurrency = Math.min(resolvedParallelGroups(), groupList.length);
+  const restartTag = restart ? " (restart — prior state wiped)" : "";
+  notify(
+    `pi-rukas:driver-event v1 kind=group-result issue=${issues.join(", ")} at=${new Date().toISOString()}\npi-rukas: /work grouping decided K=${groupList.length} group(s) — ${summary}${notesLine}\n${resolvedParallelGroups() > 1 ? `Running up to ${concurrency} cycle(s) concurrently` : "Running cycles sequentially"}${restartTag}; a failed group parks and the queue continues.`,
+  );
 
   const summaryResult = await runWorkQueue({
     repoRoot,
     groups: groupList,
     restart,
     concurrency,
-    runGroup: (primary, groupIssueNums) =>
-      runWorkDriver({
-        pi,
-        repoRoot,
-        issue: primary,
-        issues: groupIssueNums,
-        restart,
-        mergeGrant,
-        parallelCycles: concurrency,
-      }),
+    runGroup: async (primary, groupIssueNums) => {
+      const handle = startJob(pi, {
+        label: `work-driver-group:${groupList.find((g) => g.issues[0] === primary)?.id ?? "unknown"}`,
+        role: "work-driver",
+        skipDeck: true,
+        ownerKind: "driver" as const,
+        work: async () => {
+          await runWorkDriver({
+            pi,
+            repoRoot,
+            issue: primary,
+            issues: groupIssueNums,
+            restart,
+            mergeGrant,
+            parallelCycles: concurrency,
+          });
+          return makeResult(
+            true,
+            `Completed group: #${(groupIssueNums ?? [primary]).join(", #")}`,
+            Date.now(),
+          );
+        },
+      });
+      setJobIssues(handle.jobId, groupIssueNums ?? [primary]);
+      return { started: true };
+    },
   });
   return renderQueueSummary(summaryResult);
+}
+
+/**
+ * Fire-and-forget wrapper around the grouped runner for the slash-command
+ * path: runs the full queue, then delivers the end-of-queue summary via
+ * notifyAgent (best-effort — a notification failure must not turn a
+ * completed queue into an error).
+ */
+async function runGroupedIssuesFireAndForget(
+  pi: ExtensionAPI,
+  repoRoot: string,
+  issues: number[],
+  restart: boolean,
+  mergeGrant: boolean,
+  notify: (text: string) => void,
+): Promise<void> {
+  const summaryResult = await runGroupedIssues(pi, repoRoot, issues, restart, mergeGrant, notify);
+  try {
+    notifyAgent(pi, summaryResult);
+  } catch {
+    /* nothing we can do */
+  }
 }
 
 /**
@@ -252,74 +303,13 @@ export async function launchWork(
     `pi-rukas:driver-event v1 kind=group-start issue=${issues.join(", ")} at=${new Date().toISOString()}\npi-rukas: analyzing ${issues.length} issues (#${issues.join(", #")}) for grouping…`,
   );
   void (async () => {
-    const bodiesByIssue = await fetchIssueBodies(repoRoot, issues);
-    const { groups, notes } = groupIssues(issues, bodiesByIssue);
-    const groupList = Object.values(groups);
-    const summary = groupList.map((g) => `${g.id}: #${g.issues.join(", #")}`).join(" | ");
-    const notesLine = notes.length > 0 ? `\n  rules fired: ${notes.join("; ")}` : "";
-    const concurrency = Math.min(resolvedParallelGroups(), groupList.length);
-    try {
-      notifyAgent(
-        pi,
-        `pi-rukas:driver-event v1 kind=group-result issue=${issues.join(", ")} at=${new Date().toISOString()}\npi-rukas: /work grouping decided K=${groupList.length} group(s) — ${summary}${notesLine}\n${resolvedParallelGroups() > 1 ? `Running up to ${concurrency} cycle(s) concurrently` : "Running cycles sequentially"}${restartTag}; a failed group parks and the queue continues.`,
-      );
-    } catch {
-      /* nothing we can do */
-    }
-
-    // #368 — park-and-continue: a non-merged group is recorded and the queue
-    // moves on; only a systemic failure stops everything. Each group cycle
-    // registers a job entry via startJob so /work-status <jobId> can resolve
-    // it back to its issue numbers (#591 fix). The startJob work function
-    // runs runWorkDriver; the callback returns immediately so runWorkQueue's
-    // concurrency batching still works.
-    const completionPromises: Promise<unknown>[] = [];
-    const summaryResult = await runWorkQueue({
-      repoRoot,
-      groups: groupList,
-      restart,
-      concurrency,
-      runGroup: async (primary, groupIssueNums) => {
-        const handle = startJob(pi, {
-          label: `work-driver-group:${groupList.find((g) => g.issues[0] === primary)?.id ?? "unknown"}`,
-          role: "work-driver",
-          skipDeck: true,
-          ownerKind: "driver" as const,
-          work: async () => {
-            await runWorkDriver({
-              pi,
-              repoRoot,
-              issue: primary,
-              issues: groupIssueNums,
-              restart,
-              mergeGrant,
-              parallelCycles: concurrency,
-            });
-            return makeResult(
-              true,
-              `Completed group: #${(groupIssueNums ?? [primary]).join(", #")}`,
-              Date.now(),
-            );
-          },
-        });
-        setJobIssues(handle.jobId, groupIssueNums ?? [primary]);
-        completionPromises.push(handle.completion);
-        // Return immediately — the actual work runs in the background
-        // via the startJob work function. runWorkQueue's concurrency
-        // batching controls when these fire.
-        return { started: true };
-      },
+    await runGroupedIssuesFireAndForget(pi, repoRoot, issues, restart, mergeGrant, (text) => {
+      try {
+        notifyAgent(pi, text);
+      } catch {
+        /* nothing we can do */
+      }
     });
-    // Wait for all group cycles to complete.
-    await Promise.all(completionPromises);
-    try {
-      notifyAgent(
-        pi,
-        `pi-rukas:driver-event v1 kind=queue-summary issue=${issues.join(", ")} at=${new Date().toISOString()}\n${renderQueueSummary(summaryResult)}`,
-      );
-    } catch {
-      /* nothing we can do */
-    }
   })();
   return { mode: "grouped", issues };
 }
@@ -409,28 +399,13 @@ export async function runDriver(
   sink.notify(
     `pi-rukas:driver-event v1 kind=group-start issue=${issues.join(", ")} at=${new Date().toISOString()}\npi-rukas: analyzing ${issues.length} issues (#${issues.join(", #")}) for grouping…`,
   );
-  const concurrency = Math.min(resolvedParallelGroups(), issues.length);
   const summary = `work-driver (grouped) for ${issues.length} issues (repoRoot=${repoRoot})`;
   trace(`/work (grouped) → ${summary}`);
 
   try {
-    await notifyAgent(
-      pi,
-      `pi-rukas:driver-event v1 kind=group-result issue=${issues.join(", ")} at=${new Date().toISOString()}\npi-rukas: /work grouping decided K=grouped ${issues.length} issue(s)\n${resolvedParallelGroups() > 1 ? `Running up to ${concurrency} cycle(s) concurrently` : "Running cycles sequentially"}${restartTag}; a failed group parks and the queue continues.`,
-    );
-  } catch {
-    /* nothing we can do */
-  }
-
-  try {
-    const summaryResult = await runGroupedIssues(
-      pi,
-      repoRoot,
-      issues,
-      restart,
-      mergeGrant,
-      concurrency,
-    );
+    const summaryResult = await runGroupedIssues(pi, repoRoot, issues, restart, mergeGrant, (t) => {
+      void notifyAgent(pi, t);
+    });
     return makeResult(true, summaryResult, startMs);
   } catch (err) {
     trace(`work-driver (grouped): unexpected throw: ${(err as Error).message}`);
