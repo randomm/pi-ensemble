@@ -332,12 +332,6 @@ export function wrapBytes(
     // line, the body, a trailing newline. No comment bytes.
     appendBlock.push(`${renderHeadingFor(b.id)}\n\n${b.body}`.replace(/\n$/, ""));
   }
-  // Scaffold bodies (scaffold.ts) already carry their own `#`/`##` heading
-  // lines inside `body`, so emit them verbatim (no extra heading).
-  for (const b of scaffoldBodies ?? []) {
-    const body = b.body.endsWith("\n") ? b.body : `${b.body}\n`;
-    appendBlock.push(body);
-  }
 
   let result = out.join("\n");
   if (!result.endsWith("\n")) result += "\n";
