@@ -195,6 +195,13 @@ export async function runGroupedIssues(
         },
       });
       setJobIssues(handle.jobId, groupIssueNums ?? [primary]);
+      // #676 — hold the runWorkQueue worker slot (and the inFlight entry the
+      // pre-dispatch overlap gate keys on) until the driver reaches a terminal
+      // state. startJob is fire-and-forget; without this await, runGroup would
+      // resolve within the same event-loop tick and the gate's inFlight map
+      // would be empty by the time the next worker checks it, making the
+      // pre-dispatch serialization a no-op on the real entry path.
+      await handle.completion;
       return { started: true };
     },
   });

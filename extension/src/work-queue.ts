@@ -313,14 +313,6 @@ export async function runWorkQueue(opts: RunQueueOpts): Promise<QueueSummary> {
       if (halted) return;
       const gi = cursor;
       const g = groups[gi];
-      // #676 lens-findings — advance the cursor before ANY continue. The
-      // refactor that moved `cursor += 1` onto the claim path left this
-      // branch spinning on the same `gi` forever: a group whose `issues`
-      // array is empty (unreachable via groupIssues(), which always
-      // populates ≥1 member, but `runWorkQueue` is exported and takes
-      // hand-built IssueGroup[]) would hit a bare `continue` with no cursor
-      // advance and no await — an infinite synchronous busy-spin that never
-      // lets `Promise.all(workers)` settle.
       if (!g) return;
       // #676 lens-findings — advance the cursor before continuing. The
       // refactor that moved `cursor += 1` onto the claim path left this
