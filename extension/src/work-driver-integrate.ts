@@ -1,11 +1,7 @@
 /**
  * work-driver-integrate — #287 Part B: the ONLY path that writes to repoRoot.
- *
- * Under always-worktree, development happens in `.worktrees/issue-<N>-<id>`
- * and repoRoot is an integration point. `integrate()` consolidates every
- * worktree's slice onto the feature branch at repoRoot.
- *
- * Cherry-pick orchestration is extracted into work-driver-cherry-pick.ts.
+ * Under always-worktree, development happens in `.worktrees/issue-<N>-<id>` and
+ * repoRoot is an integration point. Cherry-pick: work-driver-cherry-pick.ts.
  */
 
 import fs from "node:fs/promises";
@@ -264,10 +260,8 @@ export async function integrate(execFn: ExecFn, opts: IntegrateOpts): Promise<In
     }
 
     // 3. Orchestrated cherry-pick + patch fallback (work-driver-cherry-pick.ts).
-    //    The patch-fallback there additionally rebases a followup-mode lens-fix
-    //    patch onto the branch's CURRENT head before applying it (#654
-    //    task-b), so a fix produced against a stale base no longer
-    //    conflict-parks the cycle.
+    //    The patch-fallback rebases a followup-mode lens-fix patch onto the
+    //    branch's CURRENT head before applying it (#654 task-b).
     const orchResult = await orchestrateCherryPick(execFn, {
       repoRoot,
       branchName,
@@ -322,10 +316,7 @@ export async function integrate(execFn: ExecFn, opts: IntegrateOpts): Promise<In
     const patchApplied = orchResult.patchApplied;
     const noDiff = orchResult.noDiff;
 
-    // Commit any staged changes (from cherry-pick or patch apply).
-    // Cherry-pick uses --no-commit to batch all SHAs, then we commit once.
-    // Patch-apply already commits as part of git apply, so this is a no-op
-    // if only patch was used, but required when cherry-pick was used.
+    // Commit staged changes (cherry-pick uses --no-commit; patch-apply is a no-op).
     const { stdout: hasStaged } = await execFn("git diff --cached --name-only", {
       cwd: repoRoot,
       maxBuffer: 64 * 1024,
@@ -340,8 +331,6 @@ export async function integrate(execFn: ExecFn, opts: IntegrateOpts): Promise<In
     // Determine which workstreams actually produced output.
     const appliedWorkstreams = cherryApplied.length > 0 ? cherryApplied : patchApplied;
     // Check if cherry-picked workstreams were all no-ops.
-    // For followup mode without baseSha, skip this check (staged changes
-    // indicate work was done).
     if (opts.baseSha) {
       const { stdout: headAhead } = await execFn(
         `git rev-list --count ${JSON.stringify(opts.baseSha)}..HEAD`,
@@ -354,8 +343,7 @@ export async function integrate(execFn: ExecFn, opts: IntegrateOpts): Promise<In
         return { ok: true, workstreams: [], empty: true, noDiff };
       }
     } else {
-      // No baseSha — check if there are actually staged changes (patch fallback).
-      // If there are no staged changes and no cherry-picked work, it's empty.
+      // No baseSha — check if there are staged changes (patch fallback).
       if (appliedWorkstreams.length === 0) {
         const { stdout: hasStaged2 } = await execFn("git diff --cached --name-only", {
           cwd: repoRoot,
@@ -402,12 +390,9 @@ export async function integrate(execFn: ExecFn, opts: IntegrateOpts): Promise<In
       maxBuffer: 1024 * 1024,
     });
 
-    // Advance each cherry-picked worktree to the new HEAD.
-    //
-    // Without this the worktree keeps the developer's commit, so the NEXT
-    // integration would re-cherry-pick the same SHA — which either fails
-    // (already on branch) or creates a duplicate. Reset `--hard` to the
-    // integration branch HEAD so the worktree is clean for the next round.
+    // Advance each cherry-picked worktree to the new HEAD — without this the
+    // worktree keeps the developer's commit and the NEXT integration would
+    // re-cherry-pick the same SHA (fails or creates a duplicate).
     const { stdout: newHead } = await execFn("git rev-parse HEAD", {
       cwd: repoRoot,
       maxBuffer: 64 * 1024,
