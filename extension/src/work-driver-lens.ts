@@ -29,6 +29,7 @@ import { applyLensVerdict } from "./work-driver-lens-verdicts.ts";
 import { runSingleDispatch } from "./work-driver-merged.ts";
 import { DOCTRINE_FILES, type DoctrineDoc, judgePolicy } from "./work-driver-policy.ts";
 import { inlineLensFixPrompt } from "./work-driver-prompts-late.ts";
+
 import { scratchDir } from "./work-driver-workspace.ts";
 import { withUsage } from "./workflow-state-events-usage.ts";
 import { type WorkState, appendEvent } from "./workflow-state.ts";
@@ -476,21 +477,10 @@ export async function runLensFix(
 }
 
 /**
- * The tree the lens gate works in.
- *
- * The review and the fix have to agree on this. They did not: `runLens`
- * resolved a worktree while the fix dispatch passed no `cwd` at all and landed
- * in the Pi process's directory, so the fix was written somewhere the driver
- * never looked. Having one resolver is what keeps them from drifting apart
- * again.
- *
- * #492 — exported so the adversarial gate's lens-fix integration path names
- * the SAME tree it inspects and reports: the cap's handoff text and the
- * smoke tests must point at the worktree the driver actually checked.
- *
- * Falls back to repoRoot when no worktree is recorded — a cycle whose
- * mechanized branch setup fell back develops there, and the fix belongs
- * wherever the work is.
+ * The tree the lens gate works in. The review and the fix must agree on this;
+ * one resolver keeps them from drifting apart. #492 — exported so the
+ * adversarial gate's lens-fix integration path names the SAME tree. Falls
+ * back to repoRoot when no worktree is recorded.
  */
 export function lensWorktree(ctx: DriverContext, state: WorkState): string {
   const wt = state.pipelineState.worktrees ?? {};
