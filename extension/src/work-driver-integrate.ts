@@ -15,6 +15,7 @@ import { orchestrateCherryPick } from "./work-driver-cherry-pick.ts";
 import { stagePorcelainPaths } from "./work-driver-stage.ts";
 import type { WorkState } from "./workflow-state-schema.ts";
 import type { ExecFn } from "./worktree.ts";
+import { sweepBranchHolders } from "./worktree.ts";
 
 /**
  * #289 — serialise every operation that touches repoRoot's checkout, index or
@@ -304,6 +305,10 @@ export async function integrate(execFn: ExecFn, opts: IntegrateOpts): Promise<In
         { cwd: repoRoot, maxBuffer: 256 * 1024 },
       );
     } else {
+      // #654 — a clean worktree holding the branch blocks the checkout
+      // ("fatal: '<branch>' is already used by worktree at '…'"); a dirty
+      // one throws DirtyWorktreeError. Runs under withIntegrationLock.
+      await sweepBranchHolders(execFn, repoRoot, branchName);
       await execFn(`git checkout ${JSON.stringify(branchName)}`, {
         cwd: repoRoot,
         maxBuffer: 256 * 1024,
