@@ -264,6 +264,10 @@ export async function integrate(execFn: ExecFn, opts: IntegrateOpts): Promise<In
     }
 
     // 3. Orchestrated cherry-pick + patch fallback (work-driver-cherry-pick.ts).
+    //    The patch-fallback there additionally rebases a followup-mode lens-fix
+    //    patch onto the branch's CURRENT head before applying it (#654
+    //    task-b), so a fix produced against a stale base no longer
+    //    conflict-parks the cycle.
     const orchResult = await orchestrateCherryPick(execFn, {
       repoRoot,
       branchName,
