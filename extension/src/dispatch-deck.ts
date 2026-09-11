@@ -1,5 +1,5 @@
 /**
- * Live dispatch deck — multi-line widget showing in-flight subagents (#117).
+ * Live dispatch deck. Multi-line widget showing in-flight subagents (#117).
  * Selectable rows (#607 d1): a second widget above the editor with
  * keyboard-selectable rows; selecting a row opens ctx.ui.editor pre-filled
  * with a steer prompt for that job (source tag `deck-ui`).
@@ -10,6 +10,7 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Container, SelectList, type TUI, Text, getKeybindings } from "@earendil-works/pi-tui";
+import * as deckInteractive from "./dispatch-deck-interactive.ts";
 import { type RunningState, emptyRunningState, formatElapsed } from "./progress.ts";
 import { trace } from "./trace.ts";
 
@@ -66,6 +67,9 @@ const CANCEL_SENTINEL: DeckPromptItem = {
 
 let lastPromptItem: DeckPromptItem | undefined;
 let promptWidgetVisible = false;
+// JobIds that have settled (deck entry cleared) — confirmed rows route to
+// the transcript viewer instead of the steer prompt (#607 d2/d3).
+const settledJobs = new Set<string>();
 const entries = new Map<string, DeckEntry>();
 const batches = new Map<string, BatchDeckEntry>();
 let activeCtx: ExtensionContext | undefined;
@@ -137,6 +141,7 @@ export function updateEntry(key: string, state: RunningState): void {
 
 export function clearEntry(key: string): void {
   if (!entries.delete(key)) return;
+  settledJobs.add(key);
   scheduleRender();
   if (entries.size === 0 && batches.size === 0) stopTicker();
 }
@@ -176,22 +181,9 @@ function buildSteerPrompt(e: DeckEntry, now: number): string {
   return `[deck-ui steer → ${e.label}, job ${e.key}]\nReply with a short status update (≤3 lines), then continue. Running ${elapsed}${tool}.`;
 }
 
-/** Deliver a steer to a deck row's job (`deck-ui` source; lazy import avoids circular dep). */
-export function steerDeckEntry(
-  ctx: ExtensionUIContext,
-  key: string,
-  message: string,
-  source: string = DECK_PROMPT_STEER_SOURCE,
-): boolean {
-  import("./dispatch-steer.ts").then(({ steerChild }) => {
-    if (!steerChild(key, message, source as never)) {
-      ctx.notify(
-        `No live stdin for ${key} (job settled or between rounds) — steer not delivered.`,
-        "warning",
-      );
-    }
-  });
-  return true;
+/** Deliver a steer to a deck row's job (`deck-ui` source; routes through the shared steer core). */
+export function steerDeckEntry(ctx: ExtensionUIContext, key: string, message: string): void {
+  void deckInteractive.steerFromDeck(ctx, key, message);
 }
 
 /** Test-only — purge selectable-prompt widget state. */
@@ -348,8 +340,7 @@ function buildDeckPromptFactory(ctx: ExtensionContext) {
     list.handleInput = (data: string): void => {
       if (kb.matches(data, "tui.select.confirm")) {
         const cur = findPromptItemByValue(list.getSelectedItem()?.value ?? "");
-        if (cur && cur.key !== DECK_PROMPT_CANCEL_KEY && cur.steerPrompt)
-          void selectAndSteer(ctx, cur);
+        if (cur && cur.key !== DECK_PROMPT_CANCEL_KEY) void onRowConfirm(ctx, cur.key);
         return;
       }
       orig(data);
@@ -364,10 +355,19 @@ function findPromptItemByValue(value: string): DeckPromptItem | undefined {
     : undefined;
 }
 
-async function selectAndSteer(ctx: ExtensionContext, item: DeckPromptItem): Promise<void> {
-  const text = await ctx.ui.editor(`Steer ${item.label}`, item.steerPrompt);
-  if (text === undefined) return;
-  steerDeckEntry(ctx.ui, item.key, text);
+/** #607 d2/d3. Route a confirmed row: a running job opens the steer prompt; a settled job opens the read-only transcript viewer. */
+async function onRowConfirm(ctx: ExtensionContext, key: string): Promise<void> {
+  const entry = entries.get(key);
+  if (!entry) return;
+  if (!settledJobs.has(key)) {
+    const text = await ctx.ui.editor(`Steer ${entry.label}`, buildSteerPrompt(entry, Date.now()));
+    if (text === undefined) return;
+    steerDeckEntry(ctx.ui, key, text);
+    return;
+  }
+  void deckInteractive
+    .openTranscriptViewer(ctx, entry)
+    .catch((e: Error) => trace(`dispatch-deck: viewer error: ${e.message}`));
 }
 
 function renderPromptWidget(): void {
