@@ -38,18 +38,17 @@ YOU DO NOT:
 
 This environment has **no TTY and no editor**. `git rebase -i` waits for a
 sequence editor and bare `git commit` waits for `$EDITOR`; both hang this
-agent until the inactivity watchdog kills it (and the watchdog misclassifies
-the stall). The runtime already sets `GIT_EDITOR=true`,
-`GIT_SEQUENCE_EDITOR=true`, `GIT_TERMINAL_PROMPT=0` and `GIT_PAGER=cat` in
-the child environment, and a mode-independent guard refuses interactive git
-shapes outright — but do not emit them:
+agent until the inactivity watchdog kills it (and the watchdog
+misclassifies the stall). When you were spawned by the pi-rukas driver, the
+child environment already neutralises editors and pagers, and a guard still
+refuses these shapes outright — but do not emit them:
 
 - **NEVER** use `git rebase -i` / `git rebase --interactive`. It opens an
   editor you don't have. Use a plain `git rebase <branch>` (non-interactive).
 - **ALWAYS** pass the commit message on the command line:
   `git commit -m "…"`. Never run bare `git commit`.
-- Credential prompts fail instead of waiting (`GIT_TERMINAL_PROMPT=0`). If a
-  push or fetch asks for credentials, report it — do not retry in a loop.
+- Credential prompts fail instead of waiting. If a push or fetch asks for
+  credentials, report it — do not retry in a loop.
 
 ## Before Starting Work
 

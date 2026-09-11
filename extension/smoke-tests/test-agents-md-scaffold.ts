@@ -7,7 +7,7 @@
  * create-with-bullets (#697) / 5th-interview-answer (#697) / scaffold-false.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -48,23 +48,9 @@ const BOILERPLATE_IDS = ["minimalist-engineering", "git-workflow", "documentatio
 // Build a minimal fixture so detectFacts finds facts → managed sections render.
 mkdirSync(path.join(tmp, ".github", "workflows"), { recursive: true });
 mkdirSync(path.join(tmp, "src"), { recursive: true });
-writeFileSync(
-  path.join(tmp, "package.json"),
-  JSON.stringify(
-    {
-      name: "fixture",
-      scripts: { test: "vitest", lint: "biome lint", build: "bun run build" },
-      devDependencies: { typescript: "^5.4.0" },
-    },
-    null,
-    2,
-  ),
-);
+writeFileSync(path.join(tmp, "package.json"), JSON.stringify({ name: "fixture", scripts: { test: "vitest", lint: "biome lint", build: "bun run build" }, devDependencies: { typescript: "^5.4.0" } }, null, 2));
 writeFileSync(path.join(tmp, "bun.lock"), "{ lockfileVersion: 1 }");
-writeFileSync(
-  path.join(tmp, ".github", "workflows", "ci.yml"),
-  "name: CI\njobs:\n  test:\n    steps: []\n",
-);
+writeFileSync(path.join(tmp, ".github", "workflows", "ci.yml"), "name: CI\njobs:\n  test:\n    steps: []\n");
 writeFileSync(path.join(tmp, "src", "index.ts"), "export const x = 1;\n");
 
 function mkFs(overrides?: Partial<AgentsMdFs>): AgentsMdFs {
@@ -206,23 +192,32 @@ function seedHeadingFile(root: string, agentsPath: string, fs: AgentsMdFs, extra
 }
 
 // ===================================================== 6. Key load-bearing test: check on scaffolded file
-// The seeded `Commands` row names `vitest`, which the real `check` (PATH-verified)
-// will not find on a dev machine lacking the binary. That PATH-dependent finding
-// is filtered out below (pre-existing fixture coupling).
-
+// The seeded `Commands` row names `vitest`, which the real `check` verifies
+// against the process PATH. Env-control over result-filtering: a PATH shim
+// dir with a `vitest` stub is prepended to PATH for the check, so the
+// unconditional `code === EXIT_CLEAN` assertion holds on every machine.
 {
   rmSync(AGENTS, { force: true });
   const fs = mkFs();
   seedHeadingFile(tmp, AGENTS, fs);
   updateAgent(tmp, AGENTS, fs, { scaffold: true });
-  const checkRes = checkAgent(tmp, AGENTS, {}, fs);
-  const f = (checkRes.check?.findings ?? []).filter((x) => x.kind !== "missing-command");
-  assert(checkRes.check?.code === EXIT_CLEAN || f.length === 0, `check: no non-PATH findings (code ${checkRes.check?.code})`);
-  assert(f.length === 0, `check: zero non-PATH findings (got ${f.length})`);
+  const shim = path.join(tmp, "bin");
+  mkdirSync(shim, { recursive: true });
+  writeFileSync(path.join(shim, "vitest"), "#!/bin/sh\nexit 0\n");
+  chmodSync(path.join(shim, "vitest"), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${shim}:${savedPath}`;
+  try {
+    const checkRes = checkAgent(tmp, AGENTS, {}, fs);
+    const findings = checkRes.check?.findings ?? [];
+    assert(checkRes.check?.code === EXIT_CLEAN, `check on scaffolded file: exit 0 (got ${checkRes.check?.code})`);
+    assert(findings.length === 0, `check: zero findings (got ${findings.length})`);
+  } finally {
+    process.env.PATH = savedPath;
+  }
+  rmSync(shim, { recursive: true, force: true });
 }
-
 // ===================================================== 7. wrap + scaffold
-
 {
   // Brownfield file: no managed headings.
   writeFileSync(AGENTS, "# My Project\n\n## Overview\n\nJust a project.\n");

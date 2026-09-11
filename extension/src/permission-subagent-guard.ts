@@ -225,7 +225,7 @@ function registerDestructiveGitGuard(pi: ExtensionAPI): void {
       trace(`subagent-guard: BLOCKED interactive git — ${interactive}`);
       return {
         block: true,
-        reason: `Refused: \`${interactive}\` waits on an editor or terminal prompt this child can never answer — it will hang until the inactivity watchdog kills it.\n\nNon-interactive alternatives: commit with the message on the line (\`git commit -m '…'\`); rewrite history non-interactively (\`git rebase main\`); for rebases that need reordering, use \`git rebase --interactive\` only on the operator's machine, not here.`,
+        reason: `Refused: \`${interactive}\` waits on an editor or terminal prompt this child can never answer — it will hang until the inactivity watchdog kills it.\n\nNon-interactive alternatives: commit with the message on the line (\`git commit -m '…'\`); rewrite history non-interactively (\`git rebase <branch>\`); if a rebase is already in flight, drive it with \`git rebase --abort\` / \`--continue\` / \`--skip\`. Any rebase that needs reordering runs on the operator's machine — not here.`,
       };
     }
     const offending = discardsUncommittedWork(command);

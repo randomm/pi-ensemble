@@ -409,14 +409,14 @@ export function discardsUncommittedWork(command: string): string | undefined {
  * Agent children have no TTY and no editor. `git rebase -i` waits for a
  * sequence editor and a bare `git commit` waits for $EDITOR; each parks the
  * child until the inactivity watchdog kills it and misclassifies the stall
- * (cross-industry: Claude Code #158/#27136, Codex #6411, Aider #185,
- * OpenHands #3660, Cline #8582). The env-var layer (GIT_EDITOR=true,
- * GIT_SEQUENCE_EDITOR=true, GIT_TERMINAL_PROMPT=0, GIT_PAGER=cat in spawn.ts
- * childEnv) is the primary defense; this predicate is the mode-independent
- * catch ahead of it, mirroring `discardsUncommittedWork` — scan-not-anchor +
- * `stripQuotedSegments`, so `git -C <path> rebase -i` is caught while
- * `echo "rebase -i"` is not. Deliberately narrow: commit is refused ONLY
- * when it supplies no message; `git rebase` without `-i` stays allowed.
+ * (Claude Code #158/#27136, Codex #6411, Aider #185, OpenHands #3660, Cline
+ * #8582). The env-var layer (GIT_EDITOR=true, GIT_SEQUENCE_EDITOR=true,
+ * GIT_TERMINAL_PROMPT=0, GIT_PAGER=cat in spawn.ts childEnv) is the primary
+ * defense; this predicate is the catch ahead of it inside
+ * `registerDestructiveGitGuard` (ahead of the trust/sandbox early-returns —
+ * in trust-mode children the env vars are the effective defense), mirroring
+ * `discardsUncommittedWork`: scan-not-anchor + `stripQuotedSegments`. Narrow:
+ * commit is refused ONLY when it supplies no message.
  */
 export function rejectsInteractiveGit(command: string): string | undefined {
   const c = stripQuotedSegments(command);

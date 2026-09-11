@@ -134,14 +134,15 @@ for (const cmd of [
     /GIT_TERMINAL_PROMPT = "0"/.test(src),
     "canary: credential prompts fail instead of waiting",
   );
-  // The env must win over the inherited host env: the assignment sits after
-  // the process.env spread in childEnv construction.
+  // Format-pinned canary (NOT a behavioural assertion): the assignments must
+  // remain LEXICALLY AFTER the `...process.env` spread so they win over
+  // inherited host env. It pins source layout (the spread literal itself), so
+  // a cosmetic edit to childEnv construction must consciously update this
+  // test. The behavioural contract (env wins) is proven by the value
+  // assertions above plus the guard's own test cases.
   const spreadIdx = src.indexOf("{ ...process.env, PI_ENSEMBLE_ROLE: spec.role }");
   const gitEditorIdx = src.indexOf('GIT_EDITOR = "true"');
-  assert(
-    spreadIdx > 0 && gitEditorIdx > spreadIdx,
-    "canary: the GIT_* assignments come AFTER the process.env spread, so they win over inherited host env",
-  );
+  assert(spreadIdx > 0 && gitEditorIdx > spreadIdx, "canary: the GIT_* assignments come AFTER the process.env spread, so they win over inherited host env");
 }
 
 // ------------------------------------------------------------ it catches
