@@ -12,6 +12,7 @@
 import { trace } from "./trace.ts";
 import { orchestrateCherryPick } from "./work-driver-cherry-pick.js";
 import type { DriverContext } from "./work-driver-context.js";
+import { extractAttributedTail } from "./work-driver-exec-error.ts";
 
 export async function runConsolidatedVerify(
   execFn: NonNullable<DriverContext["verifyExecFn"]>,
@@ -135,9 +136,11 @@ export async function runConsolidatedVerify(
     const applied =
       orchResult.cherryApplied.length > 0 ? orchResult.cherryApplied : orchResult.patchApplied;
     if (verifyFailure !== undefined) {
+      // #723 — same attribution anchor as formatExecError: a bare `.slice(-800)`
+      // can splice a passing sub-command's tail onto a later failure.
       return {
         status: "failed",
-        detail: verifyFailure.slice(-800) || "verify command exited non-zero",
+        detail: extractAttributedTail(verifyFailure, 800) || "verify command exited non-zero",
       };
     }
     return { status: "passed", applied };

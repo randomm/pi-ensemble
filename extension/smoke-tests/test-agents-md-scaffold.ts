@@ -216,6 +216,23 @@ function seedHeadingFile(root: string, agentsPath: string, fs: AgentsMdFs, extra
     process.env.PATH = savedPath;
   }
   rmSync(shim, { recursive: true, force: true });
+
+  // #723 negative case: with NO shim on PATH (and no other resolvable
+  // `vitest`), commandAvailable's fix must not silently mask a genuinely
+  // missing gate command — the missing-command finding must still fire.
+  const barePath = `${path.join(tmp, "no-such-bin-dir")}`;
+  const savedPath2 = process.env.PATH;
+  process.env.PATH = barePath;
+  try {
+    const checkRes2 = checkAgent(tmp, AGENTS, {}, fs);
+    const findings2 = checkRes2.check?.findings ?? [];
+    assert(
+      findings2.some((f) => f.kind === "missing-command"),
+      "check with genuinely-missing command: missing-command finding still fires",
+    );
+  } finally {
+    process.env.PATH = savedPath2;
+  }
 }
 // ===================================================== 7. wrap + scaffold
 {
