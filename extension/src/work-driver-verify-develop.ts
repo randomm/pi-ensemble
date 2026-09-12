@@ -72,8 +72,15 @@ function formatExecError(
   timeoutMsg: string,
   failMsg: string,
 ): string {
-  const tail = extractAttributedTail(`${e.stdout ?? ""}\n${e.stderr ?? ""}`, 1500);
-  return e.killed ? timeoutMsg : `${failMsg}: ${tail || e.message?.slice(0, 300)}`;
+  const { tail, attributed } = extractAttributedTail(`${e.stdout ?? ""}\n${e.stderr ?? ""}`, 1500);
+  if (!attributed && tail)
+    trace("work-driver: exec error tail is unattributed (no FAILED: marker found)");
+  const suffix = tail
+    ? attributed
+      ? tail
+      : `${tail} (unattributed — best-effort tail)`
+    : undefined;
+  return e.killed ? timeoutMsg : `${failMsg}: ${suffix ?? e.message?.slice(0, 300)}`;
 }
 
 /**

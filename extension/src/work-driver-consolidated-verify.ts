@@ -138,10 +138,16 @@ export async function runConsolidatedVerify(
     if (verifyFailure !== undefined) {
       // #723 — same attribution anchor as formatExecError: a bare `.slice(-800)`
       // can splice a passing sub-command's tail onto a later failure.
-      return {
-        status: "failed",
-        detail: extractAttributedTail(verifyFailure, 800) || "verify command exited non-zero",
-      };
+      const { tail, attributed } = extractAttributedTail(verifyFailure, 800);
+      if (!attributed && tail) {
+        trace("work-driver: consolidated verify tail is unattributed (no FAILED: marker found)");
+      }
+      const detail = tail
+        ? attributed
+          ? tail
+          : `${tail} (unattributed — best-effort tail)`
+        : "verify command exited non-zero";
+      return { status: "failed", detail };
     }
     return { status: "passed", applied };
   } catch (err) {
